@@ -1,14 +1,4 @@
-"""Provides the parallel k-means frame-extraction pipeline that prepares a DeepLabCut project's training frames.
-
-Notes:
-    The pipeline runs DeepLabCut's own k-means frame selection
-    (``deeplabcut.extract_frames(mode="automatic", algo="kmeans")``) with one worker process per video, so the
-    project's videos are clustered concurrently instead of one-after-another. Each worker calls the installed
-    DeepLabCut API with a single-video list, so the output is identical to a serial DeepLabCut run; only the
-    scheduling and CPU placement change. Everything else (which videos, the per-video crop boxes, the number of
-    frames to pick, and the start and stop bounds) is read from the project's config.yaml, so each run matches the
-    project, and re-runs are resumable.
-"""
+"""Provides the parallel k-means frame-extraction pipeline that prepares a DeepLabCut project's training frames."""
 
 import os
 import sys
@@ -28,6 +18,15 @@ import deeplabcut.utils.frameselectiontools as frame_selection_tools
 
 from .progress import AggregateBar, make_progress_reporter
 from .cpu_allocation import DEFAULT_RESERVE_CORES, plan_core_allocation
+from .video_sampling import VideoSamplingPlan, plan_video_sampling
+
+_REEXTRACTION_ARTIFACT_PATTERNS: tuple[str, ...] = (
+    "img*.png",
+    "CollectedData_*.h5",
+    "CollectedData_*.csv",
+    "MachineLabelsRefine.*",
+)
+"""The labeled-data file patterns removed before a video is re-extracted, covering both frames and their labels."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +53,10 @@ class FrameExtractionSummary:
     """The total number of CPU cores available on the machine."""
     frames_to_cluster: int
     """The total number of frames that were read and clustered across all videos."""
+    existing_frames: int = 0
+    """The number of frames already extracted across the selection before this run, reported in sampling mode."""
+    target_frames: int = -1
+    """The requested total-frame budget when sampling videos, or -1 when budgeted sampling was disabled."""
     errors: tuple[tuple[str, str], ...] = ()
     """The ``(video_path, traceback)`` pairs for every video that failed to extract."""
 
@@ -76,9 +79,12 @@ def extract_frames_kmeans(
     cores_per_worker: int = -1,
     reserve_cores: int = DEFAULT_RESERVE_CORES,
     num_frames: int = -1,
+    total_frames: int = -1,
+    seed: int | None = None,
     resize_width: int = 30,
     color: bool = False,
     overwrite: bool = False,
+    reset: bool = False,
     path_filters: tuple[str, ...] = (),
     heartbeat: float = 30.0,
     display_progress: bool = True,
@@ -90,11 +96,20 @@ def extract_frames_kmeans(
     directory already contains frames are skipped unless ``overwrite`` is set. A single bad video is recorded in the
     returned summary rather than aborting the run.
 
+    When ``total_frames`` is set, the run samples a random subset of not-yet-extracted videos sized to reach that
+    project-wide frame budget, so the full project can be added once and extraction grows coverage across repeated
+    passes without manual selection. When the existing frames already meet the budget, the run extracts nothing and
+    warns; raising ``total_frames`` or using ``reset`` grows the set further.
+
     Notes:
         The pipeline uses the spawn multiprocessing start method on every platform for reproducible behavior, so a
         programmatic caller must guard the call with ``if __name__ == "__main__":``. The installed console-script
         entry point is already guarded. CPU-affinity pinning is applied on Linux and Windows; macOS exposes no
         affinity API, so its workers run unpinned but still in parallel.
+
+        Because k-means selects different frame indices on each run, re-extraction writes different image filenames
+        and orphans the existing labels, so ``overwrite`` and ``reset`` both delete a video's ``CollectedData`` labels
+        alongside its frames. The ``seed`` controls only the random choice of videos, not the frames within a video.
 
     Args:
         config_path: The path to the DeepLabCut project's config.yaml.
@@ -104,9 +119,18 @@ def extract_frames_kmeans(
         reserve_cores: The number of CPU cores to leave free for other tasks.
         num_frames: The number of frames to keep per video, overriding ``numframes2pick`` in config.yaml. Set to -1
             to use the value already stored in the configuration file.
+        total_frames: The total number of frames the project should hold, reached by randomly sampling not-yet-
+            extracted videos. Set to -1 to extract every selected video instead of sampling toward a budget.
+        seed: The seed for the random video sampling. Set to None to draw a different subset each run, or to an
+            integer to make the selection reproducible.
         resize_width: The downsample width applied before clustering, passed to DeepLabCut as ``cluster_resizewidth``.
         color: Whether to cluster on color channels instead of grayscale.
-        overwrite: Whether to re-extract videos whose labeled-data directory already contains frames.
+        overwrite: Whether to re-extract videos whose labeled-data directory already contains frames. Re-extraction
+            deletes the existing ``img*.png`` frames in each affected directory and the matching ``CollectedData``
+            labels, which the new frames would otherwise orphan. Mutually exclusive with ``reset``.
+        reset: Whether to discard all extracted frames and their labels across the selection and re-extract from
+            scratch. This permanently deletes the extracted frames and any labels in every selected video folder.
+            Mutually exclusive with ``overwrite``.
         path_filters: The substrings used to restrict the run to videos whose path contains any of them. An empty
             tuple selects every video in the project.
         heartbeat: The minimum interval, in seconds, between progress lines when the output is not a TTY.
@@ -115,13 +139,20 @@ def extract_frames_kmeans(
 
     Returns:
         A FrameExtractionSummary describing how many videos were extracted, skipped, and failed, alongside the
-        resolved core-allocation plan.
+        resolved core-allocation plan and, in sampling mode, the existing and target frame counts.
 
     Raises:
-        ValueError: If ``num_frames`` is set below one (other than the -1 sentinel), or if no videos in config.yaml
-            match ``path_filters``.
+        ValueError: If ``num_frames`` or ``total_frames`` is set below one (other than the -1 sentinel), if
+            ``overwrite`` and ``reset`` are both set, if budgeted sampling is requested without a valid
+            ``numframes2pick``, or if no videos in config.yaml match ``path_filters``.
     """
     config_path = config_path.resolve()
+    if overwrite and reset:
+        message = "Unable to extract frames. The overwrite and reset options are mutually exclusive."
+        raise ValueError(message)
+    if total_frames != -1 and total_frames < 1:
+        message = f"Unable to extract frames. The total frame budget must be at least one, but got {total_frames}."
+        raise ValueError(message)
     yaml = YAML()
     configuration = yaml.load(config_path.read_text())
     start = float(configuration.get("start", 0))
@@ -156,6 +187,52 @@ def extract_frames_kmeans(
     if not videos:
         message = "Unable to extract frames. No videos in the project's config.yaml matched the requested selection."
         raise ValueError(message)
+
+    project_directory_path = config_path.parent
+    if reset:
+        cleared = sum(
+            1 for video in videos if any((project_directory_path / "labeled-data" / Path(video).stem).glob("img*.png"))
+        )
+        sys.stderr.write(
+            f"WARNING: --reset is deleting all extracted frames and labels from {cleared} video folder(s).\n"
+        )
+        sys.stderr.flush()
+        for video in videos:
+            _clear_extracted_data(output_directory=project_directory_path / "labeled-data" / Path(video).stem)
+
+    existing_frames = 0
+    target_frames = -1
+    if total_frames != -1:
+        frames_per_video_count = configuration.get("numframes2pick")
+        if not isinstance(frames_per_video_count, int) or frames_per_video_count < 1:
+            message = (
+                "Unable to sample videos for a frame budget. The project's numframes2pick must be a positive "
+                f"integer, but got {frames_per_video_count!r}. Pass num_frames to set it."
+            )
+            raise ValueError(message)
+        plan = plan_video_sampling(
+            videos=videos,
+            extracted_frame_counts=_count_extracted_frames(videos=videos, project_directory=project_directory_path),
+            frames_per_video=frames_per_video_count,
+            total_frames=total_frames,
+            seed=seed,
+        )
+        _report_sampling_plan(plan=plan)
+        if not plan.selected:
+            return FrameExtractionSummary(
+                extracted=0,
+                skipped=0,
+                total=0,
+                workers=0,
+                cores_used=0,
+                core_count=os.cpu_count() or 1,
+                frames_to_cluster=0,
+                existing_frames=plan.existing_frames,
+                target_frames=plan.target_frames,
+            )
+        videos = list(plan.selected)
+        existing_frames = plan.existing_frames
+        target_frames = plan.target_frames
 
     core_count = os.cpu_count() or 1
     workers, core_sets = plan_core_allocation(
@@ -239,6 +316,8 @@ def extract_frames_kmeans(
         cores_used=cores_used,
         core_count=core_count,
         frames_to_cluster=frames_to_cluster,
+        existing_frames=existing_frames,
+        target_frames=target_frames,
         errors=tuple(errors),
     )
 
@@ -280,6 +359,68 @@ def _report_plan(
         f"{frames_to_cluster:,} frames to cluster | config={config_path}\n"
     )
     sys.stderr.flush()
+
+
+def _report_sampling_plan(plan: VideoSamplingPlan) -> None:
+    """Writes the budgeted-sampling outcome, including any budget warnings, to the standard error stream.
+
+    Args:
+        plan: The sampling plan whose selection and budget flags are reported.
+    """
+    if plan.no_growth:
+        sys.stderr.write(
+            f"WARNING: the project already holds {plan.existing_frames:,} frames, which meets the requested total "
+            f"of {plan.target_frames:,}. Nothing will be extracted. Raise the total frame budget to grow the set, "
+            f"or use reset to start over.\n"
+        )
+    elif not plan.selected:
+        sys.stderr.write(
+            "WARNING: every selected video already has extracted frames, so none remain to sample. Use overwrite "
+            "or reset to re-extract from existing videos.\n"
+        )
+    elif plan.target_unreachable:
+        sys.stderr.write(
+            f"WARNING: too few un-extracted videos remain to reach {plan.target_frames:,} frames. Sampling all "
+            f"{len(plan.selected)} remaining video(s) for a projected {plan.projected_frames:,} frames.\n"
+        )
+    else:
+        sys.stderr.write(
+            f"sampling {len(plan.selected)} video(s) | {plan.existing_frames:,} existing -> "
+            f"{plan.projected_frames:,} projected frames (target {plan.target_frames:,})\n"
+        )
+    sys.stderr.flush()
+
+
+def _count_extracted_frames(videos: list[str], project_directory: Path) -> dict[str, int]:
+    """Counts the frames already extracted for each video, keyed by the video's path.
+
+    Args:
+        videos: The candidate video paths to inspect.
+        project_directory: The DeepLabCut project directory that holds the ``labeled-data`` tree.
+
+    Returns:
+        A mapping of video path to the number of ``img*.png`` frames currently in its labeled-data directory.
+    """
+    counts: dict[str, int] = {}
+    for video in videos:
+        directory = project_directory / "labeled-data" / Path(video).stem
+        counts[video] = len(list(directory.glob("img*.png"))) if directory.exists() else 0
+    return counts
+
+
+def _clear_extracted_data(output_directory: Path) -> None:
+    """Deletes a video's extracted frames and the labels they would orphan from its labeled-data directory.
+
+    Re-extraction selects different frame indices and therefore writes different image filenames, so the existing
+    ``CollectedData`` label rows would reference deleted images. The label and refinement files are removed alongside
+    the frames to avoid leaving a dataset that mixes valid, dangling, and unlabeled entries.
+
+    Args:
+        output_directory: The ``labeled-data/<video>`` directory whose extracted frames and labels are removed.
+    """
+    for pattern in _REEXTRACTION_ARTIFACT_PATTERNS:
+        for target in output_directory.glob(pattern):
+            target.unlink()
 
 
 def _count_clustering_frames(videos: list[str], start: float, stop: float, step: int) -> dict[int, int]:
@@ -331,8 +472,8 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
         existing_frames = sorted(output_directory.glob("img*.png")) if output_directory.exists() else []
         if existing_frames and not overwrite:
             return video_path, len(existing_frames), "skipped"
-        for frame_path in existing_frames:
-            frame_path.unlink()
+        # On overwrite, drop the stale frames and the labels they would orphan before re-extracting.
+        _clear_extracted_data(output_directory=output_directory)
 
         # Redirects DeepLabCut's internal tqdm progress to the parent's aggregate bar via the shared queue.
         frame_selection_tools.tqdm = make_progress_reporter(

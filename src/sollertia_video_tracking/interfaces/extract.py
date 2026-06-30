@@ -64,6 +64,25 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "value already stored in the configuration file.",
 )
 @click.option(
+    "-t",
+    "--total-frames",
+    "total_frames",
+    type=int,
+    default=-1,
+    show_default=True,
+    help="The total number of frames to hold across the project. When set, a random subset of not-yet-extracted "
+    "videos is sampled to reach this budget (each contributing --num-frames frames), growing coverage on repeated "
+    "runs. Set to -1 to extract every selected video instead.",
+)
+@click.option(
+    "--seed",
+    "seed",
+    type=int,
+    default=None,
+    help="The seed for the random video subset draw. Omit for a different random subset each run, or set it to make "
+    "the selection reproducible.",
+)
+@click.option(
     "--resize-width",
     "resize_width",
     default=30,
@@ -80,7 +99,16 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 @click.option(
     "--overwrite",
     is_flag=True,
-    help="Determines whether to re-extract videos whose labeled-data directory already contains frames.",
+    help="Determines whether to re-extract videos whose labeled-data directory already contains frames. WARNING: "
+    "this deletes the existing extracted frames AND their labels in each re-extracted directory, which the new "
+    "frames would otherwise orphan. Mutually exclusive with --reset.",
+)
+@click.option(
+    "--reset",
+    is_flag=True,
+    help="Determines whether to discard ALL extracted frames and their labels in the selection and re-extract from "
+    "scratch. WARNING: this permanently deletes the extracted frames and any labels in every selected video folder. "
+    "Mutually exclusive with --overwrite.",
 )
 @click.option(
     "--only",
@@ -111,19 +139,23 @@ def extract_frames_command(
     cores_per_worker: int,
     reserve_cores: int,
     num_frames: int,
+    total_frames: int,
+    seed: int | None,
     resize_width: int,
     path_filters: tuple[str, ...],
     heartbeat: float,
     *,
     color: bool,
     overwrite: bool,
+    reset: bool,
     display_progress: bool,
 ) -> None:
     """Selects DeepLabCut training frames from a project's videos by clustering them in parallel.
 
     CONFIG is the path to the DeepLabCut project's config.yaml. Each video is clustered in its own worker process
     pinned to a disjoint block of CPU cores, and videos whose labeled-data directory already contains frames are
-    skipped unless ``--overwrite`` is given.
+    skipped unless ``--overwrite`` is given. Passing ``--total-frames`` instead samples a random subset of
+    not-yet-extracted videos sized to reach that project-wide frame budget, growing coverage across repeated runs.
     """
     try:
         summary = extract_frames_kmeans(
@@ -133,9 +165,12 @@ def extract_frames_command(
             cores_per_worker=cores_per_worker,
             reserve_cores=reserve_cores,
             num_frames=num_frames,
+            total_frames=total_frames,
+            seed=seed,
             resize_width=resize_width,
             color=color,
             overwrite=overwrite,
+            reset=reset,
             path_filters=path_filters,
             heartbeat=heartbeat,
             display_progress=display_progress,

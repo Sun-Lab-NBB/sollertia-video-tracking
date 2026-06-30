@@ -1,11 +1,4 @@
-"""Provides the CPU-core allocation logic that distributes parallel frame-extraction workers across the machine.
-
-Notes:
-    DeepLabCut reads a single video's frames in one Python loop, but each frame's HEVC / H264 decode is itself
-    multithreaded and keeps several cores busy. A single video's serial loop cannot be sped up, so throughput comes
-    from decoding many videos at once. This module partitions the usable cores into disjoint blocks, one per worker,
-    so the pipeline can pin each worker to its own block and saturate the machine without oversubscribing it.
-"""
+"""Provides the CPU-core allocation logic that distributes parallel frame-extraction workers across the machine."""
 
 DEFAULT_RESERVE_CORES: int = 4
 """The number of CPU cores left free by default for other work while frame extraction is running."""
@@ -28,6 +21,11 @@ def plan_core_allocation(
     each worker receives at least a saturating core budget rather than spreading the cores thin across more, throttled
     workers; any remaining videos run in later waves. Explicit worker or core counts are honored as given and may
     overlap only within the usable band, leaving the reserved cores free regardless.
+
+    Notes:
+        DeepLabCut reads a single video's frames in one serial Python loop that cannot be sped up, but each frame's
+        HEVC / H264 decode is itself multithreaded and keeps several cores busy. Throughput therefore comes from
+        decoding many videos at once rather than from accelerating any single video.
 
     Args:
         video_count: The number of videos that will be processed.

@@ -1,10 +1,4 @@
-"""Provides the aggregate progress bar and the DeepLabCut tqdm shim used to report frame-extraction progress.
-
-Notes:
-    Each worker streams per-video frame counts to the parent process over a queue, and a single renderer thread in the
-    parent sums them into one smooth bar. On a TTY the bar updates in place with carriage returns; when the output is
-    redirected to a file it prints one newline-terminated line per heartbeat, keeping cluster logs greppable.
-"""
+"""Provides the aggregate progress bar and the DeepLabCut tqdm shim used to report frame-extraction progress."""
 
 import sys
 import time
