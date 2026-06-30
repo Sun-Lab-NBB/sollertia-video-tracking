@@ -1,0 +1,214 @@
+# Defines the build system used for the project.
+[build-system]
+requires = ["hatchling>=1,<2"]
+build-backend = "hatchling.build"
+
+# Project metadata section. Provides the general ID information about the project.
+[project]
+name = "sollertia-video-tracking"
+version = "0.1.0"
+description = "Provides assets for designing and deploying DeepLabCut video tracking pipelines within the Sollertia platform."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+# DeepLabCut 3.x supports Python 3.10-3.12 and the numpy 1.x series only, which is the binding constraint for this
+# bridge. The library therefore targets the latest DeepLabCut-supported Python version, isolated from the numpy-2 /
+# Python-3.14 environment used by the rest of the Sollertia stack.
+requires-python = ">=3.12,<3.13"
+authors = [
+    { name = "Ivan Kondratyev" },
+]
+maintainers = [
+    { name = "Ivan Kondratyev", email = "ik278@cornell.edu" },
+]
+
+# The list of keywords that describe the project.
+keywords = ["sollertia", "deeplabcut", "pose-estimation", "video-tracking"]
+
+# Additional classifiers used by PIP to group repositories.
+classifiers = [
+    # Development status
+    "Development Status :: 4 - Beta",
+    # Intended audience and project topic
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    # Supported Python Versions
+    "Programming Language :: Python :: 3.12",
+    # Supported Operating Systems
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    # Typing
+    "Typing :: Typed",
+]
+
+# Runtime project dependencies.
+dependencies = [
+    # Pose Estimation (DeepLabCut 3.x and its PyTorch backend). DeepLabCut pins numpy<2 and supports Python 3.10-3.12,
+    # so this bridge runs in its own environment and communicates with the rest of the Sollertia stack across the CLI
+    # boundary rather than by direct import. torchvision is resolved transitively to match the installed torch build.
+    "deeplabcut>=3,<4",
+    "torch>=2,<3",
+
+    # Numerical (pinned to the 1.x series required by DeepLabCut)
+    "numpy>=1.26,<2",
+
+    # Video Decoding (the headless build avoids pulling GUI libraries onto compute servers)
+    "opencv-python-headless>=4,<5",
+
+    # Cross-Platform CPU Affinity (pins each extraction worker to a disjoint core block on Linux and Windows)
+    "psutil>=7,<8",
+
+    # Project Configuration Files
+    "ruamel.yaml>=0.18,<1",
+
+    # Command-Line Interface
+    "click>=8,<9",
+]
+
+[project.urls]
+Homepage = "https://github.com/Sun-Lab-NBB/sollertia-video-tracking"
+Documentation = "https://sollertia-video-tracking-api-docs.netlify.app/"
+
+# CLI interface. A single root command exposes the DeepLabCut bridge subcommands.
+[project.scripts]
+slvt = "sollertia_video_tracking.interfaces.entry_points:slvt_cli"
+
+# Development dependencies (PEP 735). Not published to PyPI.
+[dependency-groups]
+dev = [
+    # Tox
+    "tox>=4,<5",
+    "uv>=0,<1",
+    "tox-uv>=1,<2",
+
+    # Development Automation
+    "ataraxis-automation>=8,<9",
+]
+
+# Specifies files that should not be included in the source-code distribution but are also not part of gitignore.
+[tool.hatch.build.targets.sdist]
+exclude = [".github", "recipe"]
+
+# Specifies the library structure.
+[tool.hatch.build.targets.wheel]
+packages = ["src/sollertia_video_tracking"]
+
+# Ruff Configuration.
+[tool.ruff]
+line-length = 120         # Deviates from the commonly used '80' standard.
+indent-width = 4          # Same as black, indents are 4 spaces
+target-version = "py312"  # Targets the lowest supported version of python
+src = ["src"]             # The name of the root source code directory
+
+# Excludes 'service' .py files, such as the sphinx configuration file, from linting.
+extend-exclude = ["conf.py"]
+
+# Checks for all potential violations and uses the exclusions below to target-disable specific ones.
+lint.select = ["ALL"]
+
+# General ignore directives
+lint.ignore = [
+    "W291",    # Conflicts with docstring formatting
+    "C901",    # Sometimes complex functions are necessary
+    "PLR0913", # Sometimes complex functions are necessary
+    "PLR0912", # Sometimes complex functions are necessary
+    "PLR0915", # Sometimes complex type definitions are necessary
+    "PLR0911", # Sometimes complex return graphs are necessary
+    "TID252",  # Relative imports are required by the project's import management strategy
+    "COM812",  # Conflicts with the formatter
+    "ISC001",  # Conflicts with the formatter
+    "PT001",   # https://github.com/astral-sh/ruff/issues/8796#issuecomment-182590771
+    "PT023",   # https://github.com/astral-sh/ruff/issues/8796#issuecomment-1825907715
+    "D107",    # __init__ is documented inside the main class docstring where applicable
+    "D205",    # Bugs out for file descriptions
+    "PLW0603", # While global statement usage is not ideal, it streamlines certain development patterns
+    "ANN401",  # The 'Any' type is required for multiprocessing proxy objects and the DeepLabCut tqdm shim signature
+]
+
+# Additional formatting configurations
+[tool.ruff.format]
+quote-style = "double"             # Uses double quotes for strings
+indent-style = "space"             # Uses space for indents
+skip-magic-trailing-comma = false  # Like black, ignores trailing commas
+line-ending = "auto"               # Automatically detects and standardizes line-ending character
+
+# Docstrings and comments' line length
+[tool.ruff.lint.pycodestyle]
+max-doc-length = 120  # Maximum documentation line length, the same as code
+
+# Docstrings style
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+# Ignores unused variadic arguments, which are required by the DeepLabCut tqdm shim signature.
+[tool.ruff.lint.flake8-unused-arguments]
+ignore-variadic-names = true
+
+# Additional, file-specific 'ignore' directives
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py" = [
+    "F401", # Imported but unused
+    "F403", # Wildcard imports
+]
+
+[tool.ruff.lint.isort]
+case-sensitive = true              # Takes case into account when sorting imports
+combine-as-imports = true          # Combines multiple "as" imports for the same package
+force-wrap-aliases = true          # Wraps "as" imports so that each uses a separate line
+force-sort-within-sections = true  # Forces "as" and "from" imports for the same package to be close
+length-sort = true                 # Places shorter imports first
+
+# MyPy configuration section.
+[tool.mypy]
+disallow_untyped_defs = true # Enforces function annotation
+warn_unused_ignores = true   # Warns against using 'type: ignore' for packages with type stubs
+
+exclude = [
+    "sollertia-video-tracking-\\d+",  # Ignores temporary folder created by setuptools when building the sdist
+    "venv.*/",                        # Ignores virtual environments
+    "build/",                         # Ignores the sdist directory
+    "dist/",                          # Ignores the wheel directory
+    "docs/",                          # Ignores the sphinx / doxygen directory
+    "stubs/",                         # Ignores stubs directory (stubgen output target)
+    "recipe/",                        # Ignores recipe directory (grayskull output target)
+    "tests/",                         # Ignores the test directory.
+]
+
+# DeepLabCut, OpenCV, and ruamel.yaml do not ship type information, so their imports are exempt from the missing-stub
+# error. The project's own code remains fully type-checked.
+[[tool.mypy.overrides]]
+module = [
+    "deeplabcut.*",
+    "cv2",
+    "psutil",
+    "ruamel.*",
+]
+ignore_missing_imports = true
+
+# This is used by the 'test' tox tasks to aggregate coverage data produced during pytest runtimes.
+[tool.coverage.paths]
+
+# Maps coverage measured in site-packages to source files in src
+source = ["src/", ".tox/*/lib/python*/site-packages/"]
+
+# Same as above, specifies the output directory for the coverage .html report
+[tool.coverage.html]
+directory = "reports/coverage_html"
+
+# Specifies additional ignore directives
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "def __del__",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "pass",
+]
+
+# Enables parallel coverage collection across the frame-extraction worker processes and the renderer thread.
+[tool.coverage.run]
+parallel = true
+concurrency = ["multiprocessing", "thread"]

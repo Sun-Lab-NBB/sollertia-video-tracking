@@ -1,2 +1,217 @@
 # sollertia-video-tracking
-Provides assets for designing and deploying DeepLabCut video tracking pipelines within sollertia platform.
+
+Provides assets for designing and deploying DeepLabCut video tracking pipelines within the Sollertia platform.
+
+![PyPI - Version](https://img.shields.io/pypi/v/sollertia-video-tracking)
+![PyPI - Python Version](https://img.shields.io/pypi/pyversions/sollertia-video-tracking)
+[![uv](https://tinyurl.com/uvbadge)](https://github.com/astral-sh/uv)
+[![Ruff](https://tinyurl.com/ruffbadge)](https://github.com/astral-sh/ruff)
+![type-checked: mypy](https://img.shields.io/badge/type--checked-mypy-blue?style=flat-square&logo=python)
+![PyPI - License](https://img.shields.io/pypi/l/sollertia-video-tracking)
+![PyPI - Status](https://img.shields.io/pypi/status/sollertia-video-tracking)
+![PyPI - Wheel](https://img.shields.io/pypi/wheel/sollertia-video-tracking)
+
+___
+
+## Detailed Description
+
+This library packages the DeepLabCut-side tooling used to build animal pose-tracking pipelines for the recordings
+produced by the Sollertia data acquisition platform. It exposes a unified `slvt` command-line interface backed by a
+reusable logic core that expands on the base DeepLabCut functionality to scale it to high-performance compute clusters
+and unique constraints of working with large data projects. Because DeepLabCut requires the numpy 1.x series and 
+Python 3.12 or earlier, this library runs in its own environment and is driven by the rest of the Sollertia stack 
+across the command-line boundary rather than by direct import.
+
+___
+
+## Features
+
+- Supports Linux.
+- Provides a unified `slvt` command-line interface backed by a reusable, import-friendly logic core.
+- Extracts DeepLabCut training frames in parallel, decoding one video per worker process pinned to a disjoint block of
+  CPU cores.
+- Renders a single aggregate progress bar across all workers, with a greppable heartbeat mode for redirected logs.
+- Apache 2.0 License.
+
+___
+
+## Table of Contents
+
+- [Dependencies](#dependencies)
+- [Installation](#installation)
+- [Usage](#usage)
+  - [CLI Commands](#cli-commands)
+  - [Python API](#python-api)
+- [API Documentation](#api-documentation)
+- [Developers](#developers)
+- [Versioning](#versioning)
+- [Authors](#authors)
+- [License](#license)
+- [Acknowledgments](#acknowledgments)
+
+___
+
+## Dependencies
+
+This library depends on [DeepLabCut](https://github.com/DeepLabCut/DeepLabCut) 3.x and its
+[PyTorch](https://pytorch.org/) backend. Because DeepLabCut pins the numpy 1.x series and supports only Python
+3.10-3.12, the library must be installed into a dedicated environment, separate from the numpy-2 / Python-3.14
+environment used by the rest of the Sollertia stack. A CUDA-capable GPU is recommended for training and deploying
+pose-estimation networks.
+
+For users, all other library dependencies are installed automatically by all supported installation methods. For
+developers, see the [Developers](#developers) section for information on installing additional development
+dependencies.
+
+___
+
+## Installation
+
+### Source
+
+***Note,*** installation from source is ***highly discouraged*** for anyone who is not an active project developer.
+
+1. Download this repository to the local machine using the preferred method, such as git-cloning. Use one of the
+   [stable releases](https://github.com/Sun-Lab-NBB/sollertia-video-tracking/tags) that include precompiled binary and
+   source code distribution (sdist) wheels.
+2. If the downloaded distribution is stored as a compressed archive, unpack it using the appropriate decompression
+   tool.
+3. `cd` to the root directory of the prepared project distribution.
+4. Run `pip install .` to install the project and its dependencies.
+
+### pip
+
+Use the following command to install the library and all of its dependencies via
+[pip](https://pip.pypa.io/en/stable/): `pip install sollertia-video-tracking`
+
+___
+
+## Usage
+
+### CLI Commands
+
+This library provides the `slvt` CLI that exposes the following commands:
+
+| Command          | Description                                                                           |
+|------------------|---------------------------------------------------------------------------------------|
+| `extract-frames` | Selects DeepLabCut training frames by clustering every video in a project in parallel |
+
+Use `slvt --help` or `slvt COMMAND --help` for detailed usage information.
+
+For example, the following command extracts training frames from every video referenced by a project's config.yaml,
+sampling every 500th frame for clustering: `slvt extract-frames /path/to/project/config.yaml --step 500`
+
+### Python API
+
+The frame-extraction pipeline is also available as a function for programmatic use. It reads every run parameter from
+the project's config.yaml, clusters the videos in parallel, and returns a summary of the run:
+
+```python
+from pathlib import Path
+
+from sollertia_video_tracking import extract_frames_kmeans
+
+# Clusters every video referenced by the DeepLabCut project's config.yaml, writing the selected frames into each
+# video's labeled-data directory. Re-runs skip videos that already have frames unless overwrite=True is passed.
+summary = extract_frames_kmeans(config_path=Path("/path/to/project/config.yaml"), step=500)
+
+print(f"{summary.extracted} extracted, {summary.skipped} skipped, {summary.failed} failed of {summary.total}")
+```
+
+___
+
+## API Documentation
+
+See the [API documentation](https://sollertia-video-tracking-api-docs.netlify.app/) for the detailed description of
+the methods and classes exposed by components of this library.
+
+***Note,*** the API documentation also includes the details about the `slvt` CLI interface exposed by this library.
+
+___
+
+## Developers
+
+This section provides installation, dependency, and build-system instructions for the developers that want to modify
+the source code of this library.
+
+### Installing the Project
+
+***Note,*** this installation method requires **mamba version 2.3.2 or above**. Currently, all automation pipelines
+require that mamba is installed through the [miniforge3](https://github.com/conda-forge/miniforge) installer.
+
+1. Download this repository to the local machine using the preferred method, such as git-cloning.
+2. If the downloaded distribution is stored as a compressed archive, unpack it using the appropriate decompression
+   tool.
+3. `cd` to the root directory of the prepared project distribution.
+4. Install the core development dependencies into the ***base*** mamba environment via the `mamba install tox uv
+   tox-uv` command.
+5. Use the `tox -e create` command to create the project-specific development environment followed by `tox -e install`
+   command to install the project into that environment as a library.
+
+### Additional Dependencies
+
+In addition to installing the project and all user dependencies, install the following dependencies:
+
+1. A [Python](https://www.python.org/downloads/) 3.12 distribution. DeepLabCut does not support newer Python versions,
+   so this library targets Python 3.12 exclusively. It is recommended to use a tool like
+   [pyenv](https://github.com/pyenv/pyenv) to install and manage the required version.
+
+### Development Automation
+
+This project uses `tox` for development automation. The following tox environments are available:
+
+| Environment | Description                                                |
+|-------------|------------------------------------------------------------|
+| `lint`      | Runs ruff formatting, ruff linting, and mypy type checking |
+| `stubs`     | Generates py.typed marker and .pyi stub files              |
+| `docs`      | Builds the API documentation via Sphinx                    |
+| `build`     | Builds sdist and wheel distributions                       |
+| `upload`    | Uploads distributions to PyPI via twine                    |
+| `install`   | Builds and installs the project into its mamba environment |
+| `uninstall` | Uninstalls the project from its mamba environment          |
+| `create`    | Creates the project's mamba development environment        |
+| `remove`    | Removes the project's mamba development environment        |
+| `provision` | Recreates the mamba environment from scratch               |
+| `export`    | Exports the mamba environment as .yml and spec.txt files   |
+| `import`    | Creates or updates the mamba environment from a .yml file  |
+
+Run any environment using `tox -e ENVIRONMENT`. For example, `tox -e lint`.
+
+***Note,*** all pull requests for this project have to successfully complete the `tox` task before being merged. To
+expedite the task's runtime, use the `tox --parallel` command to run some tasks in parallel.
+
+### Automation Troubleshooting
+
+Many packages used in `tox` automation pipelines (uv, mypy, ruff) and `tox` itself may experience runtime failures. In
+most cases, this is related to their caching behavior. If an unintelligible error is encountered with any of the
+automation components, deleting the corresponding cache directories (`.tox`, `.ruff_cache`, `.mypy_cache`, etc.)
+manually or via a CLI command typically resolves the issue.
+
+___
+
+## Versioning
+
+This project uses [semantic versioning](https://semver.org/). See the
+[tags on this repository](https://github.com/Sun-Lab-NBB/sollertia-video-tracking/tags) for the available project
+releases.
+
+___
+
+## Authors
+
+- Ivan Kondratyev ([Inkaros](https://github.com/Inkaros))
+
+___
+
+## License
+
+This project is licensed under the Apache 2.0 License: see the [LICENSE](LICENSE) file for details.
+
+___
+
+## Acknowledgments
+
+- All Sun lab [members](https://neuroai.github.io/sunlab/people) for providing the inspiration and comments during the
+  development of this library.
+- The creators of [DeepLabCut](https://github.com/DeepLabCut/DeepLabCut) and all other dependencies and projects listed
+  in the [pyproject.toml](pyproject.toml) file.
