@@ -47,7 +47,13 @@ dependencies = [
     # Pose Estimation (DeepLabCut 3.x and its PyTorch backend). DeepLabCut pins numpy<2 and supports Python 3.10-3.12,
     # so this bridge runs in its own environment and communicates with the rest of the Sollertia stack across the CLI
     # boundary rather than by direct import. torchvision is resolved transitively to match the installed torch build.
-    "deeplabcut>=3,<4",
+    #
+    # This is pinned to an exact version rather than the usual major-version range because the training subpackage
+    # overrides DeepLabCut internals (it reimplements the PyTorch train()/fit() orchestration and subclasses the
+    # training runners to add mixed precision and DistributedDataParallel). Those internals are private APIs with no
+    # stability guarantee within the 3.x series, so an exact pin is required to keep the overrides valid. Bumping this
+    # version is a deliberate, tested action: re-verify the overridden internals against the new release first.
+    "deeplabcut==3.0.0",
     "torch>=2,<3",
 
     # Numerical (pinned to the 1.x series required by DeepLabCut)

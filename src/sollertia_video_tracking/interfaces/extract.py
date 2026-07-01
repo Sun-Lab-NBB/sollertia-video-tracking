@@ -108,7 +108,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "--only",
     "path_filters",
     multiple=True,
-    metavar="SUBSTR",
+    metavar="SUBSTRING",
     help="The path substring that restricts the run to videos whose path contains it. Provide the option multiple "
     "times to match several substrings.",
 )
@@ -170,7 +170,7 @@ def extract_frames_command(
             display_progress=display_progress,
         )
     except (ValueError, FileNotFoundError) as error:
-        raise click.ClickException(str(error)) from error
+        raise click.ClickException(message=str(error)) from error
 
     for video, traceback_text in summary.errors:
         click.echo(message=f"\n--- error in {video} ---\n{traceback_text}", err=True)
@@ -178,7 +178,7 @@ def extract_frames_command(
         message=(
             f"done: {summary.extracted} extracted, {summary.skipped} skipped, {summary.failed} failed "
             f"(of {summary.total})"
-        )
+        ),
     )
     if not summary.successful:
         raise SystemExit(1)

@@ -22,9 +22,35 @@ for _thread_limit_variable in (
 os.environ.setdefault("OPENCV_LOG_LEVEL", "SILENT")
 os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "-8")
 
+from .training import (  # noqa: E402 - after thread-limit setup
+    TrainingSummary,
+    OptimizationProfile,
+    TrainingDatasetSummary,
+    train_model,
+    create_training_dataset,
+    get_available_augmenters,
+    get_available_pose_models,
+    get_available_super_animals,
+    resolve_optimization_profile,
+    build_superanimal_weight_init,
+    get_available_object_detectors,
+    build_conditional_top_down_conditions,
+)
 from .frame_extraction import FrameExtractionSummary, extract_frames_kmeans  # noqa: E402 - after thread-limit setup
 
 __all__ = [
     "FrameExtractionSummary",
+    "OptimizationProfile",
+    "TrainingDatasetSummary",
+    "TrainingSummary",
+    "build_conditional_top_down_conditions",
+    "build_superanimal_weight_init",
+    "create_training_dataset",
     "extract_frames_kmeans",
+    "get_available_augmenters",
+    "get_available_object_detectors",
+    "get_available_pose_models",
+    "get_available_super_animals",
+    "resolve_optimization_profile",
+    "train_model",
 ]
