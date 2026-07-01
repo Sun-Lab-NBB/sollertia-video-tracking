@@ -34,9 +34,9 @@ class FrameExtractionSummary:
     """Summarizes the outcome of a parallel k-means frame-extraction run.
 
     Notes:
-        The pipeline never aborts on a single bad video, so failures are collected here as ``(video_path,
-        traceback)`` pairs rather than raised. Callers inspect ``failed`` (or ``errors``) to decide the process exit
-        status.
+        The pipeline never aborts on a single bad video, so failures are collected here as ``(video_path, detail)``
+        pairs rather than raised, where the detail is a traceback or the marker ``"empty"`` for a video that produced
+        no frames. Callers inspect ``failed`` (or ``errors``) to decide the process exit status.
     """
 
     extracted: int
@@ -58,7 +58,9 @@ class FrameExtractionSummary:
     target_frames: int = -1
     """The requested total-frame budget when sampling videos, or -1 when budgeted sampling was disabled."""
     errors: tuple[tuple[str, str], ...] = ()
-    """The ``(video_path, traceback)`` pairs for every video that failed to extract."""
+    """The ``(video_path, detail)`` pairs for every video that failed to extract or produced no frames, where the
+    detail is a traceback or the marker ``"empty"``.
+    """
 
     @property
     def failed(self) -> int:
@@ -124,27 +126,29 @@ def extract_frames_kmeans(
         seed: The seed for the random video sampling. Set to None to draw a different subset each run, or to an
             integer to make the selection reproducible.
         resize_width: The downsample width applied before clustering, passed to DeepLabCut as ``cluster_resizewidth``.
-        color: Whether to cluster on color channels instead of grayscale.
-        overwrite: Whether to re-extract videos whose labeled-data directory already contains frames. Re-extraction
-            deletes the existing ``img*.png`` frames in each affected directory and the matching ``CollectedData``
-            labels, which the new frames would otherwise orphan. Mutually exclusive with ``reset``.
-        reset: Whether to discard all extracted frames and their labels across the selection and re-extract from
-            scratch. This permanently deletes the extracted frames and any labels in every selected video folder.
-            Mutually exclusive with ``overwrite``.
+        color: Determines whether to cluster on color channels instead of grayscale.
+        overwrite: Determines whether to re-extract videos whose labeled-data directory already contains frames.
+            Re-extraction deletes the existing ``img*.png`` frames in each affected directory and the matching
+            ``CollectedData`` labels, which the new frames would otherwise orphan. Mutually exclusive with ``reset``.
+        reset: Determines whether to discard all extracted frames and their labels across the selection and
+            re-extract from scratch. This permanently deletes the extracted frames and any labels in every selected
+            video folder. Mutually exclusive with ``overwrite``.
         path_filters: The substrings used to restrict the run to videos whose path contains any of them. An empty
             tuple selects every video in the project.
         heartbeat: The minimum interval, in seconds, between progress lines when the output is not a TTY.
-        display_progress: Whether to render the run header and the aggregate progress bar to the standard error
-            stream.
+        display_progress: Determines whether to render the run header and the aggregate progress bar to the standard
+            error stream.
 
     Returns:
         A FrameExtractionSummary describing how many videos were extracted, skipped, and failed, alongside the
         resolved core-allocation plan and, in sampling mode, the existing and target frame counts.
 
     Raises:
+        FileNotFoundError: If ``config_path`` does not point to an existing file.
         ValueError: If ``num_frames`` or ``total_frames`` is set below one (other than the -1 sentinel), if
             ``overwrite`` and ``reset`` are both set, if budgeted sampling is requested without a valid
-            ``numframes2pick``, or if no videos in config.yaml match ``path_filters``.
+            ``numframes2pick``, if config.yaml defines no ``video_sets``, or if no videos in config.yaml match
+            ``path_filters``.
     """
     config_path = config_path.resolve()
     if overwrite and reset:
@@ -181,6 +185,9 @@ def extract_frames_kmeans(
             yaml.dump(configuration, config_file)
     frames_per_video = configuration.get("numframes2pick", "?")
 
+    if "video_sets" not in configuration:
+        message = "Unable to extract frames. The project's config.yaml does not define any video_sets."
+        raise ValueError(message)
     videos = list(configuration["video_sets"])
     if path_filters:
         videos = [video for video in videos if any(token in video for token in path_filters)]
@@ -275,7 +282,7 @@ def extract_frames_kmeans(
 
     if display_progress:
         _report_plan(
-            videos=len(videos),
+            video_count=len(videos),
             frames_per_video=frames_per_video,
             step=step,
             resize_width=resize_width,
@@ -323,8 +330,8 @@ def extract_frames_kmeans(
 
 
 def _report_plan(
-    videos: int,
-    frames_per_video: Any,
+    video_count: int,
+    frames_per_video: int | str,
     step: int,
     resize_width: int,
     *,
@@ -338,11 +345,11 @@ def _report_plan(
     """Writes the two-line run header describing the resolved extraction plan to the standard error stream.
 
     Args:
-        videos: The number of videos selected for the run.
+        video_count: The number of videos selected for the run.
         frames_per_video: The resolved ``numframes2pick`` value from config.yaml.
         step: The clustering stride.
         resize_width: The downsample width applied before clustering.
-        color: Whether clustering runs on color channels.
+        color: Determines whether clustering runs on color channels.
         workers: The resolved number of concurrent workers.
         cores_used: The number of distinct cores the workers are pinned across.
         core_count: The total number of cores on the machine.
@@ -351,7 +358,7 @@ def _report_plan(
     """
     free_cores = core_count - cores_used
     sys.stderr.write(
-        f"k-means extraction | {videos} videos | numframes2pick={frames_per_video} | "
+        f"k-means extraction | {video_count} videos | numframes2pick={frames_per_video} | "
         f"cluster_step={step} | resize_width={resize_width} | color={color}\n"
     )
     sys.stderr.write(
@@ -489,12 +496,15 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
                 config_path,
                 mode="automatic",
                 algo="kmeans",
-                crop=True,  # Applies the per-video crop stored in config.yaml.
-                userfeedback=False,  # Runs non-interactively.
+                # Applies the per-video crop stored in config.yaml.
+                crop=True,
+                # Runs non-interactively.
+                userfeedback=False,
                 cluster_step=step,
                 cluster_resizewidth=resize_width,
                 cluster_color=color,
-                videos_list=[video_path],  # Restricts DeepLabCut to this one video.
+                # Restricts DeepLabCut to this one video.
+                videos_list=[video_path],
             )
     except Exception:  # noqa: BLE001 -- one bad video must not kill the pool; the traceback is returned as status.
         return video_path, 0, "error:\n" + traceback.format_exc()

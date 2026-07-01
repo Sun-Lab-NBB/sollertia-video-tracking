@@ -3,7 +3,7 @@
 import sys
 import time
 from queue import Empty
-from typing import Any
+from typing import Any, TextIO
 from threading import Thread
 import contextlib
 from collections.abc import Callable, Iterable
@@ -51,6 +51,20 @@ class AggregateBar(Thread):
         The renderer consumes ``("progress", video_index, count)`` and ``("done", video_index)`` messages from the
         shared queue, plus a terminal ``("stop",)`` sentinel. On a TTY the bar updates in place with carriage
         returns; when the output is redirected, it prints at most one line every ``heartbeat`` seconds.
+
+    Attributes:
+        _progress_queue: The shared queue the workers stream progress and completion messages to.
+        _total_videos: The total number of videos in the extraction run.
+        _totals: The mapping of video index to the number of frames that video contributes to the bar.
+        _grand_total: The sum of all per-video frame totals, clamped to at least one.
+        _heartbeat: The minimum interval, in seconds, between rendered lines when the output is not a TTY.
+        _width: The width, in characters, of the rendered bar.
+        _stream: The output stream the bar renders to.
+        _is_tty: True when the output stream is an interactive terminal.
+        _frames: The mapping of video index to the most recent frame count reported for that video.
+        _videos_done: The number of videos that have finished extraction.
+        _start_time: The monotonic timestamp captured when the renderer was constructed.
+        _last_render_time: The monotonic timestamp of the most recent render.
     """
 
     def __init__(
@@ -60,7 +74,7 @@ class AggregateBar(Thread):
         totals: dict[int, int],
         heartbeat: float,
         width: int = _PROGRESS_BAR_WIDTH,
-        stream: Any = None,
+        stream: TextIO | None = None,
     ) -> None:
         """Initializes the renderer thread over the given per-video frame totals.
 
@@ -85,6 +99,13 @@ class AggregateBar(Thread):
         self._videos_done = 0
         self._start_time = time.monotonic()
         self._last_render_time = 0.0
+
+    def __repr__(self) -> str:
+        """Returns a string representation of the AggregateBar instance."""
+        return (
+            f"AggregateBar(total_videos={self._total_videos}, grand_total={self._grand_total}, "
+            f"videos_done={self._videos_done})"
+        )
 
     def run(self) -> None:
         """Consumes queue messages and re-renders the bar until a ``("stop",)`` sentinel arrives."""
@@ -119,7 +140,7 @@ class AggregateBar(Thread):
         """Draws the bar, honoring the per-mode minimum render interval unless ``force`` is set.
 
         Args:
-            force: Whether to render immediately, bypassing the minimum interval between renders.
+            force: Determines whether to render immediately, bypassing the minimum interval between renders.
         """
         now = time.monotonic()
         interval = 0.2 if self._is_tty else max(1.0, self._heartbeat)

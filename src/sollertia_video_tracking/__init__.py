@@ -10,7 +10,7 @@ import os
 
 # Pins the native math-library thread pools to one thread per worker and quiets OpenCV's logging. These environment
 # variables are read when NumPy, OpenCV, and DeepLabCut initialize their native backends, so they must be set before
-# the library's own imports (below) pull those backends in. The forked extraction workers inherit this environment.
+# the library's own imports (below) pull those backends in. The spawned extraction workers inherit this environment.
 for _thread_limit_variable in (
     "OMP_NUM_THREADS",
     "OPENBLAS_NUM_THREADS",

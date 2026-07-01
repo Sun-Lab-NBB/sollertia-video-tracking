@@ -23,9 +23,9 @@ class VideoSamplingPlan:
     projected_frames: int
     """The number of frames the project is expected to hold once the selected videos are extracted."""
     no_growth: bool
-    """Whether the existing frames already meet the target, so the pass would extract nothing."""
+    """Indicates whether the existing frames already meet the target, so the pass would extract nothing."""
     target_unreachable: bool
-    """Whether too few un-extracted videos remain to reach the target, so the pass falls short of it."""
+    """Indicates whether too few un-extracted videos remain to reach the target, so the pass falls short of it."""
 
 
 def plan_video_sampling(

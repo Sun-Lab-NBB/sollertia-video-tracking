@@ -1,10 +1,4 @@
-"""Provides the ``slvt extract-frames`` command that runs parallel DeepLabCut k-means frame extraction for a project.
-
-Notes:
-    The command is a thin wrapper around the frame-extraction pipeline in the helpers package: it parses the
-    command-line options, delegates the work, and translates the returned summary into console output and a process
-    exit status.
-"""
+"""Provides the ``slvt extract-frames`` command that runs parallel DeepLabCut k-means frame extraction for a project."""
 
 from pathlib import Path
 
@@ -24,7 +18,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     default=500,
     show_default=True,
     help="The clustering stride passed to DeepLabCut as cluster_step; every Nth frame is sampled. Larger values "
-    "issue far fewer of the expensive HEVC seeks and finish sooner on long-GOP video.",
+    "issue far fewer of the expensive video encoder seeks and finish sooner on long-GOP video.",
 )
 @click.option(
     "-w",
@@ -42,7 +36,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     default=-1,
     show_default=True,
     help="The number of CPU cores pinned to each worker. Set to -1 to spread the usable cores evenly across workers. "
-    "HEVC decoding keeps roughly four cores per video busy, so larger values mostly idle cores while smaller values "
+    "Video decoding keeps roughly four cores per video busy, so larger values mostly idle cores while smaller values "
     "throttle each decode.",
 )
 @click.option(
