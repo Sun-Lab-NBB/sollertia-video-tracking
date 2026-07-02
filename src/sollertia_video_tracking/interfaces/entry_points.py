@@ -2,6 +2,7 @@
 
 import click
 
+from .infer import infer_command
 from .train import train_command
 from .extract import extract_frames_command
 from .create_training_dataset import create_training_dataset_command
@@ -18,3 +19,4 @@ def slvt_cli() -> None:
 slvt_cli.add_command(cmd=extract_frames_command)
 slvt_cli.add_command(cmd=create_training_dataset_command)
 slvt_cli.add_command(cmd=train_command)
+slvt_cli.add_command(cmd=infer_command)

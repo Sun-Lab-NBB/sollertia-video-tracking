@@ -30,6 +30,10 @@ ___
 - Provides a unified `slvt` command-line interface backed by a reusable, import-friendly logic core.
 - Extracts DeepLabCut training frames in parallel, decoding one video per worker process pinned to a disjoint block of
   CPU cores.
+- Trains DeepLabCut models with mixed precision and multi-GPU DistributedDataParallel, falling back cleanly to a single
+  GPU or the CPU.
+- Runs inference over many videos across multiple GPUs, a single GPU, or the CPU, analyzing one whole video per worker
+  and optionally converting predictions in-flight to polars feather files for the rest of the Sollertia stack.
 - Renders a single aggregate progress bar across all workers, with a greppable heartbeat mode for redirected logs.
 - Apache 2.0 License.
 
@@ -92,14 +96,20 @@ ___
 
 This library provides the `slvt` CLI that exposes the following commands:
 
-| Command          | Description                                                                           |
-|------------------|---------------------------------------------------------------------------------------|
-| `extract-frames` | Selects DeepLabCut training frames by clustering every video in a project in parallel |
+| Command                   | Description                                                                              |
+|---------------------------|------------------------------------------------------------------------------------------|
+| `extract-frames`          | Selects DeepLabCut training frames by clustering every video in a project in parallel    |
+| `create-training-dataset` | Creates a training-dataset shuffle with a chosen network architecture and train/test split |
+| `train`                   | Trains a shuffle with mixed precision and multi-GPU DistributedDataParallel               |
+| `infer`                   | Analyzes videos across multiple GPUs, a single GPU, or the CPU, with in-flight polars output |
 
 Use `slvt --help` or `slvt COMMAND --help` for detailed usage information.
 
 For example, the following command extracts training frames from every video referenced by a project's config.yaml,
 sampling every 500th frame for clustering: `slvt extract-frames /path/to/project/config.yaml --step 500`
+
+The following command analyzes two videos with a project's trained model, writing a polars feather of predictions per
+video into an output directory: `slvt infer /path/to/project/config.yaml video1.mp4 video2.mp4 --dest /path/to/output`
 
 ### Python API
 
@@ -116,6 +126,27 @@ from sollertia_video_tracking import extract_frames_kmeans
 summary = extract_frames_kmeans(config_path=Path("/path/to/project/config.yaml"), step=500)
 
 print(f"{summary.extracted} extracted, {summary.skipped} skipped, {summary.failed} failed of {summary.total}")
+```
+
+Inference is likewise available as a function. It resolves the optimizations for the detected hardware, distributes
+whole videos across worker slots, and returns a summary of the run:
+
+```python
+from pathlib import Path
+
+from sollertia_video_tracking import run_inference, resolve_inference_profile
+
+# Resolves the device, precision, and parallelism for the detected hardware (multiple GPUs, a single GPU, or the CPU),
+# then analyzes the videos, writing a wide polars feather of predictions per video into the destination directory.
+profile = resolve_inference_profile()
+summary = run_inference(
+    config=Path("/path/to/project/config.yaml"),
+    videos=[Path("video1.mp4"), Path("video2.mp4")],
+    destination=Path("/path/to/output"),
+    profile=profile,
+)
+
+print(summary.describe())
 ```
 
 ___

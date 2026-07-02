@@ -188,7 +188,7 @@ def create_training_dataset(
     """Creates a training-dataset shuffle for a project, at parity with the DeepLabCut GUI's create-dataset tab.
 
     Wraps DeepLabCut's training-dataset creation for the PyTorch engine, which bakes the model architecture, weight
-    initialization, and train/test split into the shuffle (training is run afterwards with ``slvt train``).
+    initialization, and train/test split into the shuffle (training is run afterward with ``slvt train``).
     Multi-animal projects are handled automatically. When ``from_shuffle`` is given, the new shuffle reuses that
     shuffle's train/test split instead of drawing a fresh one.
 
@@ -233,7 +233,7 @@ def create_training_dataset(
         )
         raise ValueError(message)
 
-    userfeedback = not overwrite
+    user_feedback = not overwrite
     if from_shuffle is not None:
         dlc_create_training_dataset_from_existing_split(
             config=str(config),
@@ -243,7 +243,7 @@ def create_training_dataset(
             net_type=net_type,
             detector_type=detector_type,
             augmenter_type=augmenter_type,
-            userfeedback=userfeedback,
+            userfeedback=user_feedback,
             weight_init=weight_init,
             ctd_conditions=ctd_conditions,
         )
@@ -254,7 +254,7 @@ def create_training_dataset(
             net_type=net_type,
             detector_type=detector_type,
             augmenter_type=augmenter_type,
-            userfeedback=userfeedback,
+            userfeedback=user_feedback,
             weight_init=weight_init,
             ctd_conditions=ctd_conditions,
         )
