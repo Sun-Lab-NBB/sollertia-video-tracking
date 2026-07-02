@@ -70,6 +70,10 @@ dependencies = [
 
     # Command-Line Interface
     "click>=8,<9",
+
+    # Columnar Output (in-flight conversion of DeepLabCut predictions to the Sollertia polars feather format; pandas
+    # and pytables, used to read DeepLabCut's HDF5 predictions, are provided transitively by DeepLabCut)
+    "polars>=1,<2",
 ]
 
 [project.urls]
@@ -189,6 +193,7 @@ module = [
     "cv2",
     "psutil",
     "ruamel.*",
+    "pandas.*",
 ]
 ignore_missing_imports = true
 

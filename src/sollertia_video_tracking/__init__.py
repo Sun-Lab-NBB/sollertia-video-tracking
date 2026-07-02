@@ -36,21 +36,35 @@ from .training import (  # noqa: E402 - after thread-limit setup
     get_available_object_detectors,
     build_conditional_top_down_conditions,
 )
+from .inference import (  # noqa: E402 - after thread-limit setup
+    InferenceProfile,
+    InferenceSummary,
+    ConversionSummary,
+    run_inference,
+    resolve_inference_profile,
+    convert_predictions_to_feather,
+)
 from .frame_extraction import FrameExtractionSummary, extract_frames_kmeans  # noqa: E402 - after thread-limit setup
 
 __all__ = [
+    "ConversionSummary",
     "FrameExtractionSummary",
+    "InferenceProfile",
+    "InferenceSummary",
     "OptimizationProfile",
     "TrainingDatasetSummary",
     "TrainingSummary",
     "build_conditional_top_down_conditions",
     "build_superanimal_weight_init",
+    "convert_predictions_to_feather",
     "create_training_dataset",
     "extract_frames_kmeans",
     "get_available_augmenters",
     "get_available_object_detectors",
     "get_available_pose_models",
     "get_available_super_animals",
+    "resolve_inference_profile",
     "resolve_optimization_profile",
+    "run_inference",
     "train_model",
 ]
