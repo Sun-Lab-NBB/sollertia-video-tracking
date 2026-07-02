@@ -23,6 +23,7 @@ from deeplabcut.pose_estimation_pytorch.runners.logger import setup_file_logging
 
 from .monitor import TrainingMonitor, QueueTrainingLogger
 from .runners import build_optimized_training_runner
+from .evaluation import EvaluationSummary, evaluate_trained_model
 from .optimization import OptimizationProfile, apply_runtime_optimizations
 
 _logger = logging.getLogger(__name__)
@@ -59,15 +60,22 @@ class TrainingSummary:
     epochs: int
     """The number of epochs the pose model was trained for."""
 
+    evaluation: EvaluationSummary | None = None
+    """The post-training evaluation summary, or None when evaluation was skipped or failed."""
+
     def describe(self) -> str:
-        """Builds a one-line human-readable summary of the training run for the CLI.
+        """Builds a human-readable summary of the training run, and the evaluation when one ran, for the CLI.
 
         Returns:
-            A compact description of what was trained and the hardware configuration used.
+            A compact description of what was trained and the hardware configuration used, with the evaluation
+            summary appended on a second line when a post-training evaluation ran.
         """
         trained = "+".join(self.tasks_trained) if self.tasks_trained else "nothing"
         where = f"{self.device}:{self.strategy}x{self.world_size}" if self.device == "cuda" else self.device
-        return f"trained {trained} ({self.epochs} epochs) on {where} in {self.precision} -> {self.model_folder}"
+        summary = f"trained {trained} ({self.epochs} epochs) on {where} in {self.precision} -> {self.model_folder}"
+        if self.evaluation is not None:
+            summary = f"{summary}\n{self.evaluation.describe()}"
+        return summary
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +114,9 @@ def train_model(
     detector_save_epochs: int | None = None,
     maximum_snapshots_to_keep: int | None = None,
     load_head_weights: bool = True,
+    evaluate: bool = True,
+    evaluation_batch_size: int = 16,
+    evaluation_pcutoff: float | None = None,
     heartbeat: float = 30.0,
     display_progress: bool = True,
 ) -> TrainingSummary:
@@ -134,6 +145,11 @@ def train_model(
         detector_save_epochs: The epochs between detector snapshots (top-down only), or None for the configured value.
         maximum_snapshots_to_keep: The maximum number of snapshots to retain, or None to use the configured value.
         load_head_weights: Whether to load head weights when resuming a pose model from a snapshot.
+        evaluate: Whether to score the trained snapshot against the labeled frames as a final step and write the
+            evaluation feather and provenance sidecar.
+        evaluation_batch_size: The number of frames scored per forward pass during the post-training evaluation.
+        evaluation_pcutoff: The confidence cutoff for the evaluation's cutoff-filtered metrics, or None for the
+            default of 0.6.
         heartbeat: The minimum interval, in seconds, between progress lines when the output is not a TTY.
         display_progress: Whether to render the live progress monitor and route DeepLabCut's logs off the console.
 
@@ -222,6 +238,18 @@ def train_model(
         if manager is not None:
             manager.shutdown()
 
+    evaluation = None
+    if evaluate and "pose" in tasks_trained:
+        evaluation = _evaluate_after_training(
+            config,
+            profile,
+            shuffle=shuffle,
+            training_set_index=training_set_index,
+            modelprefix=modelprefix,
+            batch_size=evaluation_batch_size,
+            pcutoff=evaluation_pcutoff,
+        )
+
     precision = str(profile.amp_dtype).removeprefix("torch.") if profile.amp_dtype is not None else "fp32"
     return TrainingSummary(
         config=config,
@@ -233,7 +261,54 @@ def train_model(
         world_size=world_size,
         precision=precision,
         epochs=pose_epochs,
+        evaluation=evaluation,
     )
+
+
+def _evaluate_after_training(
+    config: Path,
+    profile: OptimizationProfile,
+    *,
+    shuffle: int,
+    training_set_index: int,
+    modelprefix: str,
+    batch_size: int,
+    pcutoff: float | None,
+) -> EvaluationSummary | None:
+    """Scores the freshly trained snapshot on one device, never failing a completed training run.
+
+    Evaluation runs in the main process after the training workers have exited, on the first configured GPU (or the
+    CPU), so it never re-scores redundantly across the DistributedDataParallel ranks. Any failure is logged and
+    swallowed, since a completed training run must not be lost to an evaluation error.
+
+    Args:
+        config: The path of the DeepLabCut project configuration file.
+        profile: The resolved optimization profile, used only to choose the evaluation device.
+        shuffle: The shuffle index that was trained.
+        training_set_index: The training-set fraction index.
+        modelprefix: The model subdirectory prefix.
+        batch_size: The number of frames scored per forward pass.
+        pcutoff: The confidence cutoff for the cutoff-filtered metrics, or None for the default.
+
+    Returns:
+        The evaluation summary, or None when evaluation failed.
+    """
+    device = f"cuda:{profile.gpus[0]}" if profile.device == "cuda" else profile.device
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    try:
+        return evaluate_trained_model(
+            config,
+            shuffle=shuffle,
+            training_set_index=training_set_index,
+            modelprefix=modelprefix,
+            batch_size=batch_size,
+            pcutoff=pcutoff,
+            device=device,
+        )
+    except Exception:  # noqa: BLE001 - evaluation is best-effort; a completed training run must not be lost.
+        _logger.warning("Post-training evaluation failed and was skipped.", exc_info=True)
+        return None
 
 
 def _find_free_port() -> int:

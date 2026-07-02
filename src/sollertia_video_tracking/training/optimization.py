@@ -22,7 +22,7 @@ _AMPERE_CAPABILITY: tuple[int, int] = (8, 0)
 _MIN_MULTI_GPU_COUNT: int = 2
 """The minimum number of selected GPUs required to run any multi-GPU strategy rather than a single device."""
 
-DEFAULT_RESERVED_CPU_THREADS: int = 2
+_DEFAULT_RESERVED_CPU_THREADS: int = 2
 """The number of CPU cores held back from the automatic dataloader-worker and CPU-thread budgets for other work."""
 
 _MAX_AUTO_DATALOADER_WORKERS: int = 8
@@ -106,7 +106,7 @@ class OptimizationProfile:
         return f"{where} | {precision} | workers={self.dataloader_workers} pin={self.pin_memory}{suffix}"
 
 
-def get_cuda_device_count() -> int:
+def _get_cuda_device_count() -> int:
     """Returns the number of visible CUDA devices, or zero when CUDA is unavailable.
 
     Returns:
@@ -115,7 +115,7 @@ def get_cuda_device_count() -> int:
     return torch.cuda.device_count() if torch.cuda.is_available() else 0
 
 
-def resolve_bfloat16_support(gpus: tuple[int, ...]) -> bool:
+def _resolve_bfloat16_support(gpus: tuple[int, ...]) -> bool:
     """Determines whether every listed CUDA device natively accelerates bfloat16 (Ampere or newer).
 
     Args:
@@ -129,7 +129,7 @@ def resolve_bfloat16_support(gpus: tuple[int, ...]) -> bool:
     )
 
 
-def resolve_tf32_support(gpus: tuple[int, ...]) -> bool:
+def _resolve_tf32_support(gpus: tuple[int, ...]) -> bool:
     """Determines whether every listed CUDA device supports TF32 matmul and convolution acceleration (Ampere+).
 
     Args:
@@ -185,7 +185,7 @@ def resolve_optimization_profile(
     amp_dtype, use_gradient_scaler = _resolve_amp(amp=amp, device=base_device, gpus=resolved_gpus)
 
     on_cuda = base_device == "cuda"
-    resolved_tf32 = _resolve_toggle(value=tf32, auto=resolve_tf32_support(resolved_gpus)) if on_cuda else False
+    resolved_tf32 = _resolve_toggle(value=tf32, auto=_resolve_tf32_support(resolved_gpus)) if on_cuda else False
 
     resolved_benchmark = _resolve_toggle(value=cudnn_benchmark, auto=False) if on_cuda else False
     if resolved_benchmark and not fixed_input_size:
@@ -208,9 +208,9 @@ def resolve_optimization_profile(
         workers = _choose_dataloader_worker_count(world_size=world_size)
 
     # Restore intra-op threading for CPU training (the package pins OMP_NUM_THREADS=1 for the extraction workers),
-    # deliberately holding back DEFAULT_RESERVED_CPU_THREADS cores so other work stays responsive rather than
+    # deliberately holding back _DEFAULT_RESERVED_CPU_THREADS cores so other work stays responsive rather than
     # saturating the machine.
-    cpu_threads = max(1, (os.cpu_count() or 1) - DEFAULT_RESERVED_CPU_THREADS) if base_device == "cpu" else None
+    cpu_threads = max(1, (os.cpu_count() or 1) - _DEFAULT_RESERVED_CPU_THREADS) if base_device == "cpu" else None
 
     return OptimizationProfile(
         device=base_device,
@@ -269,7 +269,7 @@ def _choose_dataloader_worker_count(world_size: int) -> int:
     Returns:
         The number of dataloader workers each process should use.
     """
-    usable = (os.cpu_count() or 1) - DEFAULT_RESERVED_CPU_THREADS
+    usable = (os.cpu_count() or 1) - _DEFAULT_RESERVED_CPU_THREADS
     per_rank = usable // max(1, world_size)
     return max(0, min(_MAX_AUTO_DATALOADER_WORKERS, per_rank))
 
@@ -289,7 +289,7 @@ def _resolve_target_device(device: str | None, gpus: tuple[int, ...] | None) -> 
         ValueError: When an explicitly requested CUDA index is not present on the machine.
     """
     request = (device or "auto").lower()
-    available = get_cuda_device_count()
+    available = _get_cuda_device_count()
 
     if request == "cpu":
         return "cpu", ()
@@ -367,14 +367,14 @@ def _resolve_amp(amp: AmpMode, device: str, gpus: tuple[int, ...]) -> tuple[torc
         return None, False
     if amp == "auto":
         # Enable bfloat16 only where it is natively fast so the automatic default stays close to stock float32.
-        if device == "cuda" and resolve_bfloat16_support(gpus):
+        if device == "cuda" and _resolve_bfloat16_support(gpus):
             return torch.bfloat16, False
         return None, False
     if amp == "bf16":
         if device == "mps":
             _warn("bfloat16 autocast is unreliable on MPS. Disabling mixed precision.")
             return None, False
-        if device == "cuda" and not resolve_bfloat16_support(gpus):
+        if device == "cuda" and not _resolve_bfloat16_support(gpus):
             _warn(
                 "bfloat16 was requested but the selected GPU lacks native bfloat16 support (pre-Ampere); it may run "
                 "slowly. Consider '--amp fp16' instead."

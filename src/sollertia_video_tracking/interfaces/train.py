@@ -173,6 +173,29 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "autotuner safe to enable.",
 )
 @click.option(
+    "--evaluate/--no-evaluate",
+    "evaluate",
+    default=True,
+    show_default=True,
+    help="Whether to score the trained snapshot against the labeled frames as a final step and write the evaluation "
+    "feather and provenance sidecar.",
+)
+@click.option(
+    "--evaluation-batch-size",
+    "evaluation_batch_size",
+    type=int,
+    default=16,
+    show_default=True,
+    help="The number of frames scored per forward pass during the post-training evaluation.",
+)
+@click.option(
+    "--evaluation-pcutoff",
+    "evaluation_pcutoff",
+    type=float,
+    default=None,
+    help="The confidence cutoff for the evaluation's cutoff-filtered metrics. Omit to use the default of 0.6.",
+)
+@click.option(
     "--heartbeat",
     default=30.0,
     show_default=True,
@@ -210,9 +233,12 @@ def train_command(
     torch_compile: Toggle,
     dataloader_workers: int,
     pin_memory: Toggle,
+    evaluation_batch_size: int,
+    evaluation_pcutoff: float | None,
     heartbeat: float,
     *,
     load_head_weights: bool,
+    evaluate: bool,
     fixed_input_size: bool,
     display_progress: bool,
 ) -> None:
@@ -263,6 +289,9 @@ def train_command(
             detector_save_epochs=detector_save_epochs,
             maximum_snapshots_to_keep=maximum_snapshots,
             load_head_weights=load_head_weights,
+            evaluate=evaluate,
+            evaluation_batch_size=evaluation_batch_size,
+            evaluation_pcutoff=evaluation_pcutoff,
             heartbeat=heartbeat,
             display_progress=display_progress,
         )

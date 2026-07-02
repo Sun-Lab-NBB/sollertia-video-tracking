@@ -31,7 +31,7 @@ _logger = logging.getLogger(__name__)
 """The module logger; its records propagate to DeepLabCut's root training-log handlers (``train.txt``)."""
 
 
-class OptimizedTrainingRunnerMixin(TrainingRunner):
+class _OptimizedTrainingRunnerMixin(TrainingRunner):
     """Adds mixed precision, ``torch.compile``, and DistributedDataParallel to a DeepLabCut training runner.
 
     The mixin is placed before a concrete DeepLabCut runner in the method resolution order so its ``fit``, ``_epoch``,
@@ -303,7 +303,7 @@ class OptimizedTrainingRunnerMixin(TrainingRunner):
         return mean_loss
 
 
-class OptimizedPoseTrainingRunner(OptimizedTrainingRunnerMixin, PoseTrainingRunner):
+class _OptimizedPoseTrainingRunner(_OptimizedTrainingRunnerMixin, PoseTrainingRunner):
     """Trains pose estimation models with mixed precision and DistributedDataParallel."""
 
     def step(self, batch: dict[str, Any], mode: str = "train") -> dict[str, Any]:
@@ -370,7 +370,7 @@ class OptimizedPoseTrainingRunner(OptimizedTrainingRunnerMixin, PoseTrainingRunn
         return {key: value.detach().cpu().numpy() for key, value in losses_dict.items()}
 
 
-class OptimizedDetectorTrainingRunner(OptimizedTrainingRunnerMixin, DetectorTrainingRunner):
+class _OptimizedDetectorTrainingRunner(_OptimizedTrainingRunnerMixin, DetectorTrainingRunner):
     """Trains object detection models with mixed precision and DistributedDataParallel."""
 
     def step(self, batch: dict[str, Any], mode: str = "train") -> dict[str, Any]:
@@ -510,7 +510,7 @@ def build_optimized_training_runner(
         "local_rank": local_rank,
     }
     if task == Task.DETECT:
-        return OptimizedDetectorTrainingRunner(**kwargs)
+        return _OptimizedDetectorTrainingRunner(**kwargs)
 
     kwargs["load_head_weights"] = load_head_weights
-    return OptimizedPoseTrainingRunner(**kwargs)
+    return _OptimizedPoseTrainingRunner(**kwargs)

@@ -11,6 +11,7 @@ from .dataset import (
     build_conditional_top_down_conditions,
 )
 from .pipeline import TrainingSummary, train_model
+from .evaluation import SplitMetrics, EvaluationSummary, evaluate_trained_model
 from .optimization import (
     Toggle,
     AmpMode,
@@ -22,8 +23,10 @@ from .optimization import (
 
 __all__ = [
     "AmpMode",
+    "EvaluationSummary",
     "MultiGpuStrategy",
     "OptimizationProfile",
+    "SplitMetrics",
     "Toggle",
     "TrainingDatasetSummary",
     "TrainingSummary",
@@ -31,6 +34,7 @@ __all__ = [
     "build_conditional_top_down_conditions",
     "build_superanimal_weight_init",
     "create_training_dataset",
+    "evaluate_trained_model",
     "get_available_augmenters",
     "get_available_object_detectors",
     "get_available_pose_models",

@@ -17,10 +17,10 @@ AmpMode = Literal["auto", "off", "bf16", "fp16"]
 _AMPERE_CAPABILITY: tuple[int, int] = (8, 0)
 """The minimum CUDA compute capability (Ampere) that provides TF32 and native bfloat16 tensor-core acceleration."""
 
-DEFAULT_RESERVED_CPU_THREADS: int = 2
+_DEFAULT_RESERVED_CPU_THREADS: int = 2
 """The number of CPU cores held back from the automatic worker and thread budgets so other work stays responsive."""
 
-DEFAULT_GPU_PROCESSES: int = 1
+_DEFAULT_GPU_PROCESSES: int = 1
 """The default number of inference worker processes to run per CUDA device.
 
 One process per device is the predictable default: each GPU processes one whole video at a time, which is correct for
@@ -127,7 +127,7 @@ class InferenceProfile:
         return f"{where} | {precision} | workers={self.total_workers}{suffix}"
 
 
-def get_cuda_device_count() -> int:
+def _get_cuda_device_count() -> int:
     """Returns the number of visible CUDA devices, or zero when CUDA is unavailable.
 
     Returns:
@@ -136,7 +136,7 @@ def get_cuda_device_count() -> int:
     return torch.cuda.device_count() if torch.cuda.is_available() else 0
 
 
-def resolve_bfloat16_support(gpus: tuple[int, ...]) -> bool:
+def _resolve_bfloat16_support(gpus: tuple[int, ...]) -> bool:
     """Determines whether every listed CUDA device natively accelerates bfloat16 (Ampere or newer).
 
     Args:
@@ -150,7 +150,7 @@ def resolve_bfloat16_support(gpus: tuple[int, ...]) -> bool:
     )
 
 
-def resolve_tf32_support(gpus: tuple[int, ...]) -> bool:
+def _resolve_tf32_support(gpus: tuple[int, ...]) -> bool:
     """Determines whether every listed CUDA device supports TF32 matmul and convolution acceleration (Ampere+).
 
     Args:
@@ -212,7 +212,7 @@ def resolve_inference_profile(
 
     amp_dtype = _resolve_amp(amp=amp, device=base_device, gpus=resolved_gpus)
 
-    resolved_tf32 = _resolve_toggle(value=tf32, auto=resolve_tf32_support(resolved_gpus)) if on_cuda else False
+    resolved_tf32 = _resolve_toggle(value=tf32, auto=_resolve_tf32_support(resolved_gpus)) if on_cuda else False
 
     resolved_benchmark = _resolve_toggle(value=cudnn_benchmark, auto=False) if on_cuda else False
     if resolved_benchmark and not fixed_input_size:
@@ -297,7 +297,7 @@ def _resolve_target_device(device: str | None, gpus: tuple[int, ...] | None) -> 
         ValueError: When an explicitly requested CUDA index is not present on the machine.
     """
     request = (device or "auto").lower()
-    available = get_cuda_device_count()
+    available = _get_cuda_device_count()
 
     if request == "cpu":
         return "cpu", ()
@@ -354,14 +354,14 @@ def _resolve_amp(amp: AmpMode, device: str, gpus: tuple[int, ...]) -> torch.dtyp
     if amp == "auto":
         # Enable bfloat16 only where it is natively fast so the automatic default stays close to stock float32. On CPU
         # the benefit is chip-dependent, so bfloat16 there is left as an explicit opt-in rather than an auto default.
-        if device == "cuda" and resolve_bfloat16_support(gpus):
+        if device == "cuda" and _resolve_bfloat16_support(gpus):
             return torch.bfloat16
         return None
     if amp == "bf16":
         if device == "mps":
             _warn("bfloat16 autocast is unreliable on MPS. Disabling mixed precision.")
             return None
-        if device == "cuda" and not resolve_bfloat16_support(gpus):
+        if device == "cuda" and not _resolve_bfloat16_support(gpus):
             _warn(
                 "bfloat16 was requested but the selected GPU lacks native bfloat16 support (pre-Ampere); it may run "
                 "slowly. Consider '--amp fp16' instead."
@@ -385,7 +385,7 @@ def _resolve_gpu_processes(gpu_processes: int) -> int:
     """
     if gpu_processes >= 1:
         return gpu_processes
-    return DEFAULT_GPU_PROCESSES
+    return _DEFAULT_GPU_PROCESSES
 
 
 def _resolve_cpu_parallelism(cpu_workers: int, cpu_threads_per_worker: int) -> tuple[int, int]:
@@ -393,7 +393,7 @@ def _resolve_cpu_parallelism(cpu_workers: int, cpu_threads_per_worker: int) -> t
 
     Throughput on a many-core CPU comes from several bounded-thread worker processes, each pinned to a disjoint core
     block, rather than one process that owns every core. This shares the usable physical cores across workers while
-    holding ``DEFAULT_RESERVED_CPU_THREADS`` back for decode and other work.
+    holding ``_DEFAULT_RESERVED_CPU_THREADS`` back for decode and other work.
 
     Args:
         cpu_workers: The requested worker count, or -1 to choose automatically.
@@ -403,7 +403,7 @@ def _resolve_cpu_parallelism(cpu_workers: int, cpu_threads_per_worker: int) -> t
         A tuple of the resolved worker count and per-worker thread count (each at least one).
     """
     physical = psutil.cpu_count(logical=False) or os.cpu_count() or 1
-    usable = max(1, physical - DEFAULT_RESERVED_CPU_THREADS)
+    usable = max(1, physical - _DEFAULT_RESERVED_CPU_THREADS)
 
     threads = cpu_threads_per_worker if cpu_threads_per_worker >= 1 else min(_DEFAULT_CPU_THREADS_PER_WORKER, usable)
     workers = cpu_workers if cpu_workers >= 1 else max(1, usable // threads)

@@ -18,9 +18,9 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "--dest",
     "dest",
     type=click.Path(file_okay=False, path_type=Path),
-    default=Path(),
-    show_default=True,
-    help="The directory prediction files are written to.",
+    default=None,
+    help="The directory prediction files are written to. Omit to write each video's predictions beside the video "
+    "itself, matching DeepLabCut and the location the 'extract-outliers' step reads.",
 )
 @click.option("-s", "--shuffle", default=1, show_default=True, help="The shuffle index whose trained model is used.")
 @click.option(
@@ -55,9 +55,11 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 @click.option(
     "--to-polars/--no-to-polars",
     "to_polars",
-    default=True,
+    default=False,
     show_default=True,
-    help="Whether to convert each video's predictions in-flight to a wide polars feather file.",
+    help="Whether to convert each video's predictions in-flight to a wide polars feather file. Off by default so the "
+    "command behaves like DeepLabCut's own analyze and preserves the native prediction files the refinement loop "
+    "(evaluation, outlier extraction) reads; the feather output is deferred to the deployment path.",
 )
 @click.option(
     "--likelihood-threshold",
@@ -76,11 +78,11 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 @click.option(
     "--keep-dlc-outputs/--no-keep-dlc-outputs",
     "keep_dlc_outputs",
-    default=False,
+    default=True,
     show_default=True,
-    help="Whether to keep DeepLabCut's own prediction files (HDF5, pickles, and tracker files) in the destination. By "
-    "default, once predictions are converted to feather, deployment leaves only the feather and its provenance "
-    "sidecar.",
+    help="Whether to keep DeepLabCut's own prediction files (HDF5, pickles, and tracker files) in the destination. "
+    "Kept by default so all DeepLabCut data survives; only takes effect with --to-polars, since conversion is what "
+    "would otherwise remove them.",
 )
 @click.option(
     "--device",
@@ -192,7 +194,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 def infer_command(
     config: Path,
     videos: tuple[Path, ...],
-    dest: Path,
+    dest: Path | None,
     shuffle: int,
     snapshot_index: int | None,
     detector_snapshot_index: int | None,
@@ -222,9 +224,10 @@ def infer_command(
 
     CONFIG is the path to the DeepLabCut project's config.yaml, and VIDEOS are the video files to analyze. Each worker
     analyzes whole videos pulled from a shared queue, so the work is balanced without splitting any video, and every
-    forward pass runs with the mixed precision and memory format chosen for the detected hardware. Predictions are
-    written to the destination directory and, by default, converted in-flight to wide polars feather files for the rest
-    of the Sollertia stack. The same command runs on multiple GPUs, one GPU, or a CPU-only machine.
+    forward pass runs with the mixed precision and memory format chosen for the detected hardware. By default it writes
+    DeepLabCut's native prediction files (preserving them for the evaluation and outlier-extraction steps of the
+    refinement loop); pass ``--to-polars`` to also convert them to wide polars feather files. The same command runs on
+    multiple GPUs, one GPU, or a CPU-only machine.
     """
     try:
         gpu_indices = tuple(int(part) for part in gpus.split(",")) if gpus else None

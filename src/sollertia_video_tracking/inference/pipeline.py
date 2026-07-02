@@ -40,8 +40,9 @@ class InferenceSummary:
     """The path of the DeepLabCut project configuration file inference ran for."""
     video_count: int
     """The number of videos submitted for inference."""
-    destination: Path
-    """The directory the prediction files were written to."""
+    destination: Path | None
+    """The directory the prediction files were written to, or None when each video's predictions were written beside
+    the video itself."""
     device: str
     """The base device type inference ran on (``"cuda"``, ``"cpu"``, or ``"mps"``)."""
     workers: int
@@ -65,10 +66,8 @@ class InferenceSummary:
         where = f"{self.device} x{self.workers}"
         fmt = "feather" if self.converted else "h5"
         tail = f", {len(self.failures)} failed" if self.failures else ""
-        return (
-            f"analyzed {ok}/{self.video_count} videos on {where} in {self.precision} "
-            f"-> {fmt} in {self.destination}{tail}"
-        )
+        written_to = self.destination if self.destination is not None else "each video's folder"
+        return f"analyzed {ok}/{self.video_count} videos on {where} in {self.precision} -> {fmt} in {written_to}{tail}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +88,7 @@ class _InferenceLaunch:
     shuffle: int
     snapshot_index: int | None
     detector_snapshot_index: int | None
-    destination: Path
+    destination: Path | None
     profile: InferenceProfile
     batch_size: int | None
     detector_batch_size: int | None
@@ -106,18 +105,18 @@ class _InferenceLaunch:
 def run_inference(
     config: str | Path,
     videos: list[str | Path],
-    destination: str | Path,
     profile: InferenceProfile,
     *,
+    destination: str | Path | None = None,
     shuffle: int = 1,
     snapshot_index: int | None = None,
     detector_snapshot_index: int | None = None,
     batch_size: int | None = None,
     detector_batch_size: int | None = None,
-    to_polars: bool = True,
+    to_polars: bool = False,
     likelihood_threshold: float = 0.0,
     save_as_csv: bool = False,
-    keep_dlc_outputs: bool = False,
+    keep_dlc_outputs: bool = True,
     heartbeat: float = 30.0,
     display_progress: bool = True,
 ) -> InferenceSummary:
@@ -132,19 +131,22 @@ def run_inference(
     Args:
         config: The path of the DeepLabCut project configuration file.
         videos: The video files to analyze.
-        destination: The directory prediction files are written to.
         profile: The resolved optimization profile describing the device, precision, and parallelism to use.
+        destination: The directory prediction files are written to, or None to write each video's predictions beside
+            the video itself, matching DeepLabCut's own default and the location the outlier-extraction step reads.
         shuffle: The shuffle index whose trained model is used.
         snapshot_index: The pose snapshot index to use, or None for the configured default.
         detector_snapshot_index: The detector snapshot index to use, or None for the configured default.
         batch_size: The pose-model inference batch size, or None to use the configured value.
         detector_batch_size: The detector inference batch size, or None to use the configured value.
-        to_polars: Whether to convert each video's predictions in-flight to a polars feather file.
+        to_polars: Whether to convert each video's predictions in-flight to a polars feather file. Off by default so
+            the pipeline behaves like DeepLabCut's own analyze and leaves the project's native prediction files intact
+            for the rest of the model-refinement loop; the feather is deferred to the deployment path.
         likelihood_threshold: The likelihood below which keypoint positions are masked to NaN during conversion.
         save_as_csv: Whether DeepLabCut also writes a CSV alongside each prediction file.
         keep_dlc_outputs: Whether to keep DeepLabCut's own prediction artifacts (the HDF5 table, the full/meta/
-            assemblies pickles, and any tracker files) after conversion. By default deployment removes them once the
-            feather is written, leaving only the feather and its provenance sidecar in the destination.
+            assemblies pickles, and any tracker files) after conversion. Kept by default so all DeepLabCut data
+            survives; only relevant when ``to_polars`` is set, since conversion is what would otherwise remove them.
         heartbeat: The minimum interval, in seconds, between progress lines when the output is not a TTY.
         display_progress: Whether to render the live aggregate progress bar.
 
@@ -155,12 +157,13 @@ def run_inference(
         ValueError: When no videos are provided.
     """
     config = Path(config)
-    destination = Path(destination)
+    destination = Path(destination) if destination is not None else None
     video_paths = [Path(video) for video in videos]
     if not video_paths:
         message = "Unable to run inference. Expected at least one video, but got an empty video list."
         raise ValueError(message)
-    destination.mkdir(parents=True, exist_ok=True)
+    if destination is not None:
+        destination.mkdir(parents=True, exist_ok=True)
 
     totals = {index: _probe_frame_count(video) for index, video in enumerate(video_paths)}
     slots = _build_slots(profile, video_count=len(video_paths))
@@ -257,9 +260,7 @@ def _build_slots(profile: InferenceProfile, video_count: int) -> list[_Slot]:
         # (cuda:0, cuda:0, cuda:1, ...). When there are fewer videos than slots, the list is truncated below, so this
         # ordering spreads the surviving workers across every GPU before oversubscribing any single one.
         slots = [
-            _Slot(device=f"cuda:{index}", cores=None)
-            for _ in range(profile.gpu_processes)
-            for index in profile.gpus
+            _Slot(device=f"cuda:{index}", cores=None) for _ in range(profile.gpu_processes) for index in profile.gpus
         ]
     elif profile.device == "cpu":
         core_count = psutil.cpu_count(logical=True) or os.cpu_count() or 1
@@ -395,6 +396,7 @@ def _analyze_one_video(slot: _Slot, launch: _InferenceLaunch, item: tuple[int, s
         item: The (video index, video path, frame total) work item pulled from the queue.
     """
     index, video, total = item
+    output_folder = launch.destination if launch.destination is not None else Path(video).parent
     original_tqdm = dlc_videos.tqdm
     if launch.display_progress:
         dlc_videos.tqdm = make_progress_reporter(launch.progress_queue, index, total)
@@ -405,7 +407,7 @@ def _analyze_one_video(slot: _Slot, launch: _InferenceLaunch, item: tuple[int, s
                 videos=[video],
                 shuffle=launch.shuffle,
                 device=slot.device,
-                destfolder=str(launch.destination),
+                destfolder=str(output_folder),
                 snapshot_index=launch.snapshot_index,
                 detector_snapshot_index=launch.detector_snapshot_index,
                 batch_size=launch.batch_size,
@@ -417,7 +419,7 @@ def _analyze_one_video(slot: _Slot, launch: _InferenceLaunch, item: tuple[int, s
                 overwrite=True,
                 inference_cfg=_STOCK_ACCELERATION_DISABLED,
             )
-        output = _resolve_output(launch, video, scorer)
+        output = _resolve_output(launch, video, scorer, output_folder)
         launch.results_queue.put((index, str(output) if output is not None else None, None))
     except Exception as error:  # noqa: BLE001 - report the per-video failure and keep draining the queue.
         launch.results_queue.put((index, None, f"{type(error).__name__}: {error}"))
@@ -450,24 +452,26 @@ def _cleanup_dlc_artifacts(destination: Path, stem: str, scorer: str, *, keep_cs
         artifact.unlink(missing_ok=True)
 
 
-def _resolve_output(launch: _InferenceLaunch, video: str, scorer: str) -> Path | None:
+def _resolve_output(launch: _InferenceLaunch, video: str, scorer: str, destination: Path) -> Path | None:
     """Locates the prediction HDF5 DeepLabCut wrote and optionally converts it to a polars feather.
 
     Args:
-        launch: The bundle of per-run parameters, providing the destination and conversion settings.
+        launch: The bundle of per-run parameters, providing the conversion settings.
         video: The analyzed video path.
         scorer: The DeepLabCut scorer string returned by ``analyze_videos``, which names the output file.
+        destination: The folder this video's predictions were written to, which is the video's own folder when the run
+            configured no destination.
 
     Returns:
         The produced feather (when converting) or HDF5 file, or None when no prediction file was written.
     """
     stem = Path(video).stem
-    exact = launch.destination / f"{stem}{scorer}.h5"
+    exact = destination / f"{stem}{scorer}.h5"
     if exact.exists():
         h5_path: Path | None = exact
     else:
         # Multi-animal auto-tracking writes a tracker-suffixed file instead of the plain per-frame table.
-        matches = sorted(launch.destination.glob(f"{stem}{scorer}*.h5"))
+        matches = sorted(destination.glob(f"{stem}{scorer}*.h5"))
         h5_path = matches[-1] if matches else None
 
     if h5_path is None:
@@ -475,11 +479,11 @@ def _resolve_output(launch: _InferenceLaunch, video: str, scorer: str) -> Path |
     if not launch.to_polars:
         return h5_path
 
-    feather_path = launch.destination / f"{stem}_pose.feather"
+    feather_path = destination / f"{stem}_pose.feather"
     convert_predictions_to_feather(h5_path, feather_path, likelihood_threshold=launch.likelihood_threshold)
     # Deployment leaves only the feather and its provenance sidecar: once conversion succeeds, remove DeepLabCut's own
     # prediction artifacts for this video. Conversion runs just above, so a failed conversion raises before this point
     # and leaves those artifacts in place as a fallback.
     if not launch.keep_dlc_outputs:
-        _cleanup_dlc_artifacts(launch.destination, stem, scorer, keep_csv=launch.save_as_csv)
+        _cleanup_dlc_artifacts(destination, stem, scorer, keep_csv=launch.save_as_csv)
     return feather_path

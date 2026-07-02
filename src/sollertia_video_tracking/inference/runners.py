@@ -66,7 +66,7 @@ def patch_dlc_runner_builders(profile: InferenceProfile) -> Iterator[None]:
                 runner = builder(*args, **kwargs)
             finally:
                 building["active"] = False
-            return optimize_inference_runner(runner, profile)
+            return _optimize_inference_runner(runner, profile)
 
         return build_and_optimize
 
@@ -79,7 +79,7 @@ def patch_dlc_runner_builders(profile: InferenceProfile) -> Iterator[None]:
         dlc_apis_utils.get_detector_inference_runner = original_detector
 
 
-def optimize_inference_runner(runner: InferenceRunner, profile: InferenceProfile) -> InferenceRunner:
+def _optimize_inference_runner(runner: InferenceRunner, profile: InferenceProfile) -> InferenceRunner:
     """Enhances a DeepLabCut inference runner in place with mixed precision, channels-last, and ``torch.compile``.
 
     The runner's forward pass is replaced with a version that wraps the model call in the profile's autocast context

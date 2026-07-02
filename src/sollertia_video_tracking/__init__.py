@@ -22,6 +22,11 @@ for _thread_limit_variable in (
 os.environ.setdefault("OPENCV_LOG_LEVEL", "SILENT")
 os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "-8")
 
+# Hard-pins matplotlib to its non-interactive backend before DeepLabCut's outlier-extraction module imports pyplot.
+# This library only ever writes frames to disk and targets headless compute servers, so the Agg backend is forced
+# regardless of any inherited MPLBACKEND, keeping the spawned workers display-independent.
+os.environ["MPLBACKEND"] = "Agg"
+
 from .training import (  # noqa: E402 - after thread-limit setup
     TrainingSummary,
     OptimizationProfile,
@@ -44,7 +49,12 @@ from .inference import (  # noqa: E402 - after thread-limit setup
     resolve_inference_profile,
     convert_predictions_to_feather,
 )
-from .frame_extraction import FrameExtractionSummary, extract_frames_kmeans  # noqa: E402 - after thread-limit setup
+from .frame_extraction import (  # noqa: E402 - after thread-limit setup
+    FrameExtractionSummary,
+    OutlierExtractionSummary,
+    extract_frames_kmeans,
+    extract_outlier_frames_parallel,
+)
 
 __all__ = [
     "ConversionSummary",
@@ -52,6 +62,7 @@ __all__ = [
     "InferenceProfile",
     "InferenceSummary",
     "OptimizationProfile",
+    "OutlierExtractionSummary",
     "TrainingDatasetSummary",
     "TrainingSummary",
     "build_conditional_top_down_conditions",
@@ -59,6 +70,7 @@ __all__ = [
     "convert_predictions_to_feather",
     "create_training_dataset",
     "extract_frames_kmeans",
+    "extract_outlier_frames_parallel",
     "get_available_augmenters",
     "get_available_object_detectors",
     "get_available_pose_models",
