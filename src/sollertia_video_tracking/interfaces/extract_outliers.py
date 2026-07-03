@@ -4,7 +4,7 @@ from pathlib import Path
 
 import click
 
-from ..frame_extraction import DEFAULT_RESERVE_CORES, extract_outlier_frames_parallel
+from ..frame_extraction import DEFAULT_RESERVED_CORE_COUNT, extract_outlier_frames_parallel
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the lab standard."""
@@ -15,7 +15,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 @click.argument("videos", nargs=-1, required=True, type=click.Path(exists=True, path_type=Path))
 @click.option(
     "-a",
-    "--algorithm",
+    "--outlier-algorithm",
     "outlier_algorithm",
     type=click.Choice(["jump", "uncertain", "fitting", "list"]),
     default="jump",
@@ -25,14 +25,21 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 )
 @click.option(
     "-e",
-    "--extraction",
+    "--extraction-algorithm",
     "extraction_algorithm",
     type=click.Choice(["kmeans", "uniform"]),
     default="kmeans",
     show_default=True,
     help="The algorithm that selects the extracted frames from the flagged outlier candidates.",
 )
-@click.option("-s", "--shuffle", default=1, show_default=True, help="The shuffle index whose trained model was used.")
+@click.option(
+    "-s",
+    "--shuffle",
+    "shuffle_index",
+    default=1,
+    show_default=True,
+    help="The shuffle index whose trained model was used.",
+)
 @click.option(
     "--training-set-index",
     "training_set_index",
@@ -41,14 +48,15 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     help="The training-set fraction index.",
 )
 @click.option(
-    "--epsilon",
+    "--pixel-distance-threshold",
+    "pixel_distance_threshold",
     default=20.0,
     show_default=True,
     help="The pixel bound for the 'jump' and 'fitting' algorithms.",
 )
 @click.option(
-    "--p-bound",
-    "p_bound",
+    "--minimum-confidence",
+    "minimum_confidence",
     default=0.01,
     show_default=True,
     help="The likelihood bound for the 'uncertain' algorithm and the 'fitting' model's missing-data mask.",
@@ -62,37 +70,38 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "consider every bodypart.",
 )
 @click.option(
-    "--frames",
-    "frames_to_use",
+    "--frame-index",
+    "explicit_frame_indices",
     multiple=True,
     type=int,
     metavar="FRAME",
-    help="An explicit frame index to extract when --algorithm list is used. Provide the option multiple times.",
+    help="An explicit frame index to extract when --outlier-algorithm list is used. Provide the option multiple times.",
 )
 @click.option(
-    "--ar-degree",
-    "ar_degree",
+    "--autoregressive-degree",
+    "autoregressive_degree",
     default=3,
     show_default=True,
     help="The 'fitting' algorithm's SARIMAX autoregressive degree.",
 )
 @click.option(
-    "--ma-degree",
-    "ma_degree",
+    "--moving-average-degree",
+    "moving_average_degree",
     default=1,
     show_default=True,
     help="The 'fitting' algorithm's SARIMAX moving-average degree.",
 )
 @click.option(
-    "--alpha",
+    "--significance-level",
+    "significance_level",
     default=0.01,
     show_default=True,
     help="The significance level for the 'fitting' algorithm's confidence interval.",
 )
 @click.option(
     "-n",
-    "--num-frames",
-    "num_frames",
+    "--frames-per-video",
+    "frames_per_video",
     type=int,
     default=-1,
     show_default=True,
@@ -100,22 +109,22 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "value already stored in the configuration file.",
 )
 @click.option(
-    "--cluster-resize-width",
-    "cluster_resize_width",
+    "--clustering-resize-width",
+    "clustering_resize_width",
     default=30,
     show_default=True,
     help="The downsample width applied before clustering when selecting with kmeans.",
 )
 @click.option(
     "--color/--grayscale",
-    "cluster_color",
+    "cluster_in_color",
     default=False,
     show_default=True,
     help="Determines whether kmeans selection clusters on color channels instead of grayscale.",
 )
 @click.option(
     "--save-labeled",
-    "save_labeled",
+    "save_labeled_frames",
     is_flag=True,
     help="Also save each extracted frame with the model's predictions drawn on it.",
 )
@@ -127,23 +136,28 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 )
 @click.option(
     "-d",
-    "--destfolder",
-    "destfolder",
+    "--predictions-directory",
+    "predictions_directory",
     type=click.Path(file_okay=False, path_type=Path),
     default=None,
     help="The directory holding the analyzed predictions. Omit to look for predictions beside each video.",
 )
-@click.option("--modelprefix", default="", help="The model subdirectory prefix, matching the trained shuffle.")
 @click.option(
-    "--track-method",
-    "track_method",
+    "--model-prefix",
+    "model_prefix",
+    default="",
+    help="The model subdirectory prefix, matching the trained shuffle.",
+)
+@click.option(
+    "--tracking-method",
+    "tracking_method",
     default="",
     help="The multi-animal tracker ('box', 'skeleton', or 'ellipse') that produced the data. Omit to read it from "
     "config.yaml.",
 )
 @click.option(
     "--snapshot-index",
-    "snapshot_index",
+    "pose_snapshot_index",
     type=int,
     default=None,
     help="The pose snapshot index whose scorer named the prediction files. Omit to use the configured default.",
@@ -165,6 +179,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 @click.option(
     "-w",
     "--workers",
+    "worker_count",
     type=int,
     default=-1,
     show_default=True,
@@ -182,14 +197,14 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 @click.option(
     "-r",
     "--reserve-cores",
-    "reserve_cores",
-    default=DEFAULT_RESERVE_CORES,
+    "reserved_core_count",
+    default=DEFAULT_RESERVED_CORE_COUNT,
     show_default=True,
     help="The number of CPU cores left free for other tasks while extraction runs.",
 )
 @click.option(
     "--fit-workers",
-    "fit_workers",
+    "fitting_worker_count",
     type=int,
     default=-1,
     show_default=True,
@@ -197,7 +212,8 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "core, which scales the expensive fitting path across the whole run.",
 )
 @click.option(
-    "--heartbeat",
+    "--minimum-progress-interval",
+    "minimum_progress_interval",
     default=30.0,
     show_default=True,
     metavar="SECONDS",
@@ -215,31 +231,31 @@ def extract_outliers_command(
     videos: tuple[Path, ...],
     outlier_algorithm: str,
     extraction_algorithm: str,
-    shuffle: int,
+    shuffle_index: int,
     training_set_index: int,
-    epsilon: float,
-    p_bound: float,
+    pixel_distance_threshold: float,
+    minimum_confidence: float,
     comparison_bodyparts: tuple[str, ...],
-    frames_to_use: tuple[int, ...],
-    ar_degree: int,
-    ma_degree: int,
-    alpha: float,
-    num_frames: int,
-    cluster_resize_width: int,
-    destfolder: Path | None,
-    modelprefix: str,
-    track_method: str,
-    snapshot_index: int | None,
+    explicit_frame_indices: tuple[int, ...],
+    autoregressive_degree: int,
+    moving_average_degree: int,
+    significance_level: float,
+    frames_per_video: int,
+    clustering_resize_width: int,
+    predictions_directory: Path | None,
+    model_prefix: str,
+    tracking_method: str,
+    pose_snapshot_index: int | None,
     detector_snapshot_index: int | None,
     video_extensions: tuple[str, ...],
-    workers: int,
+    worker_count: int,
     cores_per_worker: int,
-    reserve_cores: int,
-    fit_workers: int,
-    heartbeat: float,
+    reserved_core_count: int,
+    fitting_worker_count: int,
+    minimum_progress_interval: float,
     *,
-    cluster_color: bool,
-    save_labeled: bool,
+    cluster_in_color: bool,
+    save_labeled_frames: bool,
     copy_videos: bool,
     display_progress: bool,
 ) -> None:
@@ -256,39 +272,39 @@ def extract_outliers_command(
         summary = extract_outlier_frames_parallel(
             config_path=config,
             videos=list(videos),
-            shuffle=shuffle,
+            shuffle_index=shuffle_index,
             training_set_index=training_set_index,
             outlier_algorithm=outlier_algorithm,
-            frames_to_use=frames_to_use,
+            explicit_frame_indices=explicit_frame_indices,
             comparison_bodyparts=comparison_bodyparts,
-            epsilon=epsilon,
-            p_bound=p_bound,
-            ar_degree=ar_degree,
-            ma_degree=ma_degree,
-            alpha=alpha,
+            pixel_distance_threshold=pixel_distance_threshold,
+            minimum_confidence=minimum_confidence,
+            autoregressive_degree=autoregressive_degree,
+            moving_average_degree=moving_average_degree,
+            significance_level=significance_level,
             extraction_algorithm=extraction_algorithm,
-            num_frames=num_frames,
-            cluster_resize_width=cluster_resize_width,
-            cluster_color=cluster_color,
-            save_labeled=save_labeled,
+            frames_per_video=frames_per_video,
+            clustering_resize_width=clustering_resize_width,
+            cluster_in_color=cluster_in_color,
+            save_labeled_frames=save_labeled_frames,
             copy_videos=copy_videos,
-            destfolder=destfolder,
-            modelprefix=modelprefix,
-            track_method=track_method,
-            snapshot_index=snapshot_index,
+            predictions_directory=predictions_directory,
+            model_prefix=model_prefix,
+            tracking_method=tracking_method,
+            pose_snapshot_index=pose_snapshot_index,
             detector_snapshot_index=detector_snapshot_index,
             video_extensions=video_extensions,
-            workers=workers,
+            worker_count=worker_count,
             cores_per_worker=cores_per_worker,
-            reserve_cores=reserve_cores,
-            fit_workers=fit_workers,
-            heartbeat=heartbeat,
+            reserved_core_count=reserved_core_count,
+            fitting_worker_count=fitting_worker_count,
+            minimum_progress_interval=minimum_progress_interval,
             display_progress=display_progress,
         )
     except (ValueError, FileNotFoundError) as error:
         raise click.ClickException(message=str(error)) from error
 
-    for video in summary.not_analyzed:
+    for video in summary.unanalyzed_videos:
         click.echo(message=f"skipped (not analyzed): {video}", err=True)
     for video, traceback_text in summary.errors:
         click.echo(message=f"\n--- error in {video} ---\n{traceback_text}", err=True)

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import click
 
-from ..frame_extraction import DEFAULT_RESERVE_CORES, extract_frames_kmeans
+from ..frame_extraction import DEFAULT_RESERVED_CORE_COUNT, extract_frames_kmeans
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the lab standard."""
@@ -14,7 +14,8 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 @click.argument("config", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(
     "-s",
-    "--step",
+    "--clustering-stride",
+    "clustering_stride",
     default=500,
     show_default=True,
     help="The clustering stride passed to DeepLabCut as cluster_step; every Nth frame is sampled. Larger values "
@@ -23,6 +24,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 @click.option(
     "-w",
     "--workers",
+    "worker_count",
     type=int,
     default=-1,
     show_default=True,
@@ -42,15 +44,15 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 @click.option(
     "-r",
     "--reserve-cores",
-    "reserve_cores",
-    default=DEFAULT_RESERVE_CORES,
+    "reserved_core_count",
+    default=DEFAULT_RESERVED_CORE_COUNT,
     show_default=True,
     help="The number of CPU cores left free for other tasks while extraction runs.",
 )
 @click.option(
     "-n",
-    "--num-frames",
-    "num_frames",
+    "--frames-per-video",
+    "frames_per_video",
     type=int,
     default=-1,
     show_default=True,
@@ -60,17 +62,17 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 @click.option(
     "-t",
     "--total-frames",
-    "total_frames",
+    "total_frame_budget",
     type=int,
     default=-1,
     show_default=True,
     help="The total number of frames to hold across the project. When set, a random subset of not-yet-extracted "
-    "videos is sampled to reach this budget (each contributing --num-frames frames), growing coverage on repeated "
-    "runs. Set to -1 to extract every selected video instead.",
+    "videos is sampled to reach this budget (each contributing --frames-per-video frames), growing coverage on "
+    "repeated runs. Set to -1 to extract every selected video instead.",
 )
 @click.option(
     "--seed",
-    "seed",
+    "random_seed",
     type=int,
     default=None,
     help="The seed for the random video subset draw. Omit for a different random subset each run, or set it to make "
@@ -86,7 +88,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 )
 @click.option(
     "--group-by",
-    "group_by",
+    "group_by_pattern",
     default=None,
     metavar="REGEX",
     help="A regular expression whose first capturing group names the group for each video's file name, overriding the "
@@ -94,8 +96,8 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "Implies --balance-groups.",
 )
 @click.option(
-    "--videos",
-    "videos_override",
+    "--always-include",
+    "always_include_videos",
     multiple=True,
     metavar="SUBSTRING",
     help="A path substring naming a video to always include in the budgeted sample, selected before the balanced or "
@@ -103,15 +105,15 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "--total-frames.",
 )
 @click.option(
-    "--resize-width",
-    "resize_width",
+    "--clustering-resize-width",
+    "clustering_resize_width",
     default=30,
     show_default=True,
     help="The downsample width applied before clustering, passed to DeepLabCut as cluster_resizewidth.",
 )
 @click.option(
     "--color/--grayscale",
-    "color",
+    "cluster_in_color",
     default=False,
     show_default=True,
     help="Determines whether to cluster on color channels instead of grayscale.",
@@ -131,7 +133,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "Mutually exclusive with --overwrite.",
 )
 @click.option(
-    "--only",
+    "--path-filter",
     "path_filters",
     multiple=True,
     metavar="SUBSTRING",
@@ -139,7 +141,8 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "times to match several substrings.",
 )
 @click.option(
-    "--heartbeat",
+    "--minimum-progress-interval",
+    "minimum_progress_interval",
     default=30.0,
     show_default=True,
     metavar="SECONDS",
@@ -154,21 +157,21 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 )
 def extract_frames_command(
     config: Path,
-    step: int,
-    workers: int,
+    clustering_stride: int,
+    worker_count: int,
     cores_per_worker: int,
-    reserve_cores: int,
-    num_frames: int,
-    total_frames: int,
-    seed: int | None,
-    group_by: str | None,
-    videos_override: tuple[str, ...],
-    resize_width: int,
+    reserved_core_count: int,
+    frames_per_video: int,
+    total_frame_budget: int,
+    random_seed: int | None,
+    group_by_pattern: str | None,
+    always_include_videos: tuple[str, ...],
+    clustering_resize_width: int,
     path_filters: tuple[str, ...],
-    heartbeat: float,
+    minimum_progress_interval: float,
     *,
     balance_groups: bool,
-    color: bool,
+    cluster_in_color: bool,
     overwrite: bool,
     reset: bool,
     display_progress: bool,
@@ -183,22 +186,22 @@ def extract_frames_command(
     try:
         summary = extract_frames_kmeans(
             config_path=config,
-            step=step,
-            workers=workers,
+            clustering_stride=clustering_stride,
+            worker_count=worker_count,
             cores_per_worker=cores_per_worker,
-            reserve_cores=reserve_cores,
-            num_frames=num_frames,
-            total_frames=total_frames,
-            seed=seed,
+            reserved_core_count=reserved_core_count,
+            frames_per_video=frames_per_video,
+            total_frame_budget=total_frame_budget,
+            random_seed=random_seed,
             balance_groups=balance_groups,
-            group_by=group_by,
-            videos_override=videos_override,
-            resize_width=resize_width,
-            color=color,
+            group_by_pattern=group_by_pattern,
+            always_include_videos=always_include_videos,
+            clustering_resize_width=clustering_resize_width,
+            cluster_in_color=cluster_in_color,
             overwrite=overwrite,
             reset=reset,
             path_filters=path_filters,
-            heartbeat=heartbeat,
+            minimum_progress_interval=minimum_progress_interval,
             display_progress=display_progress,
         )
     except (ValueError, FileNotFoundError) as error:
@@ -208,8 +211,8 @@ def extract_frames_command(
         click.echo(message=f"\n--- error in {video} ---\n{traceback_text}", err=True)
     click.echo(
         message=(
-            f"done: {summary.extracted} extracted, {summary.skipped} skipped, {summary.failed} failed "
-            f"(of {summary.total})"
+            f"done: {summary.extracted_video_count} extracted, {summary.skipped_video_count} skipped, "
+            f"{summary.failed_video_count} failed (of {summary.total_video_count})"
         ),
     )
     if not summary.successful:

@@ -180,7 +180,10 @@ def run_inference(
     bar = None
     if display_progress:
         bar = AggregateBar(
-            progress_queue=progress_queue, total_videos=len(video_paths), totals=totals, heartbeat=heartbeat
+            progress_queue=progress_queue,
+            total_video_count=len(video_paths),
+            frame_totals=totals,
+            minimum_progress_interval=heartbeat,
         )
         bar.start()
 
@@ -266,10 +269,10 @@ def _build_slots(profile: InferenceProfile, video_count: int) -> list[_Slot]:
         core_count = psutil.cpu_count(logical=True) or os.cpu_count() or 1
         _workers, core_sets = plan_core_allocation(
             video_count=video_count,
-            core_count=core_count,
-            workers=profile.cpu_workers,
+            total_core_count=core_count,
+            worker_count=profile.cpu_workers,
             cores_per_worker=profile.cpu_threads_per_worker or -1,
-            reserve_cores=core_count - _usable_cpu_cores(profile),
+            reserved_core_count=core_count - _usable_cpu_cores(profile),
         )
         slots = [_Slot(device="cpu", cores=tuple(sorted(cores))) for cores in core_sets]
     else:

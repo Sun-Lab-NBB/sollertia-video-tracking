@@ -17,7 +17,7 @@ from deeplabcut.utils.auxfun_videos import collect_video_paths
 from deeplabcut.refine_training_dataset import outlier_frames as dlc_outlier_frames
 
 from .progress import AggregateBar, make_progress_reporter
-from .cpu_allocation import DEFAULT_RESERVE_CORES, pin_worker_to_cores, plan_core_allocation
+from .cpu_allocation import DEFAULT_RESERVED_CORE_COUNT, pin_worker_to_cores, plan_core_allocation
 from .outlier_detection import (
     OUTLIER_ALGORITHMS,
     jump_outlier_indices,
@@ -40,45 +40,45 @@ class OutlierExtractionSummary:
 
     Notes:
         The pipeline never aborts on a single bad video, so per-video problems are collected here rather than raised.
-        Videos whose predictions are missing are listed in ``not_analyzed`` (they must be analyzed first), and videos
-        that raised during detection or extraction are listed in ``errors`` as ``(video_path, detail)`` pairs. Callers
-        inspect ``successful`` to decide the process exit status.
+        Videos whose predictions are missing are listed in ``unanalyzed_videos`` (they must be analyzed first), and
+        videos that raised during detection or extraction are listed in ``errors`` as ``(video_path, detail)`` pairs.
+        Callers inspect ``successful`` to decide the process exit status.
     """
 
-    config: Path
+    config_path: Path
     """The path to the DeepLabCut project's config.yaml the run used."""
-    algorithm: str
+    outlier_algorithm: str
     """The outlier-detection algorithm that flagged the candidate frames."""
     extraction_algorithm: str
     """The frame-selection algorithm that picked the extracted frames from the candidates."""
-    total: int
+    total_video_count: int
     """The total number of videos considered in the run."""
-    extracted: int
+    extracted_video_count: int
     """The number of videos from which outlier frames were extracted."""
-    workers: int
+    worker_count: int
     """The number of worker processes that ran concurrently during the extraction phase."""
-    cores_used: int
+    used_core_count: int
     """The number of distinct CPU cores the extraction workers were pinned across."""
-    core_count: int
+    total_core_count: int
     """The total number of CPU cores available on the machine."""
-    candidate_frames: int
+    candidate_frame_count: int
     """The total number of putative outlier frames flagged across the extracted videos."""
-    frames_extracted: int
+    extracted_frame_count: int
     """The total number of frames freshly written into the project's labeled-data tree across all videos."""
-    not_analyzed: tuple[str, ...] = ()
+    unanalyzed_videos: tuple[str, ...] = ()
     """The videos skipped because no matching predictions were found; they must be analyzed before refinement."""
     errors: tuple[tuple[str, str], ...] = ()
     """The ``(video_path, detail)`` pairs for every video that raised during detection or extraction."""
 
     @property
-    def failed(self) -> int:
+    def failed_video_count(self) -> int:
         """Returns the number of videos that raised during detection or extraction."""
         return len(self.errors)
 
     @property
     def successful(self) -> bool:
         """Returns whether the run completed with every video analyzed and extracted without error."""
-        return not self.errors and not self.not_analyzed
+        return not self.errors and not self.unanalyzed_videos
 
     def describe(self) -> str:
         """Builds a one-line human-readable summary of the extraction run for the CLI.
@@ -87,13 +87,14 @@ class OutlierExtractionSummary:
             A compact description of how many videos yielded outlier frames and how many frames were written.
         """
         tail = ""
-        if self.not_analyzed:
-            tail += f", {len(self.not_analyzed)} not analyzed"
+        if self.unanalyzed_videos:
+            tail += f", {len(self.unanalyzed_videos)} not analyzed"
         if self.errors:
-            tail += f", {self.failed} failed"
+            tail += f", {self.failed_video_count} failed"
         return (
-            f"{self.algorithm} outliers: extracted {self.frames_extracted} frames from {self.extracted}/{self.total} "
-            f"videos ({self.candidate_frames} candidates) on {self.workers} workers{tail}"
+            f"{self.outlier_algorithm} outliers: extracted {self.extracted_frame_count} frames from "
+            f"{self.extracted_video_count}/{self.total_video_count} videos ({self.candidate_frame_count} candidates) "
+            f"on {self.worker_count} workers{tail}"
         )
 
 
@@ -101,33 +102,33 @@ def extract_outlier_frames_parallel(
     config_path: Path,
     videos: list[str | Path],
     *,
-    shuffle: int = 1,
+    shuffle_index: int = 1,
     training_set_index: int = 0,
     outlier_algorithm: str = "jump",
-    frames_to_use: tuple[int, ...] = (),
+    explicit_frame_indices: tuple[int, ...] = (),
     comparison_bodyparts: tuple[str, ...] = (),
-    epsilon: float = 20.0,
-    p_bound: float = 0.01,
-    ar_degree: int = 3,
-    ma_degree: int = 1,
-    alpha: float = 0.01,
+    pixel_distance_threshold: float = 20.0,
+    minimum_confidence: float = 0.01,
+    autoregressive_degree: int = 3,
+    moving_average_degree: int = 1,
+    significance_level: float = 0.01,
     extraction_algorithm: str = "kmeans",
-    num_frames: int = -1,
-    cluster_resize_width: int = 30,
-    cluster_color: bool = False,
-    save_labeled: bool = False,
+    frames_per_video: int = -1,
+    clustering_resize_width: int = 30,
+    cluster_in_color: bool = False,
+    save_labeled_frames: bool = False,
     copy_videos: bool = False,
-    destfolder: Path | None = None,
-    modelprefix: str = "",
-    track_method: str = "",
-    snapshot_index: int | None = None,
+    predictions_directory: Path | None = None,
+    model_prefix: str = "",
+    tracking_method: str = "",
+    pose_snapshot_index: int | None = None,
     detector_snapshot_index: int | None = None,
     video_extensions: tuple[str, ...] = (),
-    workers: int = -1,
+    worker_count: int = -1,
     cores_per_worker: int = -1,
-    reserve_cores: int = DEFAULT_RESERVE_CORES,
-    fit_workers: int = -1,
-    heartbeat: float = 30.0,
+    reserved_core_count: int = DEFAULT_RESERVED_CORE_COUNT,
+    fitting_worker_count: int = -1,
+    minimum_progress_interval: float = 30.0,
     display_progress: bool = True,
 ) -> OutlierExtractionSummary:
     """Flags and extracts a trained model's likely-wrong frames across many analyzed videos in parallel.
@@ -145,43 +146,44 @@ def extract_outlier_frames_parallel(
         The pipeline uses the spawn multiprocessing start method on every platform, so a programmatic caller must guard
         the call with ``if __name__ == "__main__":``. The installed console-script entry point is already guarded.
         Outlier extraction is additive: re-running a video appends further frames rather than replacing the existing
-        ones, so coverage grows across repeated passes. Because the pipeline calls DeepLabCut's internal
-        outlier-detection and frame-writing functions, the DeepLabCut version is pinned exactly in pyproject.toml and
-        must be re-verified against any new release.
+        ones, so coverage grows across repeated passes.
 
     Args:
         config_path: The path to the DeepLabCut project's config.yaml.
         videos: The video files (or directories of videos) to refine on; every video must already be analyzed.
-        shuffle: The shuffle index whose trained model wrote the predictions.
+        shuffle_index: The shuffle index whose trained model wrote the predictions.
         training_set_index: The training-set fraction index.
         outlier_algorithm: The detection algorithm: ``"jump"``, ``"uncertain"``, ``"fitting"``, or ``"list"``.
-        frames_to_use: The explicit frame indices to extract when ``outlier_algorithm`` is ``"list"``.
+        explicit_frame_indices: The explicit frame indices to extract when ``outlier_algorithm`` is ``"list"``.
         comparison_bodyparts: The bodyparts the detectors consider; an empty tuple considers every bodypart.
-        epsilon: The pixel bound for the ``jump`` and ``fitting`` algorithms.
-        p_bound: The likelihood bound for the ``uncertain`` algorithm and the ``fitting`` model's missing-data mask.
-        ar_degree: The autoregressive degree of the ``fitting`` algorithm's SARIMAX model.
-        ma_degree: The moving-average degree of the ``fitting`` algorithm's SARIMAX model.
-        alpha: The significance level for the ``fitting`` algorithm's confidence interval.
+        pixel_distance_threshold: The pixel bound for the ``jump`` and ``fitting`` algorithms.
+        minimum_confidence: The likelihood bound for the ``uncertain`` algorithm and the ``fitting`` model's
+            missing-data mask.
+        autoregressive_degree: The autoregressive degree of the ``fitting`` algorithm's SARIMAX model.
+        moving_average_degree: The moving-average degree of the ``fitting`` algorithm's SARIMAX model.
+        significance_level: The significance level for the ``fitting`` algorithm's confidence interval.
         extraction_algorithm: The frame-selection algorithm applied to the candidates: ``"kmeans"`` or ``"uniform"``.
-        num_frames: The number of frames to extract per video, overriding ``numframes2pick`` in config.yaml. Set to -1
-            to use the value already stored in the configuration file.
-        cluster_resize_width: The downsample width applied before clustering when selecting with ``"kmeans"``.
-        cluster_color: Determines whether to cluster on color channels instead of grayscale.
-        save_labeled: Determines whether to also save each extracted frame with the model's predictions drawn on it.
+        frames_per_video: The number of frames to extract per video, overriding ``numframes2pick`` in config.yaml. Set
+            to -1 to use the value already stored in the configuration file.
+        clustering_resize_width: The downsample width applied before clustering when selecting with ``"kmeans"``.
+        cluster_in_color: Determines whether to cluster on color channels instead of grayscale.
+        save_labeled_frames: Determines whether to also save each extracted frame with the model's predictions drawn on
+            it.
         copy_videos: Determines whether newly added videos are copied into the project rather than symlinked.
-        destfolder: The directory holding the analyzed predictions, or None to look beside each video.
-        modelprefix: The model subdirectory prefix, matching the trained shuffle.
-        track_method: The multi-animal tracker used to generate the data (``"box"``, ``"skeleton"``, or ``"ellipse"``),
-            or an empty string to read it from config.yaml.
-        snapshot_index: The pose snapshot index whose scorer named the prediction files, or None for the default.
+        predictions_directory: The directory holding the analyzed predictions, or None to look beside each video.
+        model_prefix: The model subdirectory prefix, matching the trained shuffle.
+        tracking_method: The multi-animal tracker used to generate the data (``"box"``, ``"skeleton"``, or
+            ``"ellipse"``), or an empty string to read it from config.yaml.
+        pose_snapshot_index: The pose snapshot index whose scorer named the prediction files, or None for the default.
         detector_snapshot_index: The detector snapshot index, for top-down models, or None for the default.
         video_extensions: The file extensions used to filter videos found inside a supplied directory.
-        workers: The number of videos to extract in parallel. Set to -1 to fill the usable cores automatically.
+        worker_count: The number of videos to extract in parallel. Set to -1 to fill the usable cores automatically.
         cores_per_worker: The number of CPU cores pinned to each extraction worker. Set to -1 to spread them evenly.
-        reserve_cores: The number of CPU cores to leave free for other tasks.
-        fit_workers: The number of processes fitting SARIMAX models during ``fitting`` detection. Set to -1 to use
-            every usable core.
-        heartbeat: The minimum interval, in seconds, between progress lines when the output is not a TTY.
+        reserved_core_count: The number of CPU cores to leave free for other tasks.
+        fitting_worker_count: The number of processes fitting SARIMAX models during ``fitting`` detection. Set to -1 to
+            use every usable core.
+        minimum_progress_interval: The minimum interval, in seconds, between progress lines when the output is not a
+            TTY.
         display_progress: Determines whether to render the run header and the aggregate progress bar.
 
     Returns:
@@ -190,9 +192,10 @@ def extract_outlier_frames_parallel(
 
     Raises:
         FileNotFoundError: If ``config_path`` does not point to an existing file.
-        ValueError: If ``outlier_algorithm`` or ``extraction_algorithm`` is unknown, if ``num_frames`` is set below one
-            (other than the -1 sentinel), if ``outlier_algorithm`` is ``"list"`` without ``frames_to_use``, if the
-            comparison bodyparts resolve to none, or if no videos match the requested selection.
+        ValueError: If ``outlier_algorithm`` or ``extraction_algorithm`` is unknown, if ``frames_per_video`` is set
+            below one (other than the -1 sentinel), if ``outlier_algorithm`` is ``"list"`` without
+            ``explicit_frame_indices``, if the comparison bodyparts resolve to none, or if no videos match the requested
+            selection.
     """
     config_path = config_path.resolve()
     if not config_path.is_file():
@@ -210,26 +213,26 @@ def extract_outlier_frames_parallel(
             f"got '{extraction_algorithm}'."
         )
         raise ValueError(message)
-    if outlier_algorithm == "list" and not frames_to_use:
+    if outlier_algorithm == "list" and not explicit_frame_indices:
         message = "Unable to extract outlier frames. The 'list' algorithm requires an explicit list of frames to use."
         raise ValueError(message)
 
-    _normalize_project_config(config_path, num_frames=num_frames)
+    _normalize_project_config(config_path, frames_per_video=frames_per_video)
     configuration = auxiliaryfunctions.read_config(str(config_path))
 
-    bodyparts = auxiliaryfunctions.intersection_of_body_parts_and_ones_given_by_user(
+    resolved_comparison_bodyparts = auxiliaryfunctions.intersection_of_body_parts_and_ones_given_by_user(
         configuration, list(comparison_bodyparts) if comparison_bodyparts else "all"
     )
-    if not bodyparts:
+    if not resolved_comparison_bodyparts:
         message = "Unable to extract outlier frames. The requested comparison bodyparts matched none in the project."
         raise ValueError(message)
-    resolved_track_method = auxfun_multianimal.get_track_method(configuration, track_method=track_method)
+    resolved_tracking_method = auxfun_multianimal.get_track_method(configuration, track_method=tracking_method)
     scorer, _ = auxiliaryfunctions.get_scorer_name(
         configuration,
-        shuffle,
+        shuffle_index,
         trainFraction=configuration["TrainingFraction"][training_set_index],
-        modelprefix=modelprefix,
-        snapshot_index=snapshot_index,
+        modelprefix=model_prefix,
+        snapshot_index=pose_snapshot_index,
         detector_snapshot_index=detector_snapshot_index,
     )
 
@@ -240,40 +243,40 @@ def extract_outlier_frames_parallel(
         message = "Unable to extract outlier frames. No videos matched the requested selection."
         raise ValueError(message)
 
-    destination = str(destfolder) if destfolder is not None else None
-    candidates, not_analyzed, errors = _detect_all_videos(
+    predictions_directory_string = str(predictions_directory) if predictions_directory is not None else None
+    candidates, unanalyzed_videos, errors = _detect_all_videos(
         video_paths=video_paths,
-        destination=destination,
+        predictions_directory=predictions_directory_string,
         scorer=scorer,
         configuration=configuration,
-        track_method=resolved_track_method,
-        bodyparts=bodyparts,
+        tracking_method=resolved_tracking_method,
+        resolved_comparison_bodyparts=resolved_comparison_bodyparts,
         outlier_algorithm=outlier_algorithm,
-        frames_to_use=frames_to_use,
-        epsilon=epsilon,
-        p_bound=p_bound,
-        ar_degree=ar_degree,
-        ma_degree=ma_degree,
-        alpha=alpha,
-        fit_workers=fit_workers,
-        reserve_cores=reserve_cores,
+        explicit_frame_indices=explicit_frame_indices,
+        pixel_distance_threshold=pixel_distance_threshold,
+        minimum_confidence=minimum_confidence,
+        autoregressive_degree=autoregressive_degree,
+        moving_average_degree=moving_average_degree,
+        significance_level=significance_level,
+        fitting_worker_count=fitting_worker_count,
+        reserved_core_count=reserved_core_count,
         display_progress=display_progress,
     )
 
     extraction_videos = [video for video in video_paths if candidates.get(video)]
     if not extraction_videos:
         return OutlierExtractionSummary(
-            config=config_path,
-            algorithm=outlier_algorithm,
+            config_path=config_path,
+            outlier_algorithm=outlier_algorithm,
             extraction_algorithm=extraction_algorithm,
-            total=len(video_paths),
-            extracted=0,
-            workers=0,
-            cores_used=0,
-            core_count=os.cpu_count() or 1,
-            candidate_frames=0,
-            frames_extracted=0,
-            not_analyzed=tuple(not_analyzed),
+            total_video_count=len(video_paths),
+            extracted_video_count=0,
+            worker_count=0,
+            used_core_count=0,
+            total_core_count=os.cpu_count() or 1,
+            candidate_frame_count=0,
+            extracted_frame_count=0,
+            unanalyzed_videos=tuple(unanalyzed_videos),
             errors=tuple(errors),
         )
 
@@ -288,27 +291,27 @@ def extract_outlier_frames_parallel(
         config_path=config_path,
         videos=extraction_videos,
         candidates=candidates,
-        destination=destination,
+        predictions_directory=predictions_directory_string,
         scorer=scorer,
-        track_method=resolved_track_method,
+        tracking_method=resolved_tracking_method,
         outlier_algorithm=outlier_algorithm,
         extraction_algorithm=extraction_algorithm,
-        cluster_resize_width=cluster_resize_width,
-        cluster_color=cluster_color,
-        save_labeled=save_labeled,
+        clustering_resize_width=clustering_resize_width,
+        cluster_in_color=cluster_in_color,
+        save_labeled_frames=save_labeled_frames,
         copy_videos=copy_videos,
-        workers=workers,
+        worker_count=worker_count,
         cores_per_worker=cores_per_worker,
-        reserve_cores=reserve_cores,
-        heartbeat=heartbeat,
+        reserved_core_count=reserved_core_count,
+        minimum_progress_interval=minimum_progress_interval,
         display_progress=display_progress,
-        total_videos=len(video_paths),
-        not_analyzed=tuple(not_analyzed),
+        total_video_count=len(video_paths),
+        unanalyzed_videos=tuple(unanalyzed_videos),
         detection_errors=errors,
     )
 
 
-def _normalize_project_config(config_path: Path, *, num_frames: int) -> None:
+def _normalize_project_config(config_path: Path, *, frames_per_video: int) -> None:
     """Persists a normalized project_path and optional numframes2pick before any worker reads the configuration.
 
     DeepLabCut's read_config rewrites config.yaml whenever project_path differs from the config's own directory, which
@@ -317,10 +320,10 @@ def _normalize_project_config(config_path: Path, *, num_frames: int) -> None:
 
     Args:
         config_path: The resolved path to the project's config.yaml.
-        num_frames: The per-video frame count to persist as numframes2pick, or -1 to leave it untouched.
+        frames_per_video: The per-video frame count to persist as numframes2pick, or -1 to leave it untouched.
 
     Raises:
-        ValueError: If ``num_frames`` is set below one and is not the -1 sentinel.
+        ValueError: If ``frames_per_video`` is set below one and is not the -1 sentinel.
     """
     yaml = YAML()
     configuration = yaml.load(config_path.read_text())
@@ -329,14 +332,14 @@ def _normalize_project_config(config_path: Path, *, num_frames: int) -> None:
     if configuration.get("project_path") != project_directory:
         configuration["project_path"] = project_directory
         config_changed = True
-    if num_frames != -1:
-        if num_frames < 1:
+    if frames_per_video != -1:
+        if frames_per_video < 1:
             message = (
                 f"Unable to extract outlier frames. The frame count per video must be at least one, but got "
-                f"{num_frames}."
+                f"{frames_per_video}."
             )
             raise ValueError(message)
-        configuration["numframes2pick"] = int(num_frames)
+        configuration["numframes2pick"] = int(frames_per_video)
         config_changed = True
     if config_changed:
         with config_path.open("w") as config_file:
@@ -346,40 +349,40 @@ def _normalize_project_config(config_path: Path, *, num_frames: int) -> None:
 def _detect_all_videos(
     *,
     video_paths: list[str],
-    destination: str | None,
+    predictions_directory: str | None,
     scorer: str,
     configuration: dict[str, Any],
-    track_method: str,
-    bodyparts: list[str],
+    tracking_method: str,
+    resolved_comparison_bodyparts: list[str],
     outlier_algorithm: str,
-    frames_to_use: tuple[int, ...],
-    epsilon: float,
-    p_bound: float,
-    ar_degree: int,
-    ma_degree: int,
-    alpha: float,
-    fit_workers: int,
-    reserve_cores: int,
+    explicit_frame_indices: tuple[int, ...],
+    pixel_distance_threshold: float,
+    minimum_confidence: float,
+    autoregressive_degree: int,
+    moving_average_degree: int,
+    significance_level: float,
+    fitting_worker_count: int,
+    reserved_core_count: int,
     display_progress: bool,
 ) -> tuple[dict[str, list[int]], list[str], list[tuple[str, str]]]:
     """Computes the outlier candidate frames for every video, parallelizing the SARIMAX fits when fitting.
 
     Args:
         video_paths: The resolved video paths to detect outliers in.
-        destination: The directory holding the predictions, or None to look beside each video.
+        predictions_directory: The directory holding the predictions, or None to look beside each video.
         scorer: The DeepLabCut scorer string naming each video's prediction files.
         configuration: The loaded project configuration.
-        track_method: The resolved multi-animal tracker method.
-        bodyparts: The comparison bodyparts the detectors consider.
+        tracking_method: The resolved multi-animal tracker method.
+        resolved_comparison_bodyparts: The comparison bodyparts the detectors consider.
         outlier_algorithm: The detection algorithm to apply.
-        frames_to_use: The explicit frames for the ``"list"`` algorithm.
-        epsilon: The pixel bound for ``jump`` and ``fitting``.
-        p_bound: The likelihood bound for ``uncertain`` and the ``fitting`` missing-data mask.
-        ar_degree: The autoregressive degree for ``fitting``.
-        ma_degree: The moving-average degree for ``fitting``.
-        alpha: The significance level for ``fitting``.
-        fit_workers: The number of SARIMAX fit processes, or -1 to use every usable core.
-        reserve_cores: The number of cores to leave free when sizing the fit pool.
+        explicit_frame_indices: The explicit frames for the ``"list"`` algorithm.
+        pixel_distance_threshold: The pixel bound for ``jump`` and ``fitting``.
+        minimum_confidence: The likelihood bound for ``uncertain`` and the ``fitting`` missing-data mask.
+        autoregressive_degree: The autoregressive degree for ``fitting``.
+        moving_average_degree: The moving-average degree for ``fitting``.
+        significance_level: The significance level for ``fitting``.
+        fitting_worker_count: The number of SARIMAX fit processes, or -1 to use every usable core.
+        reserved_core_count: The number of cores to leave free when sizing the fit pool.
         display_progress: Whether to report the detection progress line.
 
     Returns:
@@ -387,69 +390,73 @@ def _detect_all_videos(
         ``(video, detail)`` detection failures.
     """
     candidates: dict[str, list[int]] = {}
-    fit_series: dict[str, list[tuple[np.ndarray, np.ndarray, np.ndarray]]] = {}
-    not_analyzed: list[str] = []
+    keypoint_series_by_video: dict[str, list[tuple[np.ndarray, np.ndarray, np.ndarray]]] = {}
+    unanalyzed_videos: list[str] = []
     errors: list[tuple[str, str]] = []
 
     for video in video_paths:
-        videofolder = destination if destination is not None else str(Path(video).parents[0])
+        video_predictions_directory = (
+            predictions_directory if predictions_directory is not None else str(Path(video).parents[0])
+        )
         try:
             predictions = _load_sliced_predictions(
                 video=video,
-                videofolder=videofolder,
+                video_predictions_directory=video_predictions_directory,
                 scorer=scorer,
                 configuration=configuration,
-                track_method=track_method,
+                tracking_method=tracking_method,
             )
         except FileNotFoundError:
-            not_analyzed.append(video)
+            unanalyzed_videos.append(video)
             continue
         except Exception:  # noqa: BLE001 -- one unreadable prediction file must not abort detection for the rest.
             errors.append((video, "detection error:\n" + traceback.format_exc()))
             continue
 
-        comparison = predictions.loc[:, predictions.columns.get_level_values("bodyparts").isin(bodyparts)]
+        comparison_predictions = predictions.loc[
+            :, predictions.columns.get_level_values("bodyparts").isin(resolved_comparison_bodyparts)
+        ]
         if outlier_algorithm == "list":
-            candidates[video] = sorted({int(frame) for frame in frames_to_use})
+            candidates[video] = sorted({int(frame) for frame in explicit_frame_indices})
         elif outlier_algorithm == "uncertain":
-            candidates[video] = uncertain_outlier_indices(comparison, p_bound)
+            candidates[video] = uncertain_outlier_indices(comparison_predictions, minimum_confidence)
         elif outlier_algorithm == "jump":
-            candidates[video] = jump_outlier_indices(comparison, epsilon)
+            candidates[video] = jump_outlier_indices(comparison_predictions, pixel_distance_threshold)
         else:
-            fit_series[video] = fitting_keypoint_series(comparison)
+            keypoint_series_by_video[video] = fitting_keypoint_series(comparison_predictions)
 
-    if fit_series:
+    if keypoint_series_by_video:
         candidates.update(
             _detect_fitting_outliers(
-                fit_series=fit_series,
-                num_frames_to_pick=int(configuration["numframes2pick"]),
-                epsilon=epsilon,
-                p_bound=p_bound,
-                ar_degree=ar_degree,
-                ma_degree=ma_degree,
-                alpha=alpha,
-                fit_workers=fit_workers,
-                reserve_cores=reserve_cores,
+                keypoint_series_by_video=keypoint_series_by_video,
+                frames_per_video_count=int(configuration["numframes2pick"]),
+                pixel_distance_threshold=pixel_distance_threshold,
+                minimum_confidence=minimum_confidence,
+                autoregressive_degree=autoregressive_degree,
+                moving_average_degree=moving_average_degree,
+                significance_level=significance_level,
+                fitting_worker_count=fitting_worker_count,
+                reserved_core_count=reserved_core_count,
                 display_progress=display_progress,
             )
         )
 
     for video, indices in candidates.items():
         candidates[video] = sorted({int(index) for index in indices})
-    return candidates, not_analyzed, errors
+    return candidates, unanalyzed_videos, errors
 
 
 def _detect_fitting_outliers(
     *,
-    fit_series: dict[str, list[tuple[np.ndarray, np.ndarray, np.ndarray]]],
-    num_frames_to_pick: int,
-    epsilon: float,
-    p_bound: float,
-    ar_degree: int,
-    ma_degree: int,
-    alpha: float,
-    fit_workers: int,
-    reserve_cores: int,
+    keypoint_series_by_video: dict[str, list[tuple[np.ndarray, np.ndarray, np.ndarray]]],
+    frames_per_video_count: int,
+    pixel_distance_threshold: float,
+    minimum_confidence: float,
+    autoregressive_degree: int,
+    moving_average_degree: int,
+    significance_level: float,
+    fitting_worker_count: int,
+    reserved_core_count: int,
     display_progress: bool,
 ) -> dict[str, list[int]]:
     """Fits every video's per-keypoint SARIMAX models across one shared pool and reduces them to outlier frames.
@@ -458,48 +465,64 @@ def _detect_fitting_outliers(
     refined, which is the expensive path the fitting algorithm needs to scale on high-core machines.
 
     Args:
-        fit_series: The per-keypoint ``(x, y, likelihood)`` trajectories for each video needing SARIMAX fits.
-        num_frames_to_pick: The project's ``numframes2pick``, used to size the fallback selection.
-        epsilon: The averaged-deviation bound above which a frame is flagged.
-        p_bound: The likelihood below which a position is treated as missing while fitting.
-        ar_degree: The autoregressive degree of the SARIMAX model.
-        ma_degree: The moving-average degree of the SARIMAX model.
-        alpha: The significance level for the fitted model's confidence interval.
-        fit_workers: The number of fit processes, or -1 to use every usable core.
-        reserve_cores: The number of cores to leave free when sizing the pool.
+        keypoint_series_by_video: The per-keypoint ``(x, y, likelihood)`` trajectories for each video needing SARIMAX
+            fits.
+        frames_per_video_count: The project's ``numframes2pick``, used to size the fallback selection.
+        pixel_distance_threshold: The averaged-deviation bound above which a frame is flagged.
+        minimum_confidence: The likelihood below which a position is treated as missing while fitting.
+        autoregressive_degree: The autoregressive degree of the SARIMAX model.
+        moving_average_degree: The moving-average degree of the SARIMAX model.
+        significance_level: The significance level for the fitted model's confidence interval.
+        fitting_worker_count: The number of fit processes, or -1 to use every usable core.
+        reserved_core_count: The number of cores to leave free when sizing the pool.
         display_progress: Whether to report the number of fits being run.
 
     Returns:
         The outlier candidate frames keyed by video.
     """
     tasks: list[tuple[np.ndarray, np.ndarray, np.ndarray, float, float, int, int]] = []
-    owners: list[str] = []
-    for video, series in fit_series.items():
-        for x, y, likelihood in series:
-            tasks.append((x, y, likelihood, p_bound, alpha, ar_degree, ma_degree))
-            owners.append(video)
+    owner_videos: list[str] = []
+    for video, keypoint_series in keypoint_series_by_video.items():
+        for horizontal_positions, vertical_positions, confidences in keypoint_series:
+            tasks.append(
+                (
+                    horizontal_positions,
+                    vertical_positions,
+                    confidences,
+                    minimum_confidence,
+                    significance_level,
+                    autoregressive_degree,
+                    moving_average_degree,
+                )
+            )
+            owner_videos.append(video)
 
-    core_count = os.cpu_count() or 1
-    usable = max(1, core_count - max(0, reserve_cores))
-    pool_size = usable if fit_workers < 1 else fit_workers
-    pool_size = max(1, min(pool_size, len(tasks)))
+    total_core_count = os.cpu_count() or 1
+    usable_core_count = max(1, total_core_count - max(0, reserved_core_count))
+    resolved_fitting_worker_count = usable_core_count if fitting_worker_count < 1 else fitting_worker_count
+    resolved_fitting_worker_count = max(1, min(resolved_fitting_worker_count, len(tasks)))
     if display_progress:
         sys.stderr.write(
-            f"fitting {len(tasks)} keypoint trajectories across {len(fit_series)} video(s) on {pool_size} processes\n"
+            f"fitting {len(tasks)} keypoint trajectories across {len(keypoint_series_by_video)} video(s) on "
+            f"{resolved_fitting_worker_count} processes\n"
         )
         sys.stderr.flush()
 
     context = multiprocessing.get_context("spawn")
-    with context.Pool(processes=pool_size) as pool:
-        distances = pool.starmap(fit_keypoint_distance, tasks)
+    with context.Pool(processes=resolved_fitting_worker_count) as pool:
+        keypoint_deviations = pool.starmap(fit_keypoint_distance, tasks)
 
-    per_video: dict[str, list[np.ndarray]] = {video: [] for video in fit_series}
-    for video, distance in zip(owners, distances, strict=True):
-        per_video[video].append(distance)
+    deviations_by_video: dict[str, list[np.ndarray]] = {video: [] for video in keypoint_series_by_video}
+    for video, deviation in zip(owner_videos, keypoint_deviations, strict=True):
+        deviations_by_video[video].append(deviation)
 
     return {
-        video: fitting_outlier_indices(video_distances, num_frames_to_pick=num_frames_to_pick, epsilon=epsilon)
-        for video, video_distances in per_video.items()
+        video: fitting_outlier_indices(
+            video_deviations,
+            frames_per_video_count=frames_per_video_count,
+            pixel_distance_threshold=pixel_distance_threshold,
+        )
+        for video, video_deviations in deviations_by_video.items()
     }
 
 
@@ -533,22 +556,22 @@ def _extract_all_videos(
     config_path: Path,
     videos: list[str],
     candidates: dict[str, list[int]],
-    destination: str | None,
+    predictions_directory: str | None,
     scorer: str,
-    track_method: str,
+    tracking_method: str,
     outlier_algorithm: str,
     extraction_algorithm: str,
-    cluster_resize_width: int,
-    cluster_color: bool,
-    save_labeled: bool,
+    clustering_resize_width: int,
+    cluster_in_color: bool,
+    save_labeled_frames: bool,
     copy_videos: bool,
-    workers: int,
+    worker_count: int,
     cores_per_worker: int,
-    reserve_cores: int,
-    heartbeat: float,
+    reserved_core_count: int,
+    minimum_progress_interval: float,
     display_progress: bool,
-    total_videos: int,
-    not_analyzed: tuple[str, ...],
+    total_video_count: int,
+    unanalyzed_videos: tuple[str, ...],
     detection_errors: list[tuple[str, str]],
 ) -> OutlierExtractionSummary:
     """Decodes and writes the flagged frames one video per pinned worker, then assembles the run summary.
@@ -557,45 +580,45 @@ def _extract_all_videos(
         config_path: The resolved project config.yaml path.
         videos: The videos that have outlier candidates to extract.
         candidates: The outlier candidate frames keyed by video.
-        destination: The directory holding the predictions, or None to look beside each video.
+        predictions_directory: The directory holding the predictions, or None to look beside each video.
         scorer: The DeepLabCut scorer string naming each video's prediction files.
-        track_method: The resolved multi-animal tracker method.
+        tracking_method: The resolved multi-animal tracker method.
         outlier_algorithm: The detection algorithm that produced the candidates.
         extraction_algorithm: The frame-selection algorithm applied to the candidates.
-        cluster_resize_width: The downsample width for k-means selection.
-        cluster_color: Whether k-means selection clusters on color channels.
-        save_labeled: Whether to also save each frame with the model's predictions drawn on it.
+        clustering_resize_width: The downsample width for k-means selection.
+        cluster_in_color: Whether k-means selection clusters on color channels.
+        save_labeled_frames: Whether to also save each frame with the model's predictions drawn on it.
         copy_videos: Whether newly added videos are copied rather than symlinked.
-        workers: The requested extraction worker count, or -1 to resolve automatically.
+        worker_count: The requested extraction worker count, or -1 to resolve automatically.
         cores_per_worker: The requested cores per worker, or -1 to spread them evenly.
-        reserve_cores: The number of cores to leave free.
-        heartbeat: The minimum interval between progress lines when the output is not a TTY.
+        reserved_core_count: The number of cores to leave free.
+        minimum_progress_interval: The minimum interval between progress lines when the output is not a TTY.
         display_progress: Whether to render the run header and progress bar.
-        total_videos: The total number of videos considered, for the summary.
-        not_analyzed: The unanalyzed videos, for the summary.
+        total_video_count: The total number of videos considered, for the summary.
+        unanalyzed_videos: The unanalyzed videos, for the summary.
         detection_errors: The detection-phase failures, extended with any extraction failures.
 
     Returns:
         The completed OutlierExtractionSummary.
     """
-    core_count = os.cpu_count() or 1
-    resolved_workers, core_sets = plan_core_allocation(
+    total_core_count = os.cpu_count() or 1
+    resolved_worker_count, core_sets = plan_core_allocation(
         video_count=len(videos),
-        core_count=core_count,
-        workers=workers,
+        total_core_count=total_core_count,
+        worker_count=worker_count,
         cores_per_worker=cores_per_worker,
-        reserve_cores=reserve_cores,
+        reserved_core_count=reserved_core_count,
     )
-    cores_used = len({core for core_set in core_sets for core in core_set})
-    totals = {index: max(1, len(candidates[video])) for index, video in enumerate(videos)}
-    candidate_frames = sum(len(candidates[video]) for video in videos)
+    used_core_count = len({core for core_set in core_sets for core in core_set})
+    frame_totals = {index: max(1, len(candidates[video])) for index, video in enumerate(videos)}
+    candidate_frame_count = sum(len(candidates[video]) for video in videos)
 
     context = multiprocessing.get_context("spawn")
     manager = context.Manager()
     progress_queue = manager.Queue()
-    slot_queue = manager.Queue()
+    core_set_queue = manager.Queue()
     for core_set in core_sets:
-        slot_queue.put(core_set)
+        core_set_queue.put(core_set)
 
     video_indices = {video: index for index, video in enumerate(videos)}
     tasks = [
@@ -604,13 +627,13 @@ def _extract_all_videos(
             index,
             candidates[video],
             str(config_path),
-            destination,
+            predictions_directory,
             scorer,
-            track_method,
+            tracking_method,
             extraction_algorithm,
-            cluster_resize_width,
-            cluster_color,
-            save_labeled,
+            clustering_resize_width,
+            cluster_in_color,
+            save_labeled_frames,
             copy_videos,
             progress_queue if display_progress else None,
         )
@@ -622,28 +645,35 @@ def _extract_all_videos(
             video_count=len(videos),
             outlier_algorithm=outlier_algorithm,
             extraction_algorithm=extraction_algorithm,
-            candidate_frames=candidate_frames,
-            workers=resolved_workers,
-            cores_used=cores_used,
-            core_count=core_count,
+            candidate_frame_count=candidate_frame_count,
+            worker_count=resolved_worker_count,
+            used_core_count=used_core_count,
+            total_core_count=total_core_count,
             config_path=config_path,
         )
-    bar = AggregateBar(progress_queue=progress_queue, total_videos=len(tasks), totals=totals, heartbeat=heartbeat)
+    bar = AggregateBar(
+        progress_queue=progress_queue,
+        total_video_count=len(tasks),
+        frame_totals=frame_totals,
+        minimum_progress_interval=minimum_progress_interval,
+    )
 
-    extracted_count = 0
-    frames_extracted = 0
+    extracted_video_count = 0
+    extracted_frame_count = 0
     errors = list(detection_errors)
-    not_analyzed_list = list(not_analyzed)
+    unanalyzed_video_list = list(unanalyzed_videos)
     try:
-        with context.Pool(processes=resolved_workers, initializer=pin_worker_to_cores, initargs=(slot_queue,)) as pool:
+        with context.Pool(
+            processes=resolved_worker_count, initializer=pin_worker_to_cores, initargs=(core_set_queue,)
+        ) as pool:
             if display_progress:
                 bar.start()
             for video, written, status in pool.imap_unordered(_extract_one_video, tasks):
                 if status == "ok":
-                    extracted_count += 1
-                    frames_extracted += written
+                    extracted_video_count += 1
+                    extracted_frame_count += written
                 elif status == "not_analyzed":
-                    not_analyzed_list.append(video)
+                    unanalyzed_video_list.append(video)
                 else:
                     errors.append((video, status))
                 if display_progress:
@@ -655,17 +685,17 @@ def _extract_all_videos(
         manager.shutdown()
 
     return OutlierExtractionSummary(
-        config=config_path,
-        algorithm=outlier_algorithm,
+        config_path=config_path,
+        outlier_algorithm=outlier_algorithm,
         extraction_algorithm=extraction_algorithm,
-        total=total_videos,
-        extracted=extracted_count,
-        workers=resolved_workers,
-        cores_used=cores_used,
-        core_count=core_count,
-        candidate_frames=candidate_frames,
-        frames_extracted=frames_extracted,
-        not_analyzed=tuple(not_analyzed_list),
+        total_video_count=total_video_count,
+        extracted_video_count=extracted_video_count,
+        worker_count=resolved_worker_count,
+        used_core_count=used_core_count,
+        total_core_count=total_core_count,
+        candidate_frame_count=candidate_frame_count,
+        extracted_frame_count=extracted_frame_count,
+        unanalyzed_videos=tuple(unanalyzed_video_list),
         errors=tuple(errors),
     )
 
@@ -674,10 +704,10 @@ def _report_plan(
     video_count: int,
     outlier_algorithm: str,
     extraction_algorithm: str,
-    candidate_frames: int,
-    workers: int,
-    cores_used: int,
-    core_count: int,
+    candidate_frame_count: int,
+    worker_count: int,
+    used_core_count: int,
+    total_core_count: int,
     config_path: Path,
 ) -> None:
     """Writes the run header describing the resolved extraction plan to the standard error stream.
@@ -686,29 +716,30 @@ def _report_plan(
         video_count: The number of videos with outlier frames to extract.
         outlier_algorithm: The detection algorithm that flagged the candidates.
         extraction_algorithm: The frame-selection algorithm applied to the candidates.
-        candidate_frames: The total number of flagged candidate frames across the videos.
-        workers: The resolved number of concurrent workers.
-        cores_used: The number of distinct cores the workers are pinned across.
-        core_count: The total number of cores on the machine.
+        candidate_frame_count: The total number of flagged candidate frames across the videos.
+        worker_count: The resolved number of concurrent workers.
+        used_core_count: The number of distinct cores the workers are pinned across.
+        total_core_count: The total number of cores on the machine.
         config_path: The resolved path to the project's config.yaml.
     """
-    free_cores = core_count - cores_used
+    free_core_count = total_core_count - used_core_count
     sys.stderr.write(
         f"outlier extraction | {video_count} videos | detect={outlier_algorithm} | select={extraction_algorithm} | "
-        f"{candidate_frames:,} candidate frames\n"
+        f"{candidate_frame_count:,} candidate frames\n"
     )
     sys.stderr.write(
-        f"workers={workers} | {cores_used}/{core_count} cores used ({free_cores} free) | config={config_path}\n"
+        f"workers={worker_count} | {used_core_count}/{total_core_count} cores used ({free_core_count} free) | "
+        f"config={config_path}\n"
     )
     sys.stderr.flush()
 
 
 def _load_sliced_predictions(
     video: str,
-    videofolder: str,
+    video_predictions_directory: str,
     scorer: str,
     configuration: dict[str, Any],
-    track_method: str,
+    tracking_method: str,
 ) -> Any:
     """Loads a video's predictions, applies the crop offset, and slices them to the configured start/stop window.
 
@@ -717,10 +748,10 @@ def _load_sliced_predictions(
 
     Args:
         video: The analyzed video path.
-        videofolder: The directory holding the video's prediction files.
+        video_predictions_directory: The directory holding the video's prediction files.
         scorer: The DeepLabCut scorer string naming the prediction files.
         configuration: The loaded project configuration, read for the start/stop bounds and the video's crop margins.
-        track_method: The resolved multi-animal tracker method.
+        tracking_method: The resolved multi-animal tracker method.
 
     Returns:
         The prediction table, offset-corrected and sliced to the start/stop window.
@@ -728,19 +759,21 @@ def _load_sliced_predictions(
     Raises:
         FileNotFoundError: If the video has no matching prediction or metadata files.
     """
-    vname = Path(video).stem
-    predictions, _, _, _ = auxiliaryfunctions.load_analyzed_data(videofolder, vname, scorer, track_method=track_method)
-    metadata = auxiliaryfunctions.load_video_metadata(videofolder, vname, scorer)
+    video_stem = Path(video).stem
+    predictions, _, _, _ = auxiliaryfunctions.load_analyzed_data(
+        video_predictions_directory, video_stem, scorer, track_method=tracking_method
+    )
+    metadata = auxiliaryfunctions.load_video_metadata(video_predictions_directory, video_stem, scorer)
     frame_count = len(predictions)
     start_index = max(int(np.floor(frame_count * configuration["start"])), 0)
     stop_index = min(int(np.ceil(frame_count * configuration["stop"])), frame_count)
     window = np.arange(stop_index - start_index) + start_index
 
-    out_x1, out_y1 = _video_cropping_offset(configuration, video)
+    output_crop_x, output_crop_y = _video_cropping_offset(configuration, video)
     if metadata.get("data", {}).get("cropping"):
         x1, _, y1, _ = metadata["data"]["cropping_parameters"]
-        predictions.iloc[:, predictions.columns.get_level_values(level="coords") == "x"] += x1 - out_x1
-        predictions.iloc[:, predictions.columns.get_level_values(level="coords") == "y"] += y1 - out_y1
+        predictions.iloc[:, predictions.columns.get_level_values(level="coords") == "x"] += x1 - output_crop_x
+        predictions.iloc[:, predictions.columns.get_level_values(level="coords") == "y"] += y1 - output_crop_y
     return predictions.iloc[window]
 
 
@@ -791,36 +824,38 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
         video_index,
         indices,
         config_path,
-        destination,
+        predictions_directory,
         scorer,
-        track_method,
+        tracking_method,
         extraction_algorithm,
-        cluster_resize_width,
-        cluster_color,
-        save_labeled,
+        clustering_resize_width,
+        cluster_in_color,
+        save_labeled_frames,
         copy_videos,
         progress_queue,
     ) = task
     try:
         cv2.setNumThreads(1)
         configuration = auxiliaryfunctions.read_config(config_path)
-        videofolder = destination if destination is not None else str(Path(video).parents[0])
+        video_predictions_directory = (
+            predictions_directory if predictions_directory is not None else str(Path(video).parents[0])
+        )
         predictions = _load_sliced_predictions(
             video=video,
-            videofolder=videofolder,
+            video_predictions_directory=video_predictions_directory,
             scorer=scorer,
             configuration=configuration,
-            track_method=track_method,
+            tracking_method=tracking_method,
         )
 
         output_directory = Path(configuration["project_path"]) / "labeled-data" / Path(video).stem
-        before = _count_extracted_frames(output_directory)
+        frame_count_before = _count_extracted_frames(output_directory)
 
         # Route DeepLabCut's frame-reading progress to the parent's aggregate bar and stop its per-worker config write.
         # The queue is None when progress is disabled, leaving DeepLabCut's own (stream-suppressed) tqdm in place.
         if progress_queue is not None:
             frameselectiontools.tqdm = make_progress_reporter(
-                progress_queue=progress_queue, video_index=video_index, total=max(1, len(indices))
+                progress_queue=progress_queue, video_index=video_index, frame_total=max(1, len(indices))
             )
         dlc_outlier_frames.attempt_to_add_video = _skip_video_registration
 
@@ -837,9 +872,9 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
                 configuration,
                 config_path,
                 opencv=True,
-                cluster_resizewidth=cluster_resize_width,
-                cluster_color=cluster_color,
-                savelabeled=save_labeled,
+                cluster_resizewidth=clustering_resize_width,
+                cluster_color=cluster_in_color,
+                savelabeled=save_labeled_frames,
                 with_annotations=True,
                 copy_videos=copy_videos,
             )
@@ -848,8 +883,8 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
     except Exception:  # noqa: BLE001 -- one bad video must not kill the pool; the traceback is returned as status.
         return video, 0, "error:\n" + traceback.format_exc()
     else:
-        written = _count_extracted_frames(output_directory) - before
-        return video, max(0, written), "ok"
+        frames_written = _count_extracted_frames(output_directory) - frame_count_before
+        return video, max(0, frames_written), "ok"
 
 
 def _count_extracted_frames(output_directory: Path) -> int:

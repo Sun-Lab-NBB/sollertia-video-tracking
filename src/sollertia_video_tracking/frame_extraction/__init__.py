@@ -5,13 +5,13 @@ model's predictions and extracts the frames it most likely got wrong to refine t
 worker pinned to a disjoint block of CPU cores and share the same CPU-allocation and progress-reporting logic.
 """
 
-from .cpu_allocation import DEFAULT_RESERVE_CORES
+from .cpu_allocation import DEFAULT_RESERVED_CORE_COUNT
 from .video_grouping import group_videos
 from .outlier_pipeline import OutlierExtractionSummary, extract_outlier_frames_parallel
 from .extraction_pipeline import FrameExtractionSummary, extract_frames_kmeans
 
 __all__ = [
-    "DEFAULT_RESERVE_CORES",
+    "DEFAULT_RESERVED_CORE_COUNT",
     "FrameExtractionSummary",
     "OutlierExtractionSummary",
     "extract_frames_kmeans",

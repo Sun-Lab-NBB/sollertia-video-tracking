@@ -15,7 +15,7 @@ _MAX_PROGRESS_UPDATES_PER_VIDEO: int = 100
 """The upper bound on progress messages each worker emits, used to throttle queue traffic."""
 
 
-def make_progress_reporter(progress_queue: Any, video_index: int, total: int) -> Callable[..., Iterable[Any]]:
+def make_progress_reporter(progress_queue: Any, video_index: int, frame_total: int) -> Callable[..., Iterable[Any]]:
     """Builds a drop-in replacement for ``tqdm`` that streams frame counts from a worker to the parent process.
 
     DeepLabCut wraps its frame-reading loop in ``tqdm(enumerate(index))``. The returned callable wraps that same
@@ -25,17 +25,17 @@ def make_progress_reporter(progress_queue: Any, video_index: int, total: int) ->
     Args:
         progress_queue: The shared queue used to forward progress messages to the parent renderer.
         video_index: The index identifying which video this reporter tracks.
-        total: The total number of frames this video contributes to the aggregate bar.
+        frame_total: The total number of frames this video contributes to the aggregate bar.
 
     Returns:
         A callable that mirrors the tqdm interface and emits throttled progress messages while iterating.
     """
-    every = max(1, total // _MAX_PROGRESS_UPDATES_PER_VIDEO)
+    frames_per_update = max(1, frame_total // _MAX_PROGRESS_UPDATES_PER_VIDEO)
 
     def reporter(iterable: Iterable[Any], *_args: Any, **_kwargs: Any) -> Iterable[Any]:
         """Iterates over the wrapped iterable, forwarding each item and emitting throttled progress messages."""
         for count, item in enumerate(iterable, start=1):
-            if count % every == 0 or count == total:
+            if count % frames_per_update == 0 or count == frame_total:
                 # A dropped progress update only skips a bar refresh, so a full queue is never fatal.
                 with contextlib.suppress(Exception):
                     progress_queue.put_nowait(("progress", video_index, count))
@@ -50,14 +50,16 @@ class AggregateBar(Thread):
     Notes:
         The renderer consumes ``("progress", video_index, count)`` and ``("done", video_index)`` messages from the
         shared queue, plus a terminal ``("stop",)`` sentinel. On a TTY the bar updates in place with carriage
-        returns; when the output is redirected, it prints at most one line every ``heartbeat`` seconds.
+        returns; when the output is redirected, it prints at most one line every
+        ``minimum_progress_interval`` seconds.
 
     Attributes:
         _progress_queue: The shared queue the workers stream progress and completion messages to.
-        _total_videos: The total number of videos in the extraction run.
-        _totals: The mapping of video index to the number of frames that video contributes to the bar.
-        _grand_total: The sum of all per-video frame totals, clamped to at least one.
-        _heartbeat: The minimum interval, in seconds, between rendered lines when the output is not a TTY.
+        _total_video_count: The total number of videos in the extraction run.
+        _frame_totals: The mapping of video index to the number of frames that video contributes to the bar.
+        _grand_frame_total: The sum of all per-video frame totals, clamped to at least one.
+        _minimum_progress_interval: The minimum interval, in seconds, between rendered lines when the output
+            is not a TTY.
         _width: The width, in characters, of the rendered bar.
         _stream: The output stream the bar renders to.
         _is_tty: True when the output stream is an interactive terminal.
@@ -70,9 +72,9 @@ class AggregateBar(Thread):
     def __init__(
         self,
         progress_queue: Any,
-        total_videos: int,
-        totals: dict[int, int],
-        heartbeat: float,
+        total_video_count: int,
+        frame_totals: dict[int, int],
+        minimum_progress_interval: float,
         width: int = _PROGRESS_BAR_WIDTH,
         stream: TextIO | None = None,
     ) -> None:
@@ -80,18 +82,19 @@ class AggregateBar(Thread):
 
         Args:
             progress_queue: The shared queue the workers stream progress and completion messages to.
-            total_videos: The total number of videos in the extraction run.
-            totals: The mapping of video index to the number of frames that video contributes to the bar.
-            heartbeat: The minimum interval, in seconds, between rendered lines when the output is not a TTY.
+            total_video_count: The total number of videos in the extraction run.
+            frame_totals: The mapping of video index to the number of frames that video contributes to the bar.
+            minimum_progress_interval: The minimum interval, in seconds, between rendered lines when the output
+                is not a TTY.
             width: The width, in characters, of the rendered bar.
             stream: The output stream to render to, defaulting to the standard error stream.
         """
         super().__init__(daemon=True)
         self._progress_queue = progress_queue
-        self._total_videos = total_videos
-        self._totals = totals
-        self._grand_total = max(1, sum(totals.values()))
-        self._heartbeat = heartbeat
+        self._total_video_count = total_video_count
+        self._frame_totals = frame_totals
+        self._grand_frame_total = max(1, sum(frame_totals.values()))
+        self._minimum_progress_interval = minimum_progress_interval
         self._width = width
         self._stream = stream if stream is not None else sys.stderr
         self._is_tty = self._stream.isatty()
@@ -103,7 +106,7 @@ class AggregateBar(Thread):
     def __repr__(self) -> str:
         """Returns a string representation of the AggregateBar instance."""
         return (
-            f"AggregateBar(total_videos={self._total_videos}, grand_total={self._grand_total}, "
+            f"AggregateBar(total_video_count={self._total_video_count}, grand_frame_total={self._grand_frame_total}, "
             f"videos_done={self._videos_done})"
         )
 
@@ -122,7 +125,7 @@ class AggregateBar(Thread):
                 self._render()
             elif kind == "done":
                 _, video_index = message
-                self._frames[video_index] = self._totals.get(video_index, 0)
+                self._frames[video_index] = self._frame_totals.get(video_index, 0)
                 self._videos_done += 1
                 self._render(force=True)
             elif kind == "stop":
@@ -143,22 +146,26 @@ class AggregateBar(Thread):
             force: Determines whether to render immediately, bypassing the minimum interval between renders.
         """
         now = time.monotonic()
-        interval = 0.2 if self._is_tty else max(1.0, self._heartbeat)
+        interval = 0.2 if self._is_tty else max(1.0, self._minimum_progress_interval)
         if not force and (now - self._last_render_time) < interval:
             return
         self._last_render_time = now
 
-        frames_read = min(sum(self._frames.values()), self._grand_total)
+        frames_read = min(sum(self._frames.values()), self._grand_frame_total)
         elapsed = now - self._start_time
         rate = frames_read / elapsed if elapsed > 0 else 0.0
-        eta = (self._grand_total - frames_read) / rate if rate > 0 and frames_read < self._grand_total else 0.0
-        percent = 100.0 * frames_read / self._grand_total
-        filled = int(self._width * frames_read / self._grand_total)
+        estimated_seconds_remaining = (
+            (self._grand_frame_total - frames_read) / rate
+            if rate > 0 and frames_read < self._grand_frame_total
+            else 0.0
+        )
+        percent = 100.0 * frames_read / self._grand_frame_total
+        filled = int(self._width * frames_read / self._grand_frame_total)
         bar = "#" * filled + "-" * (self._width - filled)
         message = (
-            f"[{bar}] {percent:5.1f}% | {self._videos_done}/{self._total_videos} videos | "
-            f"{frames_read:,}/{self._grand_total:,} frames | {_format_duration(elapsed)} | "
-            f"ETA {_format_duration(eta)}"
+            f"[{bar}] {percent:5.1f}% | {self._videos_done}/{self._total_video_count} videos | "
+            f"{frames_read:,}/{self._grand_frame_total:,} frames | {_format_duration(elapsed)} | "
+            f"ETA {_format_duration(estimated_seconds_remaining)}"
         )
         if self._is_tty:
             self._stream.write("\r" + message + "\033[K")

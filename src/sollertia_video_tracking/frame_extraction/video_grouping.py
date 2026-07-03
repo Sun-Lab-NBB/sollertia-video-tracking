@@ -232,29 +232,29 @@ def _is_fused_named_date_piece(piece: str) -> bool:
     return bool(_FUSED_NAMED_DATE.match(piece))
 
 
-def group_videos(videos: list[str], key_pattern: str | None = None) -> dict[str, list[str]]:
+def group_videos(videos: list[str], group_by_pattern: str | None = None) -> dict[str, list[str]]:
     """Groups video paths that share the same non-date file-name components, preserving first-seen order per group.
 
     Each video is keyed either by a caller-supplied regular expression or, by default, by the structural inference in
     ``_infer_group_key``. A video the inference cannot key (no recognizable date) becomes its own group, so an unusual
-    file name never collapses the rest of the project. Supplying ``key_pattern`` overrides the inference entirely for
-    conventions it does not cover (two-digit-year numeric dates, session counters, and similar).
+    file name never collapses the rest of the project. Supplying ``group_by_pattern`` overrides the inference entirely
+    for conventions it does not cover (two-digit-year numeric dates, session counters, and similar).
 
     Args:
         videos: The candidate video paths to group.
-        key_pattern: A regular expression whose first capturing group (or whole match, if it has no groups) names the
-            group for each video's stem. Set to None to infer the key structurally from the file-name date span.
+        group_by_pattern: A regular expression whose first capturing group (or whole match, if it has no groups) names
+            the group for each video's stem. Set to None to infer the key structurally from the file-name date span.
 
     Returns:
         A mapping of grouping key to the list of that group's video paths, in first-seen order.
 
     Raises:
-        ValueError: If ``key_pattern`` is not a valid regular expression.
+        ValueError: If ``group_by_pattern`` is not a valid regular expression.
     """
     compiled = None
-    if key_pattern is not None:
+    if group_by_pattern is not None:
         try:
-            compiled = re.compile(key_pattern)
+            compiled = re.compile(group_by_pattern)
         except re.error as error:
             message = f"Unable to group videos. The group-by pattern is not a valid regular expression: {error}."
             raise ValueError(message) from error

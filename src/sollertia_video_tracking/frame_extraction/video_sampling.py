@@ -16,154 +16,160 @@ class VideoSamplingPlan:
         ``per_group`` reports each group's coverage before and after the pass.
     """
 
-    selected: tuple[str, ...]
+    selected_videos: tuple[str, ...]
     """The videos chosen for extraction in this pass, drawn from the not-yet-extracted candidates."""
-    existing_frames: int
+    existing_frame_count: int
     """The number of frames already extracted across the candidate videos before this pass."""
-    target_frames: int
+    target_frame_count: int
     """The requested total number of frames the project should hold after extraction."""
-    projected_frames: int
+    projected_frame_count: int
     """The number of frames the project is expected to hold once the selected videos are extracted."""
-    no_growth: bool
+    budget_already_met: bool
     """Indicates whether the existing frames already meet the target, so the pass would extract nothing."""
     target_unreachable: bool
     """Indicates whether too few un-extracted videos remain to reach the target, so the pass falls short of it."""
     per_group: tuple[tuple[str, int, int, int, int], ...] = ()
-    """The per-group breakdown when grouping is used, as ``(group, existing_frames, added_videos, projected_frames,
-    available_videos)`` tuples in canonical group order, or empty when the selection was not grouped.
-    ``available_videos`` is how many un-extracted videos the group had before this pass."""
-    pinned_overshoot: bool = False
-    """Indicates whether the explicitly pinned videos alone exceeded the pass budget, so the projected total overshoots
-    the target by the surplus pinned videos."""
+    """The per-group breakdown when grouping is used, as ``(group, existing_frame_count, added_video_count,
+    projected_frame_count, available_video_count)`` tuples in canonical group order, or empty when the selection was
+    not grouped. ``available_video_count`` is how many un-extracted videos the group had before this pass."""
+    always_included_overshoot: bool = False
+    """Indicates whether the always-included videos alone exceeded the pass budget, so the projected total overshoots
+    the target by the surplus always-included videos."""
 
 
 def plan_video_sampling(
     videos: list[str],
     extracted_frame_counts: dict[str, int],
-    frames_per_video: int,
-    total_frames: int,
-    seed: int | None,
+    frames_per_video_count: int,
+    total_frame_budget: int,
+    random_seed: int | None,
     *,
     groups: dict[str, list[str]] | None = None,
-    pinned: tuple[str, ...] = (),
+    pinned_videos: tuple[str, ...] = (),
 ) -> VideoSamplingPlan:
     """Selects a subset of not-yet-extracted videos that grows the project toward a total-frame budget.
 
     Sums the frames already extracted across the candidate videos and selects just enough additional videos, each
-    contributing ``frames_per_video`` frames, to reach ``total_frames``. Only videos without extracted frames are
-    eligible, so repeated passes broaden dataset coverage instead of re-clustering videos that are already done. The
-    realized total rounds up to a whole video, so it may exceed the target by less than one video's worth of frames.
+    contributing ``frames_per_video_count`` frames, to reach ``total_frame_budget``. Only videos without extracted
+    frames are eligible, so repeated passes broaden dataset coverage instead of re-clustering videos that are already
+    done. The realized total rounds up to a whole video, so it may exceed the target by less than one video's worth of
+    frames.
 
     Without ``groups`` the additional videos are drawn uniformly at random. With ``groups`` the additional videos are
     balanced across groups by repeatedly assigning the next video to the group with the fewest projected frames
     (counting frames from prior passes). This ensures that every group is represented and coverage evens out over
-    repeated passes. In both modes any ``pinned`` videos are selected first and always included.
+    repeated passes. In both modes any ``pinned_videos`` are selected first and always included.
 
     Args:
         videos: The ordered candidate video paths the pass may sample from.
         extracted_frame_counts: The number of frames already extracted for each candidate video, keyed by path.
-        frames_per_video: The number of frames each newly sampled video contributes.
-        total_frames: The total number of frames the project should hold after extraction.
-        seed: The seed for the random draw, or None to draw nondeterministically. With grouping, the seed also fixes
-            the random choice of which of a group's videos are sampled.
+        frames_per_video_count: The number of frames each newly sampled video contributes.
+        total_frame_budget: The total number of frames the project should hold after extraction.
+        random_seed: The seed for the random draw, or None to draw nondeterministically. With grouping, the seed also
+            fixes the random choice of which of a group's videos are sampled.
         groups: A mapping of group to that group's candidate videos, enabling balanced per-group selection. Set to None
             to draw uniformly across all candidates.
-        pinned: The videos to always include, selected before the budgeted draw. Duplicates and already-extracted or
-            unknown entries are ignored.
+        pinned_videos: The videos to always include, selected before the budgeted draw. Duplicates and already-extracted
+            or unknown entries are ignored.
 
     Returns:
         A VideoSamplingPlan naming the selected videos and reporting the existing, target, and projected frame counts
-        alongside the no-growth, unreachable-target, per-group, and pinned-overshoot details.
+        alongside the budget-already-met, unreachable-target, per-group, and always-included-overshoot details.
     """
-    existing_frames = sum(extracted_frame_counts.get(video, 0) for video in videos)
-    un_extracted = [video for video in videos if extracted_frame_counts.get(video, 0) == 0]
-    remaining = total_frames - existing_frames
+    existing_frame_count = sum(extracted_frame_counts.get(video, 0) for video in videos)
+    unextracted_videos = [video for video in videos if extracted_frame_counts.get(video, 0) == 0]
+    remaining_frame_count = total_frame_budget - existing_frame_count
 
-    if remaining <= 0:
+    if remaining_frame_count <= 0:
         return VideoSamplingPlan(
-            selected=(),
-            existing_frames=existing_frames,
-            target_frames=total_frames,
-            projected_frames=existing_frames,
-            no_growth=True,
+            selected_videos=(),
+            existing_frame_count=existing_frame_count,
+            target_frame_count=total_frame_budget,
+            projected_frame_count=existing_frame_count,
+            budget_already_met=True,
             target_unreachable=False,
         )
 
-    needed = math.ceil(remaining / frames_per_video)
-    target_unreachable = needed > len(un_extracted)
-    needed = min(needed, len(un_extracted))
+    needed_video_count = math.ceil(remaining_frame_count / frames_per_video_count)
+    target_unreachable = needed_video_count > len(unextracted_videos)
+    needed_video_count = min(needed_video_count, len(unextracted_videos))
 
     candidate_set = set(videos)
-    pinned_eligible = [
-        video for video in dict.fromkeys(pinned) if video in candidate_set and extracted_frame_counts.get(video, 0) == 0
+    eligible_pinned_videos = [
+        video
+        for video in dict.fromkeys(pinned_videos)
+        if video in candidate_set and extracted_frame_counts.get(video, 0) == 0
     ]
-    pinned_overshoot = len(pinned_eligible) > needed
+    always_included_overshoot = len(eligible_pinned_videos) > needed_video_count
 
     per_group: tuple[tuple[str, int, int, int, int], ...] = ()
     if groups is not None:
-        selected_list, per_group = _select_balanced(
+        selected_video_list, per_group = _select_balanced(
             groups=groups,
             extracted_frame_counts=extracted_frame_counts,
-            un_extracted=un_extracted,
-            frames_per_video=frames_per_video,
-            needed=needed,
-            pinned=pinned_eligible,
-            seed=seed,
+            unextracted_videos=unextracted_videos,
+            frames_per_video_count=frames_per_video_count,
+            needed_video_count=needed_video_count,
+            pinned_videos=eligible_pinned_videos,
+            random_seed=random_seed,
         )
-        selected = tuple(selected_list)
-    elif pinned_eligible:
-        selected = _select_uniform_with_pins(
-            un_extracted=un_extracted, needed=needed, pinned=pinned_eligible, seed=seed
+        selected_videos = tuple(selected_video_list)
+    elif eligible_pinned_videos:
+        selected_videos = _select_uniform_with_pins(
+            unextracted_videos=unextracted_videos,
+            needed_video_count=needed_video_count,
+            pinned_videos=eligible_pinned_videos,
+            random_seed=random_seed,
         )
     else:
         # A single uniform draw over the not-yet-extracted candidates.
-        generator = Random(seed)  # noqa: S311 -- video sampling is not security-sensitive.
-        selected = tuple(generator.sample(un_extracted, needed))
+        generator = Random(random_seed)  # noqa: S311 -- video sampling is not security-sensitive.
+        selected_videos = tuple(generator.sample(unextracted_videos, needed_video_count))
 
-    projected_frames = existing_frames + len(selected) * frames_per_video
+    projected_frame_count = existing_frame_count + len(selected_videos) * frames_per_video_count
     return VideoSamplingPlan(
-        selected=selected,
-        existing_frames=existing_frames,
-        target_frames=total_frames,
-        projected_frames=projected_frames,
-        no_growth=False,
+        selected_videos=selected_videos,
+        existing_frame_count=existing_frame_count,
+        target_frame_count=total_frame_budget,
+        projected_frame_count=projected_frame_count,
+        budget_already_met=False,
         target_unreachable=target_unreachable,
         per_group=per_group,
-        pinned_overshoot=pinned_overshoot,
+        always_included_overshoot=always_included_overshoot,
     )
 
 
 def _select_uniform_with_pins(
-    un_extracted: list[str], needed: int, pinned: list[str], seed: int | None
+    unextracted_videos: list[str], needed_video_count: int, pinned_videos: list[str], random_seed: int | None
 ) -> tuple[str, ...]:
     """Selects the pinned videos and fills the remaining budget with a uniform random draw over the rest.
 
     Args:
-        un_extracted: The not-yet-extracted candidate videos.
-        needed: The number of videos the budget calls for this pass.
-        pinned: The eligible pinned videos to always include, already deduplicated.
-        seed: The seed for the random fill draw, or None for a nondeterministic draw.
+        unextracted_videos: The not-yet-extracted candidate videos.
+        needed_video_count: The number of videos the budget calls for this pass.
+        pinned_videos: The eligible pinned videos to always include, already deduplicated.
+        random_seed: The seed for the random fill draw, or None for a nondeterministic draw.
 
     Returns:
         The selected videos, the pinned ones first, in a tuple.
     """
-    generator = Random(seed)  # noqa: S311 -- video sampling is not security-sensitive.
-    selected = list(pinned)
-    pinned_set = set(pinned)
-    fill_pool = [video for video in un_extracted if video not in pinned_set]
-    fill_count = min(max(0, needed - len(selected)), len(fill_pool))
-    selected.extend(generator.sample(fill_pool, fill_count))
-    return tuple(selected)
+    generator = Random(random_seed)  # noqa: S311 -- video sampling is not security-sensitive.
+    selected_videos = list(pinned_videos)
+    pinned_video_set = set(pinned_videos)
+    fill_candidate_videos = [video for video in unextracted_videos if video not in pinned_video_set]
+    fill_video_count = min(max(0, needed_video_count - len(selected_videos)), len(fill_candidate_videos))
+    selected_videos.extend(generator.sample(fill_candidate_videos, fill_video_count))
+    return tuple(selected_videos)
 
 
 def _select_balanced(
     groups: dict[str, list[str]],
     extracted_frame_counts: dict[str, int],
-    un_extracted: list[str],
-    frames_per_video: int,
-    needed: int,
-    pinned: list[str],
-    seed: int | None,
+    unextracted_videos: list[str],
+    frames_per_video_count: int,
+    needed_video_count: int,
+    pinned_videos: list[str],
+    random_seed: int | None,
 ) -> tuple[list[str], tuple[tuple[str, int, int, int, int], ...]]:
     """Balances the pass's videos across groups by always extending the group with the fewest projected frames.
 
@@ -176,72 +182,77 @@ def _select_balanced(
     Args:
         groups: A mapping of group to that group's candidate videos.
         extracted_frame_counts: The number of frames already extracted for each candidate video, keyed by path.
-        un_extracted: The not-yet-extracted candidate videos, used to filter each group's eligible videos.
-        frames_per_video: The number of frames each newly sampled video contributes.
-        needed: The total number of videos to select this pass, including any pinned videos.
-        pinned: The eligible pinned videos to always include, already deduplicated.
-        seed: The seed for the per-group video shuffle, or None for a nondeterministic shuffle.
+        unextracted_videos: The not-yet-extracted candidate videos, used to filter each group's eligible videos.
+        frames_per_video_count: The number of frames each newly sampled video contributes.
+        needed_video_count: The total number of videos to select this pass, including any pinned videos.
+        pinned_videos: The eligible pinned videos to always include, already deduplicated.
+        random_seed: The seed for the per-group video shuffle, or None for a nondeterministic shuffle.
 
     Returns:
         A tuple of the selected video paths (pinned first, then the balanced fill) and the per-group breakdown as
-        ``(group, existing_frames, added_videos, projected_frames, available_videos)`` tuples in canonical group order,
-        where ``available_videos`` is how many un-extracted videos the group had before this pass.
+        ``(group, existing_frame_count, added_video_count, projected_frame_count, available_video_count)`` tuples in
+        canonical group order, where ``available_video_count`` is how many un-extracted videos the group had before
+        this pass.
     """
-    generator = Random(seed)  # noqa: S311 -- video sampling is not security-sensitive.
-    un_extracted_set = set(un_extracted)
+    generator = Random(random_seed)  # noqa: S311 -- video sampling is not security-sensitive.
+    unextracted_video_set = set(unextracted_videos)
     group_keys = sorted(groups)
 
     group_of: dict[str, str] = {}
-    existing: dict[str, int] = {}
-    available: dict[str, list[str]] = {}
-    available_at_start: dict[str, int] = {}
+    existing_frames_by_group: dict[str, int] = {}
+    available_videos_by_group: dict[str, list[str]] = {}
+    available_video_counts_by_group: dict[str, int] = {}
     for group_key in group_keys:
         members = groups[group_key]
         for video in members:
             group_of[video] = group_key
-        existing[group_key] = sum(extracted_frame_counts.get(video, 0) for video in members)
-        eligible = sorted(video for video in members if video in un_extracted_set)
-        generator.shuffle(eligible)
-        available[group_key] = eligible
-        available_at_start[group_key] = len(eligible)
+        existing_frames_by_group[group_key] = sum(extracted_frame_counts.get(video, 0) for video in members)
+        eligible_videos = sorted(video for video in members if video in unextracted_video_set)
+        generator.shuffle(eligible_videos)
+        available_videos_by_group[group_key] = eligible_videos
+        available_video_counts_by_group[group_key] = len(eligible_videos)
 
-    projected = dict(existing)
-    selected: list[str] = []
+    projected_frames_by_group = dict(existing_frames_by_group)
+    selected_videos: list[str] = []
     seen: set[str] = set()
 
-    for video in pinned:
+    for video in pinned_videos:
         if video in seen:
             continue
-        selected.append(video)
+        selected_videos.append(video)
         seen.add(video)
         # An eligible pin is always included; it only participates in balancing when it maps to a known group.
-        pin_group = group_of.get(video)
-        if pin_group is not None:
-            if video in available[pin_group]:
-                available[pin_group].remove(video)
-            projected[pin_group] += frames_per_video
+        pin_group_key = group_of.get(video)
+        if pin_group_key is not None:
+            if video in available_videos_by_group[pin_group_key]:
+                available_videos_by_group[pin_group_key].remove(video)
+            projected_frames_by_group[pin_group_key] += frames_per_video_count
 
-    budget = max(0, needed - len(selected))
-    heap = [(projected[group_key], group_key) for group_key in group_keys if available[group_key]]
+    remaining_video_budget = max(0, needed_video_count - len(selected_videos))
+    heap = [
+        (projected_frames_by_group[group_key], group_key)
+        for group_key in group_keys
+        if available_videos_by_group[group_key]
+    ]
     heapq.heapify(heap)
-    while budget > 0 and heap:
+    while remaining_video_budget > 0 and heap:
         _, group_key = heapq.heappop(heap)
-        video = available[group_key].pop(0)
-        selected.append(video)
+        video = available_videos_by_group[group_key].pop(0)
+        selected_videos.append(video)
         seen.add(video)
-        projected[group_key] += frames_per_video
-        budget -= 1
-        if available[group_key]:
-            heapq.heappush(heap, (projected[group_key], group_key))
+        projected_frames_by_group[group_key] += frames_per_video_count
+        remaining_video_budget -= 1
+        if available_videos_by_group[group_key]:
+            heapq.heappush(heap, (projected_frames_by_group[group_key], group_key))
 
     per_group = tuple(
         (
             group_key,
-            existing[group_key],
-            sum(1 for video in selected if group_of.get(video) == group_key),
-            projected[group_key],
-            available_at_start[group_key],
+            existing_frames_by_group[group_key],
+            sum(1 for video in selected_videos if group_of.get(video) == group_key),
+            projected_frames_by_group[group_key],
+            available_video_counts_by_group[group_key],
         )
         for group_key in group_keys
     )
-    return selected, per_group
+    return selected_videos, per_group

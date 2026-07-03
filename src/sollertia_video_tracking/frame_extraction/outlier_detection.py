@@ -10,13 +10,13 @@ OUTLIER_ALGORITHMS: tuple[str, ...] = ("jump", "uncertain", "fitting", "list")
 """The supported outlier-detection algorithm names, mirroring DeepLabCut's non-interactive selection methods."""
 
 
-def uncertain_outlier_indices(predictions: pd.DataFrame, p_bound: float) -> list[int]:
+def uncertain_outlier_indices(predictions: pd.DataFrame, minimum_confidence: float) -> list[int]:
     """Flags frames in which any comparison bodypart was predicted below the confidence bound.
 
     Args:
         predictions: The prediction table for one video, restricted to the comparison bodyparts and sliced to the
             configured start/stop window, with a ``scorer / [individuals] / bodyparts / coords`` column MultiIndex.
-        p_bound: The likelihood below which a keypoint flags its frame as a putative outlier.
+        minimum_confidence: The likelihood below which a keypoint flags its frame as a putative outlier.
 
     Returns:
         The frame indices, in the prediction table's own index, that hold at least one low-confidence keypoint.
@@ -24,11 +24,11 @@ def uncertain_outlier_indices(predictions: pd.DataFrame, p_bound: float) -> list
     likelihoods = predictions.xs("likelihood", level="coords", axis=1)
     # pandas-stubs types the DataFrame.xs(axis=1) cross-section as DataFrame | Series, so the boolean reduction is
     # seen as a Series that rejects axis=1; the runtime object is always a DataFrame.
-    return predictions.index[(likelihoods < p_bound).any(axis=1)].tolist()  # type: ignore[arg-type]
+    return predictions.index[(likelihoods < minimum_confidence).any(axis=1)].tolist()  # type: ignore[arg-type]
 
 
-def jump_outlier_indices(predictions: pd.DataFrame, epsilon: float) -> list[int]:
-    """Flags frames in which any comparison bodypart jumped further than ``epsilon`` from the previous frame.
+def jump_outlier_indices(predictions: pd.DataFrame, pixel_distance_threshold: float) -> list[int]:
+    """Flags frames in which any comparison bodypart jumped further than the threshold from the previous frame.
 
     Notes:
         The per-bodypart squared displacement is summed across the ``x`` and ``y`` channels (and, for multi-animal
@@ -38,8 +38,8 @@ def jump_outlier_indices(predictions: pd.DataFrame, epsilon: float) -> list[int]
     Args:
         predictions: The prediction table for one video, restricted to the comparison bodyparts and sliced to the
             configured start/stop window, with a ``scorer / [individuals] / bodyparts / coords`` column MultiIndex.
-        epsilon: The Euclidean distance, in pixels, a bodypart may move between consecutive frames before its frame is
-            flagged.
+        pixel_distance_threshold: The Euclidean distance, in pixels, a bodypart may move between consecutive frames
+            before its frame is flagged.
 
     Returns:
         The frame indices, in the prediction table's own index, that hold at least one over-threshold jump.
@@ -54,11 +54,11 @@ def jump_outlier_indices(predictions: pd.DataFrame, epsilon: float) -> list[int]
         squared_step = predictions.diff(axis=0) ** 2
         squared_step = squared_step.drop("likelihood", axis=1, level="coords")
         per_bodypart = squared_step.groupby(level="bodyparts", axis=1).sum()  # type: ignore[call-overload]
-    return predictions.index[(per_bodypart > epsilon**2).any(axis=1)].tolist()
+    return predictions.index[(per_bodypart > pixel_distance_threshold**2).any(axis=1)].tolist()
 
 
 def fitting_keypoint_series(predictions: pd.DataFrame) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
-    """Splits a prediction table into per-keypoint ``(x, y, likelihood)`` trajectories for SARIMAX fitting.
+    """Splits a prediction table into per-keypoint position-and-confidence trajectories for SARIMAX fitting.
 
     Notes:
         The columns are reshaped into ``(frames, keypoints, 3)`` exactly as DeepLabCut does before fitting, so every
@@ -70,28 +70,29 @@ def fitting_keypoint_series(predictions: pd.DataFrame) -> list[tuple[np.ndarray,
             configured start/stop window.
 
     Returns:
-        One ``(x, y, likelihood)`` tuple of per-frame arrays for each keypoint, in column order.
+        One ``(horizontal_positions, vertical_positions, confidences)`` tuple of per-frame arrays for each keypoint,
+        in column order.
     """
     channels = predictions.to_numpy().reshape((predictions.shape[0], -1, 3))
-    x, y, likelihood = channels.T
+    horizontal_positions, vertical_positions, confidences = channels.T
     return [
         (
-            np.ascontiguousarray(x[keypoint]),
-            np.ascontiguousarray(y[keypoint]),
-            np.ascontiguousarray(likelihood[keypoint]),
+            np.ascontiguousarray(horizontal_positions[keypoint]),
+            np.ascontiguousarray(vertical_positions[keypoint]),
+            np.ascontiguousarray(confidences[keypoint]),
         )
-        for keypoint in range(x.shape[0])
+        for keypoint in range(horizontal_positions.shape[0])
     ]
 
 
 def fit_keypoint_distance(
-    x: np.ndarray,
-    y: np.ndarray,
-    likelihood: np.ndarray,
-    p_bound: float,
-    alpha: float,
-    ar_degree: int,
-    ma_degree: int,
+    horizontal_positions: np.ndarray,
+    vertical_positions: np.ndarray,
+    confidences: np.ndarray,
+    minimum_confidence: float,
+    significance_level: float,
+    autoregressive_degree: int,
+    moving_average_degree: int,
 ) -> np.ndarray:
     """Fits a SARIMAX model to one keypoint's trajectory and returns its per-frame deviation from the fit.
 
@@ -102,13 +103,13 @@ def fit_keypoint_distance(
         trajectory cannot abort the shared fitting pool.
 
     Args:
-        x: The keypoint's per-frame horizontal positions.
-        y: The keypoint's per-frame vertical positions.
-        likelihood: The keypoint's per-frame prediction confidences.
-        p_bound: The likelihood below which a position is treated as missing while fitting.
-        alpha: The significance level for the fitted model's confidence interval.
-        ar_degree: The autoregressive degree of the SARIMAX model.
-        ma_degree: The moving-average degree of the SARIMAX model.
+        horizontal_positions: The keypoint's per-frame horizontal positions.
+        vertical_positions: The keypoint's per-frame vertical positions.
+        confidences: The keypoint's per-frame prediction confidences.
+        minimum_confidence: The likelihood below which a position is treated as missing while fitting.
+        significance_level: The significance level for the fitted model's confidence interval.
+        autoregressive_degree: The autoregressive degree of the SARIMAX model.
+        moving_average_degree: The moving-average degree of the SARIMAX model.
 
     Returns:
         The per-frame Euclidean distance between the observed position and the model's fitted position.
@@ -118,36 +119,52 @@ def fit_keypoint_distance(
         # these fits run in pool workers that do not redirect their streams, so the warnings are silenced at the source.
         warnings.simplefilter("ignore")
         try:
-            mean_x, _ = FitSARIMAXModel(x, likelihood, p_bound, alpha, ar_degree, ma_degree)
-            mean_y, _ = FitSARIMAXModel(y, likelihood, p_bound, alpha, ar_degree, ma_degree)
+            mean_x, _ = FitSARIMAXModel(
+                horizontal_positions,
+                confidences,
+                minimum_confidence,
+                significance_level,
+                autoregressive_degree,
+                moving_average_degree,
+            )
+            mean_y, _ = FitSARIMAXModel(
+                vertical_positions,
+                confidences,
+                minimum_confidence,
+                significance_level,
+                autoregressive_degree,
+                moving_average_degree,
+            )
         except Exception:  # noqa: BLE001 -- a keypoint whose fit raises yields NaN, like one with too few points.
-            return np.full(x.shape, np.nan, dtype=float)
-    return np.sqrt((x - mean_x) ** 2 + (y - mean_y) ** 2)
+            return np.full(horizontal_positions.shape, np.nan, dtype=float)
+    return np.sqrt((horizontal_positions - mean_x) ** 2 + (vertical_positions - mean_y) ** 2)
 
 
-def fitting_outlier_indices(distances: list[np.ndarray], num_frames_to_pick: int, epsilon: float) -> list[int]:
+def fitting_outlier_indices(
+    keypoint_deviations: list[np.ndarray], frames_per_video_count: int, pixel_distance_threshold: float
+) -> list[int]:
     """Selects outlier frames from per-keypoint SARIMAX deviations, averaging across keypoints as DeepLabCut does.
 
     Notes:
         The per-frame deviation is the keypoint-averaged distance to the fitted trajectory, ignoring keypoints whose
-        fit was skipped. Frames deviating by more than ``epsilon`` are flagged; when too few qualify, the most deviant
-        frames are taken instead, matching DeepLabCut's fallback. The returned indices are positional within the
-        supplied window, as in DeepLabCut.
+        fit was skipped. Frames deviating by more than ``pixel_distance_threshold`` are flagged; when too few qualify,
+        the most deviant frames are taken instead, matching DeepLabCut's fallback. The returned indices are positional
+        within the supplied window, as in DeepLabCut.
 
     Args:
-        distances: One per-frame deviation array for each keypoint, produced by ``fit_keypoint_distance``.
-        num_frames_to_pick: The project's ``numframes2pick``, used to size the fallback selection.
-        epsilon: The averaged deviation, in pixels, above which a frame is flagged.
+        keypoint_deviations: One per-frame deviation array for each keypoint, produced by ``fit_keypoint_distance``.
+        frames_per_video_count: The project's ``numframes2pick``, used to size the fallback selection.
+        pixel_distance_threshold: The averaged deviation, in pixels, above which a frame is flagged.
 
     Returns:
         The positional indices of the flagged frames within the supplied window.
     """
-    stacked = np.vstack(distances)
+    stacked_deviations = np.vstack(keypoint_deviations)
     with warnings.catch_warnings():
         # A frame whose keypoints were all skipped averages over an empty slice; NaN is the intended, unflagged result.
         warnings.simplefilter("ignore", category=RuntimeWarning)
-        deviation = np.nanmean(stacked, axis=0)
-    candidates = np.flatnonzero(deviation > epsilon)
-    if len(candidates) < num_frames_to_pick * 2 and len(deviation) > num_frames_to_pick * 2:
-        candidates = np.argsort(deviation)[::-1][: num_frames_to_pick * 2]
-    return candidates.tolist()
+        mean_deviation = np.nanmean(stacked_deviations, axis=0)
+    candidate_indices = np.flatnonzero(mean_deviation > pixel_distance_threshold)
+    if len(candidate_indices) < frames_per_video_count * 2 and len(mean_deviation) > frames_per_video_count * 2:
+        candidate_indices = np.argsort(mean_deviation)[::-1][: frames_per_video_count * 2]
+    return candidate_indices.tolist()

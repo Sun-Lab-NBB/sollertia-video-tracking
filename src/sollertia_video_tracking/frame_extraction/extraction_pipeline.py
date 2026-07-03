@@ -16,7 +16,7 @@ from ruamel.yaml import YAML
 import deeplabcut.utils.frameselectiontools as frame_selection_tools
 
 from .progress import AggregateBar, make_progress_reporter
-from .cpu_allocation import DEFAULT_RESERVE_CORES, pin_worker_to_cores, plan_core_allocation
+from .cpu_allocation import DEFAULT_RESERVED_CORE_COUNT, pin_worker_to_cores, plan_core_allocation
 from .video_grouping import group_videos
 from .video_sampling import VideoSamplingPlan, plan_video_sampling
 
@@ -36,26 +36,26 @@ class FrameExtractionSummary:
     Notes:
         The pipeline never aborts on a single bad video, so failures are collected here as ``(video_path, detail)``
         pairs rather than raised, where the detail is a traceback or the marker ``"empty"`` for a video that produced
-        no frames. Callers inspect ``failed`` (or ``errors``) to decide the process exit status.
+        no frames. Callers inspect ``failed_video_count`` (or ``errors``) to decide the process exit status.
     """
 
-    extracted: int
+    extracted_video_count: int
     """The number of videos for which frames were freshly extracted."""
-    skipped: int
+    skipped_video_count: int
     """The number of videos skipped because their labeled-data directory already contained frames."""
-    total: int
+    total_video_count: int
     """The total number of videos considered in the run."""
-    workers: int
+    worker_count: int
     """The number of worker processes that ran concurrently."""
-    cores_used: int
+    used_core_count: int
     """The number of distinct CPU cores the workers were pinned across."""
-    core_count: int
+    total_core_count: int
     """The total number of CPU cores available on the machine."""
-    frames_to_cluster: int
+    clustering_frame_count: int
     """The total number of frames that were read and clustered across all videos."""
-    existing_frames: int = 0
+    existing_frame_count: int = 0
     """The number of frames already extracted across the selection before this run, reported in sampling mode."""
-    target_frames: int = -1
+    target_frame_count: int = -1
     """The requested total-frame budget when sampling videos, or -1 when budgeted sampling was disabled."""
     errors: tuple[tuple[str, str], ...] = ()
     """The ``(video_path, detail)`` pairs for every video that failed to extract or produced no frames, where the
@@ -63,7 +63,7 @@ class FrameExtractionSummary:
     """
 
     @property
-    def failed(self) -> int:
+    def failed_video_count(self) -> int:
         """Returns the number of videos that failed to extract."""
         return len(self.errors)
 
@@ -76,22 +76,22 @@ class FrameExtractionSummary:
 def extract_frames_kmeans(
     config_path: Path,
     *,
-    step: int = 500,
-    workers: int = -1,
+    clustering_stride: int = 500,
+    worker_count: int = -1,
     cores_per_worker: int = -1,
-    reserve_cores: int = DEFAULT_RESERVE_CORES,
-    num_frames: int = -1,
-    total_frames: int = -1,
-    seed: int | None = None,
+    reserved_core_count: int = DEFAULT_RESERVED_CORE_COUNT,
+    frames_per_video: int = -1,
+    total_frame_budget: int = -1,
+    random_seed: int | None = None,
     balance_groups: bool = False,
-    group_by: str | None = None,
-    videos_override: tuple[str, ...] = (),
-    resize_width: int = 30,
-    color: bool = False,
+    group_by_pattern: str | None = None,
+    always_include_videos: tuple[str, ...] = (),
+    clustering_resize_width: int = 30,
+    cluster_in_color: bool = False,
     overwrite: bool = False,
     reset: bool = False,
     path_filters: tuple[str, ...] = (),
-    heartbeat: float = 30.0,
+    minimum_progress_interval: float = 30.0,
     display_progress: bool = True,
 ) -> FrameExtractionSummary:
     """Runs DeepLabCut k-means frame extraction across a project's videos in parallel and reports the outcome.
@@ -101,10 +101,10 @@ def extract_frames_kmeans(
     directory already contains frames are skipped unless ``overwrite`` is set. A single bad video is recorded in the
     returned summary rather than aborting the run.
 
-    When ``total_frames`` is set, the run samples a random subset of not-yet-extracted videos sized to reach that
+    When ``total_frame_budget`` is set, the run samples a random subset of not-yet-extracted videos sized to reach that
     project-wide frame budget, so the full project can be added once and extraction grows coverage across repeated
     passes without manual selection. When the existing frames already meet the budget, the run extracts nothing and
-    warns; raising ``total_frames`` or using ``reset`` grows the set further.
+    warns; raising ``total_frame_budget`` or using ``reset`` grows the set further.
 
     Notes:
         The pipeline uses the spawn multiprocessing start method on every platform for reproducible behavior, so a
@@ -114,31 +114,35 @@ def extract_frames_kmeans(
 
         Because k-means selects different frame indices on each run, re-extraction writes different image filenames
         and orphans the existing labels, so ``overwrite`` and ``reset`` both delete a video's ``CollectedData`` labels
-        alongside its frames. The ``seed`` controls only the random choice of videos, not the frames within a video.
+        alongside its frames. The ``random_seed`` controls only the random choice of videos, not the frames within a
+        video.
 
     Args:
         config_path: The path to the DeepLabCut project's config.yaml.
-        step: The clustering stride passed to DeepLabCut as ``cluster_step``; every ``step``-th frame is sampled.
-        workers: The number of videos to decode in parallel. Set to -1 to fill the usable cores automatically.
+        clustering_stride: The clustering stride passed to DeepLabCut as ``cluster_step``; every Nth frame is sampled,
+            where N is this stride.
+        worker_count: The number of videos to decode in parallel. Set to -1 to fill the usable cores automatically.
         cores_per_worker: The number of CPU cores pinned to each worker. Set to -1 to spread the usable cores evenly.
-        reserve_cores: The number of CPU cores to leave free for other tasks.
-        num_frames: The number of frames to keep per video, overriding ``numframes2pick`` in config.yaml. Set to -1
-            to use the value already stored in the configuration file.
-        total_frames: The total number of frames the project should hold, reached by randomly sampling not-yet-
+        reserved_core_count: The number of CPU cores to leave free for other tasks.
+        frames_per_video: The number of frames to keep per video, overriding ``numframes2pick`` in config.yaml. Set to
+            -1 to use the value already stored in the configuration file.
+        total_frame_budget: The total number of frames the project should hold, reached by randomly sampling not-yet-
             extracted videos. Set to -1 to extract every selected video instead of sampling toward a budget.
-        seed: The seed for the random video sampling. Set to None to draw a different subset each run, or to an
+        random_seed: The seed for the random video sampling. Set to None to draw a different subset each run, or to an
             integer to make the selection reproducible.
         balance_groups: Whether to balance the budgeted sampling across groups rather than drawing uniformly, so every
             group is represented and coverage evens out across repeated passes. The group of each video is inferred from
             its file name, with videos that share their non-date name components grouped together. Only affects the run
-            when ``total_frames`` is set.
-        group_by: A regular expression whose first capturing group names the group for each video's file-name stem,
-            overriding the built-in inference for naming schemes it does not cover. Setting it implies
+            when ``total_frame_budget`` is set.
+        group_by_pattern: A regular expression whose first capturing group names the group for each video's file-name
+            stem, overriding the built-in inference for naming schemes it does not cover. Setting it implies
             ``balance_groups``.
-        videos_override: The path substrings naming videos to always include in the budgeted sample, selected before
-            the balanced or uniform draw fills the remaining budget. Only affects the run when ``total_frames`` is set.
-        resize_width: The downsample width applied before clustering, passed to DeepLabCut as ``cluster_resizewidth``.
-        color: Determines whether to cluster on color channels instead of grayscale.
+        always_include_videos: The path substrings naming videos to always include in the budgeted sample, selected
+            before the balanced or uniform draw fills the remaining budget. Only affects the run when
+            ``total_frame_budget`` is set.
+        clustering_resize_width: The downsample width applied before clustering, passed to DeepLabCut as
+            ``cluster_resizewidth``.
+        cluster_in_color: Determines whether to cluster on color channels instead of grayscale.
         overwrite: Determines whether to re-extract videos whose labeled-data directory already contains frames.
             Re-extraction deletes the existing ``img*.png`` frames in each affected directory and the matching
             ``CollectedData`` labels, which the new frames would otherwise orphan. Mutually exclusive with ``reset``.
@@ -147,7 +151,8 @@ def extract_frames_kmeans(
             video folder. Mutually exclusive with ``overwrite``.
         path_filters: The substrings used to restrict the run to videos whose path contains any of them. An empty
             tuple selects every video in the project.
-        heartbeat: The minimum interval, in seconds, between progress lines when the output is not a TTY.
+        minimum_progress_interval: The minimum interval, in seconds, between progress lines when the output is not a
+            TTY.
         display_progress: Determines whether to render the run header and the aggregate progress bar to the standard
             error stream.
 
@@ -157,7 +162,7 @@ def extract_frames_kmeans(
 
     Raises:
         FileNotFoundError: If ``config_path`` does not point to an existing file.
-        ValueError: If ``num_frames`` or ``total_frames`` is set below one (other than the -1 sentinel), if
+        ValueError: If ``frames_per_video`` or ``total_frame_budget`` is set below one (other than the -1 sentinel), if
             ``overwrite`` and ``reset`` are both set, if budgeted sampling is requested without a valid
             ``numframes2pick``, if config.yaml defines no ``video_sets``, or if no videos in config.yaml match
             ``path_filters``.
@@ -166,13 +171,15 @@ def extract_frames_kmeans(
     if overwrite and reset:
         message = "Unable to extract frames. The overwrite and reset options are mutually exclusive."
         raise ValueError(message)
-    if total_frames != -1 and total_frames < 1:
-        message = f"Unable to extract frames. The total frame budget must be at least one, but got {total_frames}."
+    if total_frame_budget != -1 and total_frame_budget < 1:
+        message = (
+            f"Unable to extract frames. The total frame budget must be at least one, but got {total_frame_budget}."
+        )
         raise ValueError(message)
     yaml = YAML()
     configuration = yaml.load(config_path.read_text())
-    start = float(configuration.get("start", 0))
-    stop = float(configuration.get("stop", 1))
+    start_fraction = float(configuration.get("start", 0))
+    stop_fraction = float(configuration.get("stop", 1))
 
     # DeepLabCut's read_config rewrites config.yaml whenever project_path differs from the config's own directory.
     # With many workers reading concurrently, that write races against sibling reads and intermittently returns an
@@ -183,19 +190,21 @@ def extract_frames_kmeans(
         configuration["project_path"] = project_directory
         config_changed = True
 
-    # Like the DeepLabCut GUI, a num_frames override is written straight into config.yaml. The -1 sentinel leaves the
-    # value already stored in the configuration file untouched.
-    if num_frames != -1:
-        if num_frames < 1:
-            message = f"Unable to extract frames. The frame count per video must be at least one, but got {num_frames}."
+    # Like the DeepLabCut GUI, a frames_per_video override is written straight into config.yaml. The -1 sentinel leaves
+    # the value already stored in the configuration file untouched.
+    if frames_per_video != -1:
+        if frames_per_video < 1:
+            message = (
+                f"Unable to extract frames. The frame count per video must be at least one, but got {frames_per_video}."
+            )
             raise ValueError(message)
-        configuration["numframes2pick"] = int(num_frames)
+        configuration["numframes2pick"] = int(frames_per_video)
         config_changed = True
 
     if config_changed:
         with config_path.open("w") as config_file:
             yaml.dump(configuration, config_file)
-    frames_per_video = configuration.get("numframes2pick", "?")
+    configured_frames_per_video = configuration.get("numframes2pick", "?")
 
     if "video_sets" not in configuration:
         message = "Unable to extract frames. The project's config.yaml does not define any video_sets."
@@ -219,86 +228,92 @@ def extract_frames_kmeans(
         for video in videos:
             _clear_extracted_data(output_directory=project_directory_path / "labeled-data" / Path(video).stem)
 
-    if total_frames == -1 and (balance_groups or group_by is not None or videos_override):
+    if total_frame_budget == -1 and (balance_groups or group_by_pattern is not None or always_include_videos):
         sys.stderr.write(
-            "WARNING: --balance-groups, --group-by, and --videos only apply when sampling toward a frame budget. Pass "
-            "--total-frames to enable budgeted sampling, otherwise every selected video is extracted.\n"
+            "WARNING: --balance-groups, --group-by, and --always-include only apply when sampling toward a frame "
+            "budget. Pass --total-frames to enable budgeted sampling, otherwise every selected video is extracted.\n"
         )
         sys.stderr.flush()
 
-    existing_frames = 0
-    target_frames = -1
-    if total_frames != -1:
+    existing_frame_count = 0
+    target_frame_count = -1
+    if total_frame_budget != -1:
         frames_per_video_count = configuration.get("numframes2pick")
         if not isinstance(frames_per_video_count, int) or frames_per_video_count < 1:
             message = (
                 "Unable to sample videos for a frame budget. The project's numframes2pick must be a positive "
-                f"integer, but got {frames_per_video_count!r}. Pass num_frames to set it."
+                f"integer, but got {frames_per_video_count!r}. Pass frames_per_video to set it."
             )
             raise ValueError(message)
-        groups = group_videos(videos, key_pattern=group_by) if (balance_groups or group_by is not None) else None
-        pins, unmatched = _resolve_video_overrides(overrides=videos_override, videos=videos)
+        groups = (
+            group_videos(videos, group_by_pattern=group_by_pattern)
+            if (balance_groups or group_by_pattern is not None)
+            else None
+        )
+        pinned_videos, unmatched = _resolve_video_overrides(always_include_videos=always_include_videos, videos=videos)
         for token in unmatched:
-            sys.stderr.write(f"WARNING: the --videos value {token!r} matched no video in the selection.\n")
+            sys.stderr.write(f"WARNING: the --always-include value {token!r} matched no video in the selection.\n")
         plan = plan_video_sampling(
             videos=videos,
             extracted_frame_counts=_count_extracted_frames(videos=videos, project_directory=project_directory_path),
-            frames_per_video=frames_per_video_count,
-            total_frames=total_frames,
-            seed=seed,
+            frames_per_video_count=frames_per_video_count,
+            total_frame_budget=total_frame_budget,
+            random_seed=random_seed,
             groups=groups,
-            pinned=pins,
+            pinned_videos=pinned_videos,
         )
         _report_sampling_plan(plan=plan)
-        if not plan.selected:
+        if not plan.selected_videos:
             return FrameExtractionSummary(
-                extracted=0,
-                skipped=0,
-                total=0,
-                workers=0,
-                cores_used=0,
-                core_count=os.cpu_count() or 1,
-                frames_to_cluster=0,
-                existing_frames=plan.existing_frames,
-                target_frames=plan.target_frames,
+                extracted_video_count=0,
+                skipped_video_count=0,
+                total_video_count=0,
+                worker_count=0,
+                used_core_count=0,
+                total_core_count=os.cpu_count() or 1,
+                clustering_frame_count=0,
+                existing_frame_count=plan.existing_frame_count,
+                target_frame_count=plan.target_frame_count,
             )
-        videos = list(plan.selected)
-        existing_frames = plan.existing_frames
-        target_frames = plan.target_frames
+        videos = list(plan.selected_videos)
+        existing_frame_count = plan.existing_frame_count
+        target_frame_count = plan.target_frame_count
 
-    core_count = os.cpu_count() or 1
-    workers, core_sets = plan_core_allocation(
+    total_core_count = os.cpu_count() or 1
+    worker_count, core_sets = plan_core_allocation(
         video_count=len(videos),
-        core_count=core_count,
-        workers=workers,
+        total_core_count=total_core_count,
+        worker_count=worker_count,
         cores_per_worker=cores_per_worker,
-        reserve_cores=reserve_cores,
+        reserved_core_count=reserved_core_count,
     )
-    cores_used = len({core for core_set in core_sets for core in core_set})
+    used_core_count = len({core for core_set in core_sets for core in core_set})
 
-    totals = _count_clustering_frames(videos=videos, start=start, stop=stop, step=step)
-    frames_to_cluster = sum(totals.values())
+    frame_totals = _count_clustering_frames(
+        videos=videos, start_fraction=start_fraction, stop_fraction=stop_fraction, clustering_stride=clustering_stride
+    )
+    clustering_frame_count = sum(frame_totals.values())
 
     # The spawn start method is used on every platform for reproducible, fork-safety-independent behavior. Each worker
-    # claims one core block from the slot queue for CPU-affinity pinning; a manager queue is used (rather than a
+    # claims one core block from the core-set queue for CPU-affinity pinning; a manager queue is used (rather than a
     # fork-inherited shared counter) so the core blocks survive being pickled to the spawned worker processes.
     context = multiprocessing.get_context("spawn")
     manager = context.Manager()
     progress_queue = manager.Queue()
-    slot_queue = manager.Queue()
+    core_set_queue = manager.Queue()
     for core_set in core_sets:
-        slot_queue.put(core_set)
+        core_set_queue.put(core_set)
     config_path_string = str(config_path)
     tasks = [
         (
             video,
             config_path_string,
-            step,
-            resize_width,
-            color,
+            clustering_stride,
+            clustering_resize_width,
+            cluster_in_color,
             overwrite,
             video_index,
-            totals[video_index],
+            frame_totals[video_index],
             progress_queue,
         )
         for video_index, video in enumerate(videos)
@@ -308,23 +323,28 @@ def extract_frames_kmeans(
     if display_progress:
         _report_plan(
             video_count=len(videos),
-            frames_per_video=frames_per_video,
-            step=step,
-            resize_width=resize_width,
-            color=color,
-            workers=workers,
-            cores_used=cores_used,
-            core_count=core_count,
-            frames_to_cluster=frames_to_cluster,
+            configured_frames_per_video=configured_frames_per_video,
+            clustering_stride=clustering_stride,
+            clustering_resize_width=clustering_resize_width,
+            cluster_in_color=cluster_in_color,
+            worker_count=worker_count,
+            used_core_count=used_core_count,
+            total_core_count=total_core_count,
+            clustering_frame_count=clustering_frame_count,
             config_path=config_path,
         )
 
-    bar = AggregateBar(progress_queue=progress_queue, total_videos=len(tasks), totals=totals, heartbeat=heartbeat)
+    bar = AggregateBar(
+        progress_queue=progress_queue,
+        total_video_count=len(tasks),
+        frame_totals=frame_totals,
+        minimum_progress_interval=minimum_progress_interval,
+    )
 
     extracted_count = skipped_count = 0
     errors: list[tuple[str, str]] = []
     # Brings up the worker pool, then starts the renderer thread.
-    with context.Pool(processes=workers, initializer=pin_worker_to_cores, initargs=(slot_queue,)) as pool:
+    with context.Pool(processes=worker_count, initializer=pin_worker_to_cores, initargs=(core_set_queue,)) as pool:
         if display_progress:
             bar.start()
         for video, _written, status in pool.imap_unordered(_extract_one_video, tasks):
@@ -341,54 +361,54 @@ def extract_frames_kmeans(
         bar.join(timeout=3)
 
     return FrameExtractionSummary(
-        extracted=extracted_count,
-        skipped=skipped_count,
-        total=len(tasks),
-        workers=workers,
-        cores_used=cores_used,
-        core_count=core_count,
-        frames_to_cluster=frames_to_cluster,
-        existing_frames=existing_frames,
-        target_frames=target_frames,
+        extracted_video_count=extracted_count,
+        skipped_video_count=skipped_count,
+        total_video_count=len(tasks),
+        worker_count=worker_count,
+        used_core_count=used_core_count,
+        total_core_count=total_core_count,
+        clustering_frame_count=clustering_frame_count,
+        existing_frame_count=existing_frame_count,
+        target_frame_count=target_frame_count,
         errors=tuple(errors),
     )
 
 
 def _report_plan(
     video_count: int,
-    frames_per_video: int | str,
-    step: int,
-    resize_width: int,
+    configured_frames_per_video: int | str,
+    clustering_stride: int,
+    clustering_resize_width: int,
     *,
-    color: bool,
-    workers: int,
-    cores_used: int,
-    core_count: int,
-    frames_to_cluster: int,
+    cluster_in_color: bool,
+    worker_count: int,
+    used_core_count: int,
+    total_core_count: int,
+    clustering_frame_count: int,
     config_path: Path,
 ) -> None:
     """Writes the two-line run header describing the resolved extraction plan to the standard error stream.
 
     Args:
         video_count: The number of videos selected for the run.
-        frames_per_video: The resolved ``numframes2pick`` value from config.yaml.
-        step: The clustering stride.
-        resize_width: The downsample width applied before clustering.
-        color: Determines whether clustering runs on color channels.
-        workers: The resolved number of concurrent workers.
-        cores_used: The number of distinct cores the workers are pinned across.
-        core_count: The total number of cores on the machine.
-        frames_to_cluster: The total number of frames to read and cluster.
+        configured_frames_per_video: The resolved ``numframes2pick`` value from config.yaml.
+        clustering_stride: The clustering stride.
+        clustering_resize_width: The downsample width applied before clustering.
+        cluster_in_color: Determines whether clustering runs on color channels.
+        worker_count: The resolved number of concurrent workers.
+        used_core_count: The number of distinct cores the workers are pinned across.
+        total_core_count: The total number of cores on the machine.
+        clustering_frame_count: The total number of frames to read and cluster.
         config_path: The resolved path to the project's config.yaml.
     """
-    free_cores = core_count - cores_used
+    free_core_count = total_core_count - used_core_count
     sys.stderr.write(
-        f"k-means extraction | {video_count} videos | numframes2pick={frames_per_video} | "
-        f"cluster_step={step} | resize_width={resize_width} | color={color}\n"
+        f"k-means extraction | {video_count} videos | numframes2pick={configured_frames_per_video} | "
+        f"cluster_step={clustering_stride} | resize_width={clustering_resize_width} | color={cluster_in_color}\n"
     )
     sys.stderr.write(
-        f"workers={workers} | {cores_used}/{core_count} cores used ({free_cores} free) | "
-        f"{frames_to_cluster:,} frames to cluster | config={config_path}\n"
+        f"workers={worker_count} | {used_core_count}/{total_core_count} cores used ({free_core_count} free) | "
+        f"{clustering_frame_count:,} frames to cluster | config={config_path}\n"
     )
     sys.stderr.flush()
 
@@ -399,26 +419,26 @@ def _report_sampling_plan(plan: VideoSamplingPlan) -> None:
     Args:
         plan: The sampling plan whose selection and budget flags are reported.
     """
-    if plan.no_growth:
+    if plan.budget_already_met:
         sys.stderr.write(
-            f"WARNING: the project already holds {plan.existing_frames:,} frames, which meets the requested total "
-            f"of {plan.target_frames:,}. Nothing will be extracted. Raise the total frame budget to grow the set, "
+            f"WARNING: the project already holds {plan.existing_frame_count:,} frames, which meets the requested total "
+            f"of {plan.target_frame_count:,}. Nothing will be extracted. Raise the total frame budget to grow the set, "
             f"or use reset to start over.\n"
         )
-    elif not plan.selected:
+    elif not plan.selected_videos:
         sys.stderr.write(
             "WARNING: every selected video already has extracted frames, so none remain to sample. Use overwrite "
             "or reset to re-extract from existing videos.\n"
         )
     elif plan.target_unreachable:
         sys.stderr.write(
-            f"WARNING: too few un-extracted videos remain to reach {plan.target_frames:,} frames. Sampling all "
-            f"{len(plan.selected)} remaining video(s) for a projected {plan.projected_frames:,} frames.\n"
+            f"WARNING: too few un-extracted videos remain to reach {plan.target_frame_count:,} frames. Sampling all "
+            f"{len(plan.selected_videos)} remaining video(s) for a projected {plan.projected_frame_count:,} frames.\n"
         )
     else:
         sys.stderr.write(
-            f"sampling {len(plan.selected)} video(s) | {plan.existing_frames:,} existing -> "
-            f"{plan.projected_frames:,} projected frames (target {plan.target_frames:,})\n"
+            f"sampling {len(plan.selected_videos)} video(s) | {plan.existing_frame_count:,} existing -> "
+            f"{plan.projected_frame_count:,} projected frames (target {plan.target_frame_count:,})\n"
         )
 
     if plan.per_group:
@@ -442,35 +462,37 @@ def _report_sampling_plan(plan: VideoSamplingPlan) -> None:
                 f"WARNING: {starved} group(s) had un-extracted videos but received none this pass because the budget "
                 f"is too small. Raise the total frame budget to include them.\n"
             )
-    if plan.pinned_overshoot:
+    if plan.always_included_overshoot:
         sys.stderr.write(
-            "WARNING: the pinned videos alone exceeded the frame budget, so the projected total overshoots the "
-            "target by the surplus pinned videos.\n"
+            "WARNING: the always-included videos alone exceeded the frame budget, so the projected total overshoots "
+            "the target by the surplus always-included videos.\n"
         )
     sys.stderr.flush()
 
 
-def _resolve_video_overrides(overrides: tuple[str, ...], videos: list[str]) -> tuple[tuple[str, ...], list[str]]:
+def _resolve_video_overrides(
+    always_include_videos: tuple[str, ...], videos: list[str]
+) -> tuple[tuple[str, ...], list[str]]:
     """Resolves the video-override path substrings to the candidate videos they match, keyed in candidate order.
 
     Args:
-        overrides: The path substrings naming videos to always include in the budgeted sample.
+        always_include_videos: The path substrings naming videos to always include in the budgeted sample.
         videos: The candidate video paths for the run.
 
     Returns:
         A tuple of the matched video paths, deduplicated and in candidate order, and the list of override substrings
         that matched no candidate video.
     """
-    matched: set[str] = set()
-    unmatched: list[str] = []
-    for token in dict.fromkeys(overrides):
-        hits = [video for video in videos if token in video]
-        if hits:
-            matched.update(hits)
+    matched_videos: set[str] = set()
+    unmatched_substrings: list[str] = []
+    for substring in dict.fromkeys(always_include_videos):
+        matching_videos = [video for video in videos if substring in video]
+        if matching_videos:
+            matched_videos.update(matching_videos)
         else:
-            unmatched.append(token)
-    ordered = tuple(video for video in videos if video in matched)
-    return ordered, unmatched
+            unmatched_substrings.append(substring)
+    ordered_matches = tuple(video for video in videos if video in matched_videos)
+    return ordered_matches, unmatched_substrings
 
 
 def _count_extracted_frames(videos: list[str], project_directory: Path) -> dict[str, int]:
@@ -505,7 +527,9 @@ def _clear_extracted_data(output_directory: Path) -> None:
             target.unlink()
 
 
-def _count_clustering_frames(videos: list[str], start: float, stop: float, step: int) -> dict[int, int]:
+def _count_clustering_frames(
+    videos: list[str], start_fraction: float, stop_fraction: float, clustering_stride: int
+) -> dict[int, int]:
     """Counts the frames DeepLabCut will read and cluster for each video, keyed by the video's index.
 
     The per-video total mirrors DeepLabCut's own sampling: the frames between the configured start and stop bounds
@@ -513,20 +537,20 @@ def _count_clustering_frames(videos: list[str], start: float, stop: float, step:
 
     Args:
         videos: The ordered list of video paths to inspect.
-        start: The fractional start position within each video, in the range [0, 1].
-        stop: The fractional stop position within each video, in the range [0, 1].
-        step: The sampling stride; every ``step``-th frame is clustered.
+        start_fraction: The fractional start position within each video, in the range [0, 1].
+        stop_fraction: The fractional stop position within each video, in the range [0, 1].
+        clustering_stride: The sampling stride; every ``clustering_stride``-th frame is clustered.
 
     Returns:
         A mapping of video index to the number of frames that video contributes to the aggregate total.
     """
     cv2.setNumThreads(1)
-    totals: dict[int, int] = {}
+    frame_totals: dict[int, int] = {}
     for video_index, video in enumerate(videos):
         frame_count = int(cv2.VideoCapture(video).get(cv2.CAP_PROP_FRAME_COUNT))
-        start_index, end_index = math.floor(frame_count * start), math.ceil(frame_count * stop)
-        totals[video_index] = max(1, len(range(start_index, end_index, step)))
-    return totals
+        start_index, end_index = math.floor(frame_count * start_fraction), math.ceil(frame_count * stop_fraction)
+        frame_totals[video_index] = max(1, len(range(start_index, end_index, clustering_stride)))
+    return frame_totals
 
 
 def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
@@ -544,22 +568,32 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
         A tuple of the video path, the number of frames written, and a status string (``"ok"``, ``"skipped"``,
         ``"empty"``, or an ``"error:"`` traceback).
     """
-    video_path, config_path, step, resize_width, color, overwrite, video_index, total, progress_queue = task
+    (
+        video_path,
+        config_path,
+        clustering_stride,
+        clustering_resize_width,
+        cluster_in_color,
+        overwrite,
+        video_index,
+        frame_total,
+        progress_queue,
+    ) = task
     try:
         cv2.setNumThreads(1)
 
         stem = Path(video_path).stem
         output_directory = Path(config_path).parent / "labeled-data" / stem
 
-        existing_frames = sorted(output_directory.glob("img*.png")) if output_directory.exists() else []
-        if existing_frames and not overwrite:
-            return video_path, len(existing_frames), "skipped"
+        existing_frame_paths = sorted(output_directory.glob("img*.png")) if output_directory.exists() else []
+        if existing_frame_paths and not overwrite:
+            return video_path, len(existing_frame_paths), "skipped"
         # On overwrite, drop the stale frames and the labels they would orphan before re-extracting.
         _clear_extracted_data(output_directory=output_directory)
 
         # Redirects DeepLabCut's internal tqdm progress to the parent's aggregate bar via the shared queue.
         frame_selection_tools.tqdm = make_progress_reporter(
-            progress_queue=progress_queue, video_index=video_index, total=total
+            progress_queue=progress_queue, video_index=video_index, frame_total=frame_total
         )
 
         with (
@@ -575,9 +609,9 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
                 crop=True,
                 # Runs non-interactively.
                 userfeedback=False,
-                cluster_step=step,
-                cluster_resizewidth=resize_width,
-                cluster_color=color,
+                cluster_step=clustering_stride,
+                cluster_resizewidth=clustering_resize_width,
+                cluster_color=cluster_in_color,
                 # Restricts DeepLabCut to this one video.
                 videos_list=[video_path],
             )
