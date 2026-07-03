@@ -142,7 +142,9 @@ def _read_prediction_dataframe(h5_path: Path) -> pd.DataFrame:
                 f"prediction table, but it stores no objects."
             )
             raise ValueError(message)
-        return store[keys[0]]
+        # pandas-stubs types HDFStore.__getitem__ as DataFrame | Series; a DeepLabCut prediction table is always a
+        # DataFrame.
+        return store[keys[0]]  # type: ignore[return-value]
 
 
 def _flatten_predictions(
@@ -167,7 +169,9 @@ def _flatten_predictions(
     groups: dict[str, dict[str, np.ndarray]] = {}
     keypoint_order: list[str] = []
     for column in predictions.columns:
-        *prefix, coordinate = column
+        # Iterating a MultiIndex yields per-column tuples, but pandas-stubs types the elements as str; the unpack is
+        # valid at runtime.
+        *prefix, coordinate = column  # type: ignore[str-unpack]
         keypoint = "_".join(str(level) for level in prefix[1:])
         if keypoint not in groups:
             groups[keypoint] = {}

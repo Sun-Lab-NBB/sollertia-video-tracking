@@ -77,6 +77,32 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "the selection reproducible.",
 )
 @click.option(
+    "--balance-groups",
+    "balance_groups",
+    is_flag=True,
+    help="Balance the budgeted sample across groups instead of drawing uniformly, so every group is represented and "
+    "coverage evens out across repeated runs. The group of each video is inferred from the non-date components its "
+    "file name shares with the others. Only applies together with --total-frames.",
+)
+@click.option(
+    "--group-by",
+    "group_by",
+    default=None,
+    metavar="REGEX",
+    help="A regular expression whose first capturing group names the group for each video's file name, overriding the "
+    "built-in inference for naming schemes it does not cover (for example '(Grp\\d+)' for names like D1_Grp2). "
+    "Implies --balance-groups.",
+)
+@click.option(
+    "--videos",
+    "videos_override",
+    multiple=True,
+    metavar="SUBSTRING",
+    help="A path substring naming a video to always include in the budgeted sample, selected before the balanced or "
+    "uniform draw fills the rest. Provide the option multiple times to pin several videos. Only applies together with "
+    "--total-frames.",
+)
+@click.option(
     "--resize-width",
     "resize_width",
     default=30,
@@ -135,10 +161,13 @@ def extract_frames_command(
     num_frames: int,
     total_frames: int,
     seed: int | None,
+    group_by: str | None,
+    videos_override: tuple[str, ...],
     resize_width: int,
     path_filters: tuple[str, ...],
     heartbeat: float,
     *,
+    balance_groups: bool,
     color: bool,
     overwrite: bool,
     reset: bool,
@@ -161,6 +190,9 @@ def extract_frames_command(
             num_frames=num_frames,
             total_frames=total_frames,
             seed=seed,
+            balance_groups=balance_groups,
+            group_by=group_by,
+            videos_override=videos_override,
             resize_width=resize_width,
             color=color,
             overwrite=overwrite,

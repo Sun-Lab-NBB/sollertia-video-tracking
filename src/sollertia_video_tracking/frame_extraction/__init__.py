@@ -7,6 +7,7 @@ worker pinned to a disjoint block of CPU cores and share the same CPU-allocation
 
 from .pipeline import FrameExtractionSummary, extract_frames_kmeans
 from .cpu_allocation import DEFAULT_RESERVE_CORES
+from .video_grouping import group_videos
 from .outlier_pipeline import OutlierExtractionSummary, extract_outlier_frames_parallel
 
 __all__ = [
@@ -15,4 +16,5 @@ __all__ = [
     "OutlierExtractionSummary",
     "extract_frames_kmeans",
     "extract_outlier_frames_parallel",
+    "group_videos",
 ]

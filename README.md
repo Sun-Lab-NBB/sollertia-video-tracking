@@ -108,6 +108,10 @@ Use `slvt --help` or `slvt COMMAND --help` for detailed usage information.
 For example, the following command extracts training frames from every video referenced by a project's config.yaml,
 sampling every 500th frame for clustering: `slvt extract-frames /path/to/project/config.yaml --step 500`
 
+The following command grows the project toward a two-thousand-frame training set while ensuring every group is
+represented, balancing the sampled videos across the groups inferred from the components their file names share:
+`slvt extract-frames /path/to/project/config.yaml --total-frames 2000 --balance-groups`
+
 The following command analyzes two videos with a project's trained model, writing a polars feather of predictions per
 video into an output directory: `slvt infer /path/to/project/config.yaml video1.mp4 video2.mp4 --dest /path/to/output`
 

@@ -53,13 +53,18 @@ dependencies = [
     # training runners to add mixed precision and DistributedDataParallel). Those internals are private APIs with no
     # stability guarantee within the 3.x series, so an exact pin is required to keep the overrides valid. Bumping this
     # version is a deliberate, tested action: re-verify the overridden internals against the new release first.
-    "deeplabcut==3.0.0",
+    #
+    # The [gui] extra is included because the refinement loop's manual labeling and label-refinement steps run in
+    # DeepLabCut's napari-based GUI, which lives in this same isolated environment. It pulls in napari-deeplabcut and
+    # a Qt binding (PySide6).
+    "deeplabcut[gui]==3.0.0",
     "torch>=2,<3",
 
     # Numerical (pinned to the 1.x series required by DeepLabCut)
     "numpy>=1.26,<2",
 
-    # Video Decoding (the headless build avoids pulling GUI libraries onto compute servers)
+    # Video Decoding (headless variant: the napari GUI does not use OpenCV's highgui, and installing the full
+    # opencv-python alongside the headless build that transitive dependencies pull in would create a duplicate cv2)
     "opencv-python-headless>=4,<5",
 
     # Cross-Platform CPU Affinity (pins each extraction worker to a disjoint core block on Linux and Windows)
@@ -94,6 +99,11 @@ dev = [
 
     # Development Automation
     "ataraxis-automation>=8,<9",
+
+    # Type Stubs (checked at development time only for dependencies that do not ship inline type information; pandas
+    # is pulled in transitively by DeepLabCut)
+    "pandas-stubs>=2,<3",
+    "types-psutil>=7,<8",
 ]
 
 # Specifies files that should not be included in the source-code distribution but are also not part of gitignore.
@@ -185,15 +195,13 @@ exclude = [
     "tests/",                         # Ignores the test directory.
 ]
 
-# DeepLabCut, OpenCV, and ruamel.yaml do not ship type information, so their imports are exempt from the missing-stub
-# error. The project's own code remains fully type-checked.
+# DeepLabCut does not ship type information and has no stub package on PyPI, so its imports remain exempt from the
+# missing-stub error. Types for pandas (pulled in transitively by DeepLabCut) and psutil are supplied by the
+# pandas-stubs and types-psutil dev dependencies, while OpenCV and ruamel.yaml now ship inline type information; all
+# four are therefore type-checked rather than ignored. The project's own code remains fully type-checked.
 [[tool.mypy.overrides]]
 module = [
     "deeplabcut.*",
-    "cv2",
-    "psutil",
-    "ruamel.*",
-    "pandas.*",
 ]
 ignore_missing_imports = true
 

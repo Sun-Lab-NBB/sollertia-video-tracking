@@ -17,6 +17,7 @@ import deeplabcut.utils.frameselectiontools as frame_selection_tools
 
 from .progress import AggregateBar, make_progress_reporter
 from .cpu_allocation import DEFAULT_RESERVE_CORES, pin_worker_to_cores, plan_core_allocation
+from .video_grouping import group_videos
 from .video_sampling import VideoSamplingPlan, plan_video_sampling
 
 _REEXTRACTION_ARTIFACT_PATTERNS: tuple[str, ...] = (
@@ -82,6 +83,9 @@ def extract_frames_kmeans(
     num_frames: int = -1,
     total_frames: int = -1,
     seed: int | None = None,
+    balance_groups: bool = False,
+    group_by: str | None = None,
+    videos_override: tuple[str, ...] = (),
     resize_width: int = 30,
     color: bool = False,
     overwrite: bool = False,
@@ -124,6 +128,15 @@ def extract_frames_kmeans(
             extracted videos. Set to -1 to extract every selected video instead of sampling toward a budget.
         seed: The seed for the random video sampling. Set to None to draw a different subset each run, or to an
             integer to make the selection reproducible.
+        balance_groups: Whether to balance the budgeted sampling across groups rather than drawing uniformly, so every
+            group is represented and coverage evens out across repeated passes. The group of each video is inferred from
+            its file name, with videos that share their non-date name components grouped together. Only affects the run
+            when ``total_frames`` is set.
+        group_by: A regular expression whose first capturing group names the group for each video's file-name stem,
+            overriding the built-in inference for naming schemes it does not cover. Setting it implies
+            ``balance_groups``.
+        videos_override: The path substrings naming videos to always include in the budgeted sample, selected before
+            the balanced or uniform draw fills the remaining budget. Only affects the run when ``total_frames`` is set.
         resize_width: The downsample width applied before clustering, passed to DeepLabCut as ``cluster_resizewidth``.
         color: Determines whether to cluster on color channels instead of grayscale.
         overwrite: Determines whether to re-extract videos whose labeled-data directory already contains frames.
@@ -206,6 +219,13 @@ def extract_frames_kmeans(
         for video in videos:
             _clear_extracted_data(output_directory=project_directory_path / "labeled-data" / Path(video).stem)
 
+    if total_frames == -1 and (balance_groups or group_by is not None or videos_override):
+        sys.stderr.write(
+            "WARNING: --balance-groups, --group-by, and --videos only apply when sampling toward a frame budget. Pass "
+            "--total-frames to enable budgeted sampling, otherwise every selected video is extracted.\n"
+        )
+        sys.stderr.flush()
+
     existing_frames = 0
     target_frames = -1
     if total_frames != -1:
@@ -216,12 +236,18 @@ def extract_frames_kmeans(
                 f"integer, but got {frames_per_video_count!r}. Pass num_frames to set it."
             )
             raise ValueError(message)
+        groups = group_videos(videos, key_pattern=group_by) if (balance_groups or group_by is not None) else None
+        pins, unmatched = _resolve_video_overrides(overrides=videos_override, videos=videos)
+        for token in unmatched:
+            sys.stderr.write(f"WARNING: the --videos value {token!r} matched no video in the selection.\n")
         plan = plan_video_sampling(
             videos=videos,
             extracted_frame_counts=_count_extracted_frames(videos=videos, project_directory=project_directory_path),
             frames_per_video=frames_per_video_count,
             total_frames=total_frames,
             seed=seed,
+            groups=groups,
+            pinned=pins,
         )
         _report_sampling_plan(plan=plan)
         if not plan.selected:
@@ -394,7 +420,57 @@ def _report_sampling_plan(plan: VideoSamplingPlan) -> None:
             f"sampling {len(plan.selected)} video(s) | {plan.existing_frames:,} existing -> "
             f"{plan.projected_frames:,} projected frames (target {plan.target_frames:,})\n"
         )
+
+    if plan.per_group:
+        sampled = sum(1 for (_group, _existing, added, _projected, _available) in plan.per_group if added > 0)
+        group_count = len(plan.per_group)
+        distribution = ", ".join(
+            f"{group}+{added}"
+            for (group, _existing, added, _projected, _available) in sorted(
+                plan.per_group, key=lambda item: (-item[2], item[0])
+            )
+            if added > 0
+        )
+        sys.stderr.write(f"group balancing: {sampled}/{group_count} groups sampled this pass | {distribution}\n")
+        # A group with no un-extracted videos left is fully done, not starved for budget, so only the groups that still
+        # had eligible videos but received none are flagged as needing a larger budget.
+        starved = sum(
+            1 for (_group, _existing, added, _projected, available) in plan.per_group if added == 0 and available > 0
+        )
+        if starved:
+            sys.stderr.write(
+                f"WARNING: {starved} group(s) had un-extracted videos but received none this pass because the budget "
+                f"is too small. Raise the total frame budget to include them.\n"
+            )
+    if plan.pinned_overshoot:
+        sys.stderr.write(
+            "WARNING: the pinned videos alone exceeded the frame budget, so the projected total overshoots the "
+            "target by the surplus pinned videos.\n"
+        )
     sys.stderr.flush()
+
+
+def _resolve_video_overrides(overrides: tuple[str, ...], videos: list[str]) -> tuple[tuple[str, ...], list[str]]:
+    """Resolves the video-override path substrings to the candidate videos they match, keyed in candidate order.
+
+    Args:
+        overrides: The path substrings naming videos to always include in the budgeted sample.
+        videos: The candidate video paths for the run.
+
+    Returns:
+        A tuple of the matched video paths, deduplicated and in candidate order, and the list of override substrings
+        that matched no candidate video.
+    """
+    matched: set[str] = set()
+    unmatched: list[str] = []
+    for token in dict.fromkeys(overrides):
+        hits = [video for video in videos if token in video]
+        if hits:
+            matched.update(hits)
+        else:
+            unmatched.append(token)
+    ordered = tuple(video for video in videos if video in matched)
+    return ordered, unmatched
 
 
 def _count_extracted_frames(videos: list[str], project_directory: Path) -> dict[str, int]:

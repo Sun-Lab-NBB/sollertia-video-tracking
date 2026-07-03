@@ -32,7 +32,9 @@ def uncertain_outlier_indices(predictions: pd.DataFrame, p_bound: float) -> list
         The frame indices, in the prediction table's own index, that hold at least one low-confidence keypoint.
     """
     likelihoods = predictions.xs("likelihood", level="coords", axis=1)
-    return predictions.index[(likelihoods < p_bound).any(axis=1)].tolist()
+    # pandas-stubs types the DataFrame.xs(axis=1) cross-section as DataFrame | Series, so the boolean reduction is
+    # seen as a Series that rejects axis=1; the runtime object is always a DataFrame.
+    return predictions.index[(likelihoods < p_bound).any(axis=1)].tolist()  # type: ignore[arg-type]
 
 
 def jump_outlier_indices(predictions: pd.DataFrame, epsilon: float) -> list[int]:
@@ -58,7 +60,7 @@ def jump_outlier_indices(predictions: pd.DataFrame, epsilon: float) -> list[int]
         warnings.simplefilter("ignore", category=DeprecationWarning)
         squared_step = predictions.diff(axis=0) ** 2
         squared_step = squared_step.drop("likelihood", axis=1, level="coords")
-        per_bodypart = squared_step.groupby(level="bodyparts", axis=1).sum()
+        per_bodypart = squared_step.groupby(level="bodyparts", axis=1).sum()  # type: ignore[call-overload]
     return predictions.index[(per_bodypart > epsilon**2).any(axis=1)].tolist()
 
 
