@@ -1,18 +1,4 @@
-"""Provides the parallel outlier-frame extraction pipeline that refines a DeepLabCut model on its likely-wrong frames.
-
-This is the model-refinement counterpart of the k-means frame-extraction pipeline in this subpackage. Instead of
-clustering raw video, it reads the predictions a trained model already wrote for each analyzed video, flags the frames
-the model most likely got wrong, and pulls a budget of those frames into the project's ``labeled-data`` tree for
-correction. It runs in two phases. The detection phase loads every video's predictions and computes its outlier
-candidate frames; for the ``fitting`` algorithm the per-keypoint SARIMAX fits of every video are fanned out across one
-process pool spanning the whole run, so the expensive path scales with the core budget regardless of how few videos are
-processed. The extraction phase then decodes and selects frames one video per pinned worker, exactly like the k-means
-pipeline, reusing DeepLabCut's own frame-writing so the machine pre-labels and project registration stay faithful to the
-upstream tool.
-
-Because it depends on DeepLabCut's internal outlier-detection and frame-extraction functions, the DeepLabCut version is
-pinned exactly in ``pyproject.toml`` and must be re-verified against any new release.
-"""
+"""Provides the parallel outlier-frame extraction pipeline that refines a DeepLabCut model on likely-wrong frames."""
 
 import os
 import sys
@@ -159,7 +145,9 @@ def extract_outlier_frames_parallel(
         The pipeline uses the spawn multiprocessing start method on every platform, so a programmatic caller must guard
         the call with ``if __name__ == "__main__":``. The installed console-script entry point is already guarded.
         Outlier extraction is additive: re-running a video appends further frames rather than replacing the existing
-        ones, so coverage grows across repeated passes.
+        ones, so coverage grows across repeated passes. Because the pipeline calls DeepLabCut's internal
+        outlier-detection and frame-writing functions, the DeepLabCut version is pinned exactly in pyproject.toml and
+        must be re-verified against any new release.
 
     Args:
         config_path: The path to the DeepLabCut project's config.yaml.

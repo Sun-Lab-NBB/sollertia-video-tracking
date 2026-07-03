@@ -56,8 +56,8 @@ def plan_video_sampling(
 
     Without ``groups`` the additional videos are drawn uniformly at random. With ``groups`` the additional videos are
     balanced across groups by repeatedly assigning the next video to the group with the fewest projected frames
-    (counting frames from prior passes), so every group is represented and coverage evens out over repeated passes. In
-    both modes any ``pinned`` videos are selected first and always included.
+    (counting frames from prior passes). This ensures that every group is represented and coverage evens out over
+    repeated passes. In both modes any ``pinned`` videos are selected first and always included.
 
     Args:
         videos: The ordered candidate video paths the pass may sample from.
@@ -116,7 +116,7 @@ def plan_video_sampling(
             un_extracted=un_extracted, needed=needed, pinned=pinned_eligible, seed=seed
         )
     else:
-        # The unchanged legacy path: a single uniform draw over the not-yet-extracted candidates.
+        # A single uniform draw over the not-yet-extracted candidates.
         generator = Random(seed)  # noqa: S311 -- video sampling is not security-sensitive.
         selected = tuple(generator.sample(un_extracted, needed))
 
@@ -169,8 +169,9 @@ def _select_balanced(
 
     Seeds each group's projected frame count with the frames it already holds from prior passes, honors the pinned
     videos first, then repeatedly assigns the next video to the least-covered group that still has an un-extracted
-    video, so the pass equalizes cumulative per-group coverage. Determinism is fixed by a canonical group order, a
-    seeded shuffle of each group's videos, and a group-name tiebreak, so a fixed seed reproduces the selection.
+    video. This ensures that the pass equalizes cumulative per-group coverage. Determinism is fixed by a canonical
+    group order, a seeded shuffle of each group's videos, and a group-name tiebreak, so a fixed seed reproduces
+    the selection.
 
     Args:
         groups: A mapping of group to that group's candidate videos.

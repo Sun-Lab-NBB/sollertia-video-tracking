@@ -1,14 +1,4 @@
-"""Provides the outlier-frame detection algorithms that flag candidate frames from a video's DeepLabCut predictions.
-
-Each detector consumes the prediction table DeepLabCut wrote for one analyzed video (restricted to the comparison
-bodyparts and sliced to the configured start/stop window) and returns the frame indices it considers putative outliers.
-The ``jump`` and ``uncertain`` detectors are vectorized pandas operations and are computed inline. The ``fitting``
-detector fits a SARIMAX model to every keypoint trajectory, which is the expensive path; it is split into a
-per-keypoint fit step (``fitting_keypoint_series`` produces the work items and ``fit_keypoint_distance`` runs one fit)
-and a reassembly step (``fitting_outlier_indices``) so the pipeline can fan the fits out across a process pool spanning
-every video's keypoints at once. The detectors mirror DeepLabCut's own ``extract_outlier_frames`` logic exactly, so the
-flagged frames agree with the upstream tool; only the parallelization differs.
-"""
+"""Provides the outlier-frame detection algorithms that flag candidate frames from a video's DeepLabCut predictions."""
 
 import warnings
 
@@ -55,7 +45,10 @@ def jump_outlier_indices(predictions: pd.DataFrame, epsilon: float) -> list[int]
         The frame indices, in the prediction table's own index, that hold at least one over-threshold jump.
     """
     with warnings.catch_warnings():
-        # pandas 2.x deprecates axis=1 groupby but still evaluates it; the grouping matches DeepLabCut's own code.
+        # This intentionally mirrors DeepLabCut's own "jump" branch in extract_outlier_frames
+        # (deeplabcut/refine_training_dataset/outlier_frames.py), which uses the same axis=1 groupby; matching it keeps
+        # flagged frames identical to upstream. pandas 2.x deprecates axis=1 groupby but still evaluates it, and DLC
+        # 3.0 itself calls it, so the env stays on pandas 2.x regardless. Follow DLC if it migrates off axis=1 groupby.
         warnings.simplefilter("ignore", category=FutureWarning)
         warnings.simplefilter("ignore", category=DeprecationWarning)
         squared_step = predictions.diff(axis=0) ** 2
