@@ -22,9 +22,61 @@ for _thread_limit_variable in (
 os.environ.setdefault("OPENCV_LOG_LEVEL", "SILENT")
 os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "-8")
 
-from .frame_extraction import FrameExtractionSummary, extract_frames_kmeans  # noqa: E402 - after thread-limit setup
+# Hard-pins matplotlib to its non-interactive backend before DeepLabCut's outlier-extraction module imports pyplot.
+# This library only ever writes frames to disk and targets headless compute servers, so the Agg backend is forced
+# regardless of any inherited MPLBACKEND, keeping the spawned workers display-independent.
+os.environ["MPLBACKEND"] = "Agg"
+
+from .training import (  # noqa: E402 - after thread-limit setup
+    TrainingSummary,
+    OptimizationProfile,
+    TrainingDatasetSummary,
+    train_model,
+    create_training_dataset,
+    get_available_augmenters,
+    get_available_pose_models,
+    get_available_super_animals,
+    resolve_optimization_profile,
+    build_superanimal_weight_init,
+    get_available_object_detectors,
+    build_conditional_top_down_conditions,
+)
+from .inference import (  # noqa: E402 - after thread-limit setup
+    InferenceProfile,
+    InferenceSummary,
+    ConversionSummary,
+    run_inference,
+    resolve_inference_profile,
+    convert_predictions_to_feather,
+)
+from .frame_extraction import (  # noqa: E402 - after thread-limit setup
+    FrameExtractionSummary,
+    OutlierExtractionSummary,
+    extract_frames_kmeans,
+    extract_outlier_frames_parallel,
+)
 
 __all__ = [
+    "ConversionSummary",
     "FrameExtractionSummary",
+    "InferenceProfile",
+    "InferenceSummary",
+    "OptimizationProfile",
+    "OutlierExtractionSummary",
+    "TrainingDatasetSummary",
+    "TrainingSummary",
+    "build_conditional_top_down_conditions",
+    "build_superanimal_weight_init",
+    "convert_predictions_to_feather",
+    "create_training_dataset",
     "extract_frames_kmeans",
+    "extract_outlier_frames_parallel",
+    "get_available_augmenters",
+    "get_available_object_detectors",
+    "get_available_pose_models",
+    "get_available_super_animals",
+    "resolve_inference_profile",
+    "resolve_optimization_profile",
+    "run_inference",
+    "train_model",
 ]

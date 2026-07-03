@@ -11,13 +11,12 @@ from dataclasses import dataclass
 import multiprocessing
 
 import cv2
-import psutil
 import deeplabcut
 from ruamel.yaml import YAML
 import deeplabcut.utils.frameselectiontools as frame_selection_tools
 
 from .progress import AggregateBar, make_progress_reporter
-from .cpu_allocation import DEFAULT_RESERVE_CORES, plan_core_allocation
+from .cpu_allocation import DEFAULT_RESERVE_CORES, pin_worker_to_cores, plan_core_allocation
 from .video_sampling import VideoSamplingPlan, plan_video_sampling
 
 _REEXTRACTION_ARTIFACT_PATTERNS: tuple[str, ...] = (
@@ -299,7 +298,7 @@ def extract_frames_kmeans(
     extracted_count = skipped_count = 0
     errors: list[tuple[str, str]] = []
     # Brings up the worker pool, then starts the renderer thread.
-    with context.Pool(processes=workers, initializer=_pin_worker_to_cores, initargs=(slot_queue,)) as pool:
+    with context.Pool(processes=workers, initializer=pin_worker_to_cores, initargs=(slot_queue,)) as pool:
         if display_progress:
             bar.start()
         for video, _written, status in pool.imap_unordered(_extract_one_video, tasks):
@@ -511,19 +510,3 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
     else:
         written = len(list(output_directory.glob("img*.png")))
         return video_path, written, "ok" if written else "empty"
-
-
-def _pin_worker_to_cores(slot_queue: Any) -> None:
-    """Pins the calling pool worker to the next free core block, called once per worker at start.
-
-    Each worker claims one core set from the shared queue and binds its CPU affinity to it, so the worker and every
-    thread its decoder spawns stay within a disjoint block of cores. CPU affinity is supported on Linux and Windows;
-    macOS exposes no affinity API, so its workers run unpinned. The binding is best-effort, so a missing slot or an
-    unsupported platform degrades to an unpinned worker rather than aborting the extraction.
-
-    Args:
-        slot_queue: The shared queue holding one core-id set per worker, produced by the extraction pipeline.
-    """
-    with contextlib.suppress(Exception):
-        core_set = slot_queue.get_nowait()
-        psutil.Process().cpu_affinity(list(core_set))

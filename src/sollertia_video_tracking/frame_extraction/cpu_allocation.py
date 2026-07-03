@@ -1,5 +1,10 @@
 """Provides the CPU-core allocation logic that distributes parallel frame-extraction workers across the machine."""
 
+from typing import Any
+import contextlib
+
+import psutil
+
 DEFAULT_RESERVE_CORES: int = 4
 """The number of CPU cores left free by default for other work while frame extraction is running."""
 
@@ -59,3 +64,19 @@ def plan_core_allocation(
         core_sets.append({(cursor + offset) % usable for offset in range(count)})
         cursor += count
     return workers, core_sets
+
+
+def pin_worker_to_cores(slot_queue: Any) -> None:
+    """Pins the calling pool worker to the next free core block, called once per worker at start.
+
+    Each worker claims one core set from the shared queue and binds its CPU affinity to it, so the worker and every
+    thread its decoder spawns stay within a disjoint block of cores. CPU affinity is supported on Linux and Windows;
+    macOS exposes no affinity API, so its workers run unpinned. The binding is best-effort, so a missing slot or an
+    unsupported platform degrades to an unpinned worker rather than aborting the run.
+
+    Args:
+        slot_queue: The shared queue holding one core-id set per worker, produced by an extraction pipeline.
+    """
+    with contextlib.suppress(Exception):
+        core_set = slot_queue.get_nowait()
+        psutil.Process().cpu_affinity(list(core_set))
