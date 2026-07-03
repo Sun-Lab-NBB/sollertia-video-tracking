@@ -4,7 +4,12 @@ from pathlib import Path
 
 import click
 
-from ..frame_extraction import DEFAULT_RESERVED_CORE_COUNT, extract_outlier_frames_parallel
+from ..frame_extraction import (
+    TrackingMethod,
+    OutlierAlgorithm,
+    ExtractionAlgorithm,
+    extract_outlier_frames_parallel,
+)
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the lab standard."""
@@ -14,229 +19,221 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 @click.argument("config", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.argument("videos", nargs=-1, required=True, type=click.Path(exists=True, path_type=Path))
 @click.option(
-    "-a",
+    "-oa",
     "--outlier-algorithm",
-    "outlier_algorithm",
-    type=click.Choice(["jump", "uncertain", "fitting", "list"]),
-    default="jump",
+    type=click.Choice([algorithm.value for algorithm in OutlierAlgorithm]),
+    default=OutlierAlgorithm.JUMP.value,
     show_default=True,
-    help="The outlier-detection algorithm. 'jump' flags large inter-frame jumps, 'uncertain' flags low-confidence "
-    "frames, 'fitting' flags deviations from a fitted SARIMAX trajectory, and 'list' takes an explicit frame list.",
+    help="How likely-wrong frames are flagged. 'jump' flags large frame-to-frame jumps (motion), 'uncertain' flags "
+    "low-confidence frames, 'fitting' flags departures from a fitted motion trajectory, and 'list' takes an explicit "
+    "frame list.",
 )
 @click.option(
-    "-e",
+    "-ea",
     "--extraction-algorithm",
-    "extraction_algorithm",
-    type=click.Choice(["kmeans", "uniform"]),
-    default="kmeans",
+    type=click.Choice([algorithm.value for algorithm in ExtractionAlgorithm]),
+    default=ExtractionAlgorithm.KMEANS.value,
     show_default=True,
-    help="The algorithm that selects the extracted frames from the flagged outlier candidates.",
+    help="How the frames to keep are chosen from the flagged candidates.",
 )
 @click.option(
     "-s",
     "--shuffle",
-    "shuffle_index",
     default=1,
     show_default=True,
-    help="The shuffle index whose trained model was used.",
+    help="The shuffle index identifying which trained model produced the predictions.",
 )
 @click.option(
+    "-tsi",
     "--training-set-index",
-    "training_set_index",
     default=0,
     show_default=True,
-    help="The training-set fraction index.",
+    help="The training-set fraction index identifying which trained model produced the predictions.",
 )
 @click.option(
+    "-pdt",
     "--pixel-distance-threshold",
-    "pixel_distance_threshold",
     default=20.0,
     show_default=True,
-    help="The pixel bound for the 'jump' and 'fitting' algorithms.",
+    help="How far, in pixels, a bodypart may move (for 'jump') or depart from its fitted trajectory (for 'fitting') "
+    "before its frame is flagged.",
 )
 @click.option(
+    "-mc",
     "--minimum-confidence",
-    "minimum_confidence",
     default=0.01,
     show_default=True,
-    help="The likelihood bound for the 'uncertain' algorithm and the 'fitting' model's missing-data mask.",
+    help="The confidence below which a prediction is treated as unreliable, used by the 'uncertain' and 'fitting' "
+    "detectors.",
 )
 @click.option(
+    "-cb",
     "--comparison-bodyparts",
-    "comparison_bodyparts",
     multiple=True,
     metavar="BODYPART",
-    help="A bodypart the detectors consider. Provide the option multiple times to restrict to several; omit to "
+    help="A bodypart the detectors consider. Provide the option several times to restrict to several; omit to "
     "consider every bodypart.",
 )
 @click.option(
+    "-fi",
     "--frame-index",
-    "explicit_frame_indices",
     multiple=True,
     type=int,
     metavar="FRAME",
-    help="An explicit frame index to extract when --outlier-algorithm list is used. Provide the option multiple times.",
+    help="An explicit frame index to extract when --outlier-algorithm list is used. Provide the option several "
+    "times to extract multiple frames.",
 )
 @click.option(
+    "-ad",
     "--autoregressive-degree",
-    "autoregressive_degree",
     default=3,
     show_default=True,
-    help="The 'fitting' algorithm's SARIMAX autoregressive degree.",
+    help="How many past frames the 'fitting' detector's motion model uses to predict the next position.",
 )
 @click.option(
+    "-ma",
     "--moving-average-degree",
-    "moving_average_degree",
     default=1,
     show_default=True,
-    help="The 'fitting' algorithm's SARIMAX moving-average degree.",
+    help="How many past prediction errors the 'fitting' detector's motion model smooths over.",
 )
 @click.option(
+    "-sl",
     "--significance-level",
-    "significance_level",
     default=0.01,
     show_default=True,
-    help="The significance level for the 'fitting' algorithm's confidence interval.",
+    help="The significance level (p-value) for the 'fitting' detector's confidence interval; smaller values are "
+    "stricter, flagging only clearer departures from the expected motion.",
 )
 @click.option(
-    "-n",
+    "-fpv",
     "--frames-per-video",
-    "frames_per_video",
     type=int,
     default=-1,
     show_default=True,
-    help="The number of frames to extract per video, overriding numframes2pick in config.yaml. Set to -1 to use the "
-    "value already stored in the configuration file.",
+    help="How many frames to keep from each processed video. Set to -1 to use the project's configured amount.",
 )
 @click.option(
+    "-crw",
     "--clustering-resize-width",
-    "clustering_resize_width",
-    default=30,
+    default=50,
     show_default=True,
-    help="The downsample width applied before clustering when selecting with kmeans.",
+    help="The width, in pixels, that frames are shrunk to before they are compared for similarity. Smaller values are "
+    "faster but compare more coarsely.",
 )
 @click.option(
+    "-cl",
     "--color/--grayscale",
-    "cluster_in_color",
     default=False,
     show_default=True,
-    help="Determines whether kmeans selection clusters on color channels instead of grayscale.",
+    help="Compare frames in color instead of grayscale when selecting them.",
 )
 @click.option(
+    "-sv",
     "--save-labeled",
-    "save_labeled_frames",
     is_flag=True,
-    help="Also save each extracted frame with the model's predictions drawn on it.",
+    help="Also save a copy of each extracted frame with the model's predictions drawn on it.",
 )
 @click.option(
+    "-cv",
     "--copy-videos",
-    "copy_videos",
     is_flag=True,
-    help="Copy newly added videos into the project instead of symlinking them.",
+    help="Copy newly added videos into the project instead of linking to them in place.",
 )
 @click.option(
-    "-d",
+    "-pd",
     "--predictions-directory",
-    "predictions_directory",
     type=click.Path(file_okay=False, path_type=Path),
     default=None,
     help="The directory holding the analyzed predictions. Omit to look for predictions beside each video.",
 )
 @click.option(
+    "-mp",
     "--model-prefix",
-    "model_prefix",
     default="",
-    help="The model subdirectory prefix, matching the trained shuffle.",
+    help="The model subdirectory prefix identifying which trained model produced the predictions.",
 )
 @click.option(
+    "-tm",
     "--tracking-method",
-    "tracking_method",
-    default="",
-    help="The multi-animal tracker ('box', 'skeleton', or 'ellipse') that produced the data. Omit to read it from "
-    "config.yaml.",
+    type=click.Choice([method.value for method in TrackingMethod]),
+    default=None,
+    help="The multi-animal tracker that produced the data. Omit to use the project's setting.",
 )
 @click.option(
+    "-si",
     "--snapshot-index",
-    "pose_snapshot_index",
     type=int,
     default=None,
-    help="The pose snapshot index whose scorer named the prediction files. Omit to use the configured default.",
+    help="The pose snapshot identifying which saved model produced the predictions. Omit to use the default.",
 )
 @click.option(
+    "-dsi",
     "--detector-snapshot-index",
-    "detector_snapshot_index",
     type=int,
     default=None,
-    help="The detector snapshot index, for top-down models. Omit to use the configured default.",
+    help="The detector snapshot, for top-down models. Omit to use the default.",
 )
 @click.option(
+    "-ve",
     "--video-extensions",
-    "video_extensions",
     multiple=True,
     metavar="EXTENSION",
-    help="A file extension used to filter videos found inside a supplied directory. Provide the option multiple times.",
+    help="A file extension used to filter videos found inside a supplied directory. Provide the option several times.",
 )
 @click.option(
     "-w",
     "--workers",
-    "worker_count",
     type=int,
     default=-1,
     show_default=True,
-    help="The number of videos to extract in parallel. Set to -1 to fill the usable CPU cores automatically.",
+    help="How many videos to process at the same time. Set to -1 to use the available CPU cores automatically.",
 )
 @click.option(
-    "-c",
-    "--cores-per-worker",
-    "cores_per_worker",
+    "-co",
+    "--cores",
     type=int,
     default=-1,
     show_default=True,
-    help="The number of CPU cores pinned to each extraction worker. Set to -1 to spread the usable cores evenly.",
+    help="How many CPU cores to devote to each video being processed. Set to -1 to share the available cores evenly. "
+    "Each video keeps about four cores busy while it decodes, so larger values mostly idle cores and smaller values "
+    "slow each video worker down.",
 )
 @click.option(
-    "-r",
-    "--reserve-cores",
-    "reserved_core_count",
-    default=DEFAULT_RESERVED_CORE_COUNT,
-    show_default=True,
-    help="The number of CPU cores left free for other tasks while extraction runs.",
-)
-@click.option(
+    "-fw",
     "--fit-workers",
-    "fitting_worker_count",
     type=int,
     default=-1,
     show_default=True,
-    help="The number of processes fitting SARIMAX models during 'fitting' detection. Set to -1 to use every usable "
-    "core, which scales the expensive fitting path across the whole run.",
+    help="How many videos to flag in parallel during 'fitting' detection, the most expensive step. Set to -1 to use "
+    "every available core.",
 )
 @click.option(
+    "-mpi",
     "--minimum-progress-interval",
-    "minimum_progress_interval",
     default=30.0,
     show_default=True,
     metavar="SECONDS",
-    help="The minimum interval, in seconds, between progress lines when the output is not a TTY.",
+    help="The shortest time, in seconds, between progress updates when the output is not a live terminal.",
 )
 @click.option(
+    "-pg",
     "--progress/--no-progress",
-    "display_progress",
     default=True,
     show_default=True,
-    help="Determines whether to display the aggregate progress bar during extraction.",
+    help="Show the aggregate progress bar during extraction.",
 )
 def extract_outliers_command(
     config: Path,
     videos: tuple[Path, ...],
     outlier_algorithm: str,
     extraction_algorithm: str,
-    shuffle_index: int,
+    shuffle: int,
     training_set_index: int,
     pixel_distance_threshold: float,
     minimum_confidence: float,
     comparison_bodyparts: tuple[str, ...],
-    explicit_frame_indices: tuple[int, ...],
+    frame_index: tuple[int, ...],
     autoregressive_degree: int,
     moving_average_degree: int,
     significance_level: float,
@@ -244,20 +241,19 @@ def extract_outliers_command(
     clustering_resize_width: int,
     predictions_directory: Path | None,
     model_prefix: str,
-    tracking_method: str,
-    pose_snapshot_index: int | None,
+    tracking_method: str | None,
+    snapshot_index: int | None,
     detector_snapshot_index: int | None,
     video_extensions: tuple[str, ...],
-    worker_count: int,
-    cores_per_worker: int,
-    reserved_core_count: int,
-    fitting_worker_count: int,
+    workers: int,
+    cores: int,
+    fit_workers: int,
     minimum_progress_interval: float,
     *,
-    cluster_in_color: bool,
-    save_labeled_frames: bool,
+    color: bool,
+    save_labeled: bool,
     copy_videos: bool,
-    display_progress: bool,
+    progress: bool,
 ) -> None:
     """Extracts a trained model's likely-wrong frames from analyzed videos to refine the model.
 
@@ -272,34 +268,33 @@ def extract_outliers_command(
         summary = extract_outlier_frames_parallel(
             config_path=config,
             videos=list(videos),
-            shuffle_index=shuffle_index,
+            shuffle_index=shuffle,
             training_set_index=training_set_index,
-            outlier_algorithm=outlier_algorithm,
-            explicit_frame_indices=explicit_frame_indices,
+            outlier_algorithm=OutlierAlgorithm(outlier_algorithm),
+            explicit_frame_indices=frame_index,
             comparison_bodyparts=comparison_bodyparts,
             pixel_distance_threshold=pixel_distance_threshold,
             minimum_confidence=minimum_confidence,
             autoregressive_degree=autoregressive_degree,
             moving_average_degree=moving_average_degree,
             significance_level=significance_level,
-            extraction_algorithm=extraction_algorithm,
+            extraction_algorithm=ExtractionAlgorithm(extraction_algorithm),
             frames_per_video=frames_per_video,
             clustering_resize_width=clustering_resize_width,
-            cluster_in_color=cluster_in_color,
-            save_labeled_frames=save_labeled_frames,
+            cluster_in_color=color,
+            save_labeled_frames=save_labeled,
             copy_videos=copy_videos,
             predictions_directory=predictions_directory,
             model_prefix=model_prefix,
-            tracking_method=tracking_method,
-            pose_snapshot_index=pose_snapshot_index,
+            tracking_method=TrackingMethod(tracking_method) if tracking_method is not None else None,
+            pose_snapshot_index=snapshot_index,
             detector_snapshot_index=detector_snapshot_index,
             video_extensions=video_extensions,
-            worker_count=worker_count,
-            cores_per_worker=cores_per_worker,
-            reserved_core_count=reserved_core_count,
-            fitting_worker_count=fitting_worker_count,
+            worker_count=workers,
+            cores_per_worker=cores,
+            fitting_worker_count=fit_workers,
             minimum_progress_interval=minimum_progress_interval,
-            display_progress=display_progress,
+            display_progress=progress,
         )
     except (ValueError, FileNotFoundError) as error:
         raise click.ClickException(message=str(error)) from error

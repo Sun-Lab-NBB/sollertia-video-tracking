@@ -50,6 +50,9 @@ from .inference import (  # noqa: E402 - after thread-limit setup
     convert_predictions_to_feather,
 )
 from .frame_extraction import (  # noqa: E402 - after thread-limit setup
+    TrackingMethod,
+    OutlierAlgorithm,
+    ExtractionAlgorithm,
     FrameExtractionSummary,
     OutlierExtractionSummary,
     extract_frames_kmeans,
@@ -58,11 +61,14 @@ from .frame_extraction import (  # noqa: E402 - after thread-limit setup
 
 __all__ = [
     "ConversionSummary",
+    "ExtractionAlgorithm",
     "FrameExtractionSummary",
     "InferenceProfile",
     "InferenceSummary",
     "OptimizationProfile",
+    "OutlierAlgorithm",
     "OutlierExtractionSummary",
+    "TrackingMethod",
     "TrainingDatasetSummary",
     "TrainingSummary",
     "build_conditional_top_down_conditions",

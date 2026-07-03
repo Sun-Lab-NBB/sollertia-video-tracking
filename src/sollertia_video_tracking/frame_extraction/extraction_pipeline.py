@@ -8,15 +8,15 @@ from pathlib import Path
 import traceback
 import contextlib
 from dataclasses import dataclass
-import multiprocessing
+from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 import deeplabcut
-from ruamel.yaml import YAML
 import deeplabcut.utils.frameselectiontools as frame_selection_tools
 
-from .progress import AggregateBar, make_progress_reporter
-from .cpu_allocation import DEFAULT_RESERVED_CORE_COUNT, pin_worker_to_cores, plan_core_allocation
+from .progress import make_progress_reporter
+from .utilities import iter_pinned_extraction, normalize_project_config
+from .cpu_allocation import DEFAULT_RESERVED_CORE_COUNT, plan_core_allocation
 from .video_grouping import group_videos
 from .video_sampling import VideoSamplingPlan, plan_video_sampling
 
@@ -102,9 +102,9 @@ def extract_frames_kmeans(
     returned summary rather than aborting the run.
 
     When ``total_frame_budget`` is set, the run samples a random subset of not-yet-extracted videos sized to reach that
-    project-wide frame budget, so the full project can be added once and extraction grows coverage across repeated
-    passes without manual selection. When the existing frames already meet the budget, the run extracts nothing and
-    warns; raising ``total_frame_budget`` or using ``reset`` grows the set further.
+    project-wide frame budget. This means that the full project's video set can be added once and extraction grows
+    coverage across repeated passes without manual selection. When the existing frames already meet the budget, the
+    run extracts nothing and warns; raising ``total_frame_budget`` or using ``reset`` grows the set further.
 
     Notes:
         The pipeline uses the spawn multiprocessing start method on every platform for reproducible behavior, so a
@@ -176,34 +176,16 @@ def extract_frames_kmeans(
             f"Unable to extract frames. The total frame budget must be at least one, but got {total_frame_budget}."
         )
         raise ValueError(message)
-    yaml = YAML()
-    configuration = yaml.load(config_path.read_text())
+    # DeepLabCut's read_config rewrites config.yaml whenever project_path differs from the config's own directory. With
+    # many workers reading concurrently, that write races against sibling reads and intermittently returns an empty
+    # config. To avoid that, the project_path (and, like the DeepLabCut GUI, any frames_per_video override) is
+    # normalized here, single-threaded, and persisted before any worker starts. The -1 sentinel leaves numframes2pick
+    # untouched.
+    configuration = normalize_project_config(
+        config_path, frames_per_video=frames_per_video, error_context="Unable to extract frames."
+    )
     start_fraction = float(configuration.get("start", 0))
     stop_fraction = float(configuration.get("stop", 1))
-
-    # DeepLabCut's read_config rewrites config.yaml whenever project_path differs from the config's own directory.
-    # With many workers reading concurrently, that write races against sibling reads and intermittently returns an
-    # empty config, so the project_path is normalized here, single-threaded, and persisted before any worker starts.
-    config_changed = False
-    project_directory = str(config_path.parent)
-    if configuration.get("project_path") != project_directory:
-        configuration["project_path"] = project_directory
-        config_changed = True
-
-    # Like the DeepLabCut GUI, a frames_per_video override is written straight into config.yaml. The -1 sentinel leaves
-    # the value already stored in the configuration file untouched.
-    if frames_per_video != -1:
-        if frames_per_video < 1:
-            message = (
-                f"Unable to extract frames. The frame count per video must be at least one, but got {frames_per_video}."
-            )
-            raise ValueError(message)
-        configuration["numframes2pick"] = int(frames_per_video)
-        config_changed = True
-
-    if config_changed:
-        with config_path.open("w") as config_file:
-            yaml.dump(configuration, config_file)
     configured_frames_per_video = configuration.get("numframes2pick", "?")
 
     if "video_sets" not in configuration:
@@ -294,32 +276,6 @@ def extract_frames_kmeans(
     )
     clustering_frame_count = sum(frame_totals.values())
 
-    # The spawn start method is used on every platform for reproducible, fork-safety-independent behavior. Each worker
-    # claims one core block from the core-set queue for CPU-affinity pinning; a manager queue is used (rather than a
-    # fork-inherited shared counter) so the core blocks survive being pickled to the spawned worker processes.
-    context = multiprocessing.get_context("spawn")
-    manager = context.Manager()
-    progress_queue = manager.Queue()
-    core_set_queue = manager.Queue()
-    for core_set in core_sets:
-        core_set_queue.put(core_set)
-    config_path_string = str(config_path)
-    tasks = [
-        (
-            video,
-            config_path_string,
-            clustering_stride,
-            clustering_resize_width,
-            cluster_in_color,
-            overwrite,
-            video_index,
-            frame_totals[video_index],
-            progress_queue,
-        )
-        for video_index, video in enumerate(videos)
-    ]
-    video_indices = {video: index for index, video in enumerate(videos)}
-
     if display_progress:
         _report_plan(
             video_count=len(videos),
@@ -334,36 +290,49 @@ def extract_frames_kmeans(
             config_path=config_path,
         )
 
-    bar = AggregateBar(
-        progress_queue=progress_queue,
-        total_video_count=len(tasks),
-        frame_totals=frame_totals,
-        minimum_progress_interval=minimum_progress_interval,
-    )
+    # Each worker decodes one video pinned to a disjoint core block, streaming progress to the shared aggregate bar.
+    config_path_string = str(config_path)
+
+    def build_tasks(reporting_queue: Any | None) -> list[tuple[Any, ...]]:
+        """Packs one work item per selected video, embedding the progress queue only when progress is displayed."""
+        return [
+            (
+                video,
+                config_path_string,
+                clustering_stride,
+                clustering_resize_width,
+                cluster_in_color,
+                overwrite,
+                video_index,
+                frame_totals[video_index],
+                reporting_queue,
+            )
+            for video_index, video in enumerate(videos)
+        ]
 
     extracted_count = skipped_count = 0
     errors: list[tuple[str, str]] = []
-    # Brings up the worker pool, then starts the renderer thread.
-    with context.Pool(processes=worker_count, initializer=pin_worker_to_cores, initargs=(core_set_queue,)) as pool:
-        if display_progress:
-            bar.start()
-        for video, _written, status in pool.imap_unordered(_extract_one_video, tasks):
-            if status == "ok":
-                extracted_count += 1
-            elif status == "skipped":
-                skipped_count += 1
-            else:
-                errors.append((video, status))
-            progress_queue.put(("done", video_indices[video]))
-
-    if display_progress:
-        bar.stop()
-        bar.join(timeout=3)
+    for video, _written, status in iter_pinned_extraction(
+        videos=videos,
+        make_tasks=build_tasks,
+        worker=_extract_one_video,
+        worker_count=worker_count,
+        core_sets=core_sets,
+        frame_totals=frame_totals,
+        minimum_progress_interval=minimum_progress_interval,
+        display_progress=display_progress,
+    ):
+        if status == "ok":
+            extracted_count += 1
+        elif status == "skipped":
+            skipped_count += 1
+        else:
+            errors.append((video, status))
 
     return FrameExtractionSummary(
         extracted_video_count=extracted_count,
         skipped_video_count=skipped_count,
-        total_video_count=len(tasks),
+        total_video_count=len(videos),
         worker_count=worker_count,
         used_core_count=used_core_count,
         total_core_count=total_core_count,
@@ -545,11 +514,22 @@ def _count_clustering_frames(
         A mapping of video index to the number of frames that video contributes to the aggregate total.
     """
     cv2.setNumThreads(1)
+
+    def _frame_count(video: str) -> int:
+        """Reads one video's frame count from its container header, releasing the capture regardless of outcome."""
+        capture = cv2.VideoCapture(video)
+        try:
+            return int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        finally:
+            capture.release()
+
+    # Opening a container to read its header is I/O-bound and releases the GIL, so the header reads overlap across a
+    # small thread pool rather than serializing one video at a time. executor.map preserves the input order.
     frame_totals: dict[int, int] = {}
-    for video_index, video in enumerate(videos):
-        frame_count = int(cv2.VideoCapture(video).get(cv2.CAP_PROP_FRAME_COUNT))
-        start_index, end_index = math.floor(frame_count * start_fraction), math.ceil(frame_count * stop_fraction)
-        frame_totals[video_index] = max(1, len(range(start_index, end_index, clustering_stride)))
+    with ThreadPoolExecutor(max_workers=min(len(videos), 8)) as executor:
+        for video_index, frame_count in enumerate(executor.map(_frame_count, videos)):
+            start_index, end_index = math.floor(frame_count * start_fraction), math.ceil(frame_count * stop_fraction)
+            frame_totals[video_index] = max(1, len(range(start_index, end_index, clustering_stride)))
     return frame_totals
 
 
@@ -562,7 +542,7 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
 
     Args:
         task: The packed work item carrying the video path, the config path, the clustering parameters, the resume
-            flag, the video index, the per-video frame total, and the shared progress queue.
+            flag, the video index, the per-video frame total, and the progress queue (or None when progress is off).
 
     Returns:
         A tuple of the video path, the number of frames written, and a status string (``"ok"``, ``"skipped"``,
@@ -591,10 +571,12 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
         # On overwrite, drop the stale frames and the labels they would orphan before re-extracting.
         _clear_extracted_data(output_directory=output_directory)
 
-        # Redirects DeepLabCut's internal tqdm progress to the parent's aggregate bar via the shared queue.
-        frame_selection_tools.tqdm = make_progress_reporter(
-            progress_queue=progress_queue, video_index=video_index, frame_total=frame_total
-        )
+        # Redirects DeepLabCut's internal tqdm progress to the parent's aggregate bar via the shared queue. The queue
+        # is None when progress is disabled, leaving DeepLabCut's own (stream-suppressed) tqdm in place.
+        if progress_queue is not None:
+            frame_selection_tools.tqdm = make_progress_reporter(
+                progress_queue=progress_queue, video_index=video_index, frame_total=frame_total
+            )
 
         with (
             Path(os.devnull).open("w") as null_stream,

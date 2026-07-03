@@ -54,9 +54,7 @@ class ConversionSummary:
         Returns:
             A compact description of what was converted and where it was written.
         """
-        return (
-            f"converted {self.frame_count} frames x {len(self.keypoints)} keypoints -> {self.feather_path.name}"
-        )
+        return f"converted {self.frame_count} frames x {len(self.keypoints)} keypoints -> {self.feather_path.name}"
 
 
 def convert_predictions_to_feather(

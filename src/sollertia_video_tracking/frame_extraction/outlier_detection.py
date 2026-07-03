@@ -1,13 +1,24 @@
 """Provides the outlier-frame detection algorithms that flag candidate frames from a video's DeepLabCut predictions."""
 
+from enum import StrEnum
 import warnings
 
 import numpy as np
 import pandas as pd
 from deeplabcut.refine_training_dataset.outlier_frames import FitSARIMAXModel
 
-OUTLIER_ALGORITHMS: tuple[str, ...] = ("jump", "uncertain", "fitting", "list")
-"""The supported outlier-detection algorithm names, mirroring DeepLabCut's non-interactive selection methods."""
+
+class OutlierAlgorithm(StrEnum):
+    """The supported algorithms for flagging likely-wrong frames from a trained model's predictions."""
+
+    JUMP = "jump"
+    """Flags frames in which a bodypart moves further than the pixel threshold from the previous frame."""
+    UNCERTAIN = "uncertain"
+    """Flags frames holding any bodypart predicted below the confidence threshold."""
+    FITTING = "fitting"
+    """Flags frames that depart from a fitted per-keypoint motion trajectory."""
+    LIST = "list"
+    """Extracts an explicit, caller-supplied list of frame indices instead of detecting outliers."""
 
 
 def uncertain_outlier_indices(predictions: pd.DataFrame, minimum_confidence: float) -> list[int]:

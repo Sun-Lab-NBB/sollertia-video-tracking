@@ -124,9 +124,7 @@ def _resolve_bfloat16_support(gpus: tuple[int, ...]) -> bool:
     Returns:
         True when all listed devices report at least Ampere compute capability, False otherwise.
     """
-    return len(gpus) > 0 and all(
-        torch.cuda.get_device_capability(device=index) >= _AMPERE_CAPABILITY for index in gpus
-    )
+    return len(gpus) > 0 and all(torch.cuda.get_device_capability(device=index) >= _AMPERE_CAPABILITY for index in gpus)
 
 
 def _resolve_tf32_support(gpus: tuple[int, ...]) -> bool:
@@ -138,9 +136,7 @@ def _resolve_tf32_support(gpus: tuple[int, ...]) -> bool:
     Returns:
         True when all listed devices report at least Ampere compute capability, False otherwise.
     """
-    return len(gpus) > 0 and all(
-        torch.cuda.get_device_capability(device=index) >= _AMPERE_CAPABILITY for index in gpus
-    )
+    return len(gpus) > 0 and all(torch.cuda.get_device_capability(device=index) >= _AMPERE_CAPABILITY for index in gpus)
 
 
 def resolve_optimization_profile(

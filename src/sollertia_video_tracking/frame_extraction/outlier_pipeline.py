@@ -2,6 +2,7 @@
 
 import os
 import sys
+from enum import StrEnum
 from typing import Any
 from pathlib import Path
 import traceback
@@ -11,15 +12,15 @@ import multiprocessing
 
 import cv2
 import numpy as np
-from ruamel.yaml import YAML
 from deeplabcut.utils import auxfun_multianimal, auxiliaryfunctions, frameselectiontools
 from deeplabcut.utils.auxfun_videos import collect_video_paths
 from deeplabcut.refine_training_dataset import outlier_frames as dlc_outlier_frames
 
-from .progress import AggregateBar, make_progress_reporter
-from .cpu_allocation import DEFAULT_RESERVED_CORE_COUNT, pin_worker_to_cores, plan_core_allocation
+from .progress import make_progress_reporter
+from .utilities import iter_pinned_extraction, normalize_project_config
+from .cpu_allocation import DEFAULT_RESERVED_CORE_COUNT, plan_core_allocation
 from .outlier_detection import (
-    OUTLIER_ALGORITHMS,
+    OutlierAlgorithm,
     jump_outlier_indices,
     fit_keypoint_distance,
     fitting_keypoint_series,
@@ -27,11 +28,28 @@ from .outlier_detection import (
     uncertain_outlier_indices,
 )
 
-_EXTRACTION_ALGORITHMS: tuple[str, ...] = ("kmeans", "uniform")
-"""The frame-selection algorithms that pick the extracted frames from the flagged outlier candidates."""
-
 _CROP_FIELD_COUNT: int = 4
 """The number of comma-separated integers, ``x1,x2,y1,y2``, in a video's config.yaml crop specification."""
+
+
+class ExtractionAlgorithm(StrEnum):
+    """The supported algorithms for selecting which flagged candidate frames to extract."""
+
+    KMEANS = "kmeans"
+    """Clusters the flagged candidates and keeps one representative frame per cluster."""
+    UNIFORM = "uniform"
+    """Keeps flagged candidates spread uniformly across the flagged range."""
+
+
+class TrackingMethod(StrEnum):
+    """The supported multi-animal trackers that may have produced a video's predictions."""
+
+    BOX = "box"
+    """The bounding-box tracker."""
+    SKELETON = "skeleton"
+    """The skeleton tracker."""
+    ELLIPSE = "ellipse"
+    """The ellipse tracker."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,9 +65,9 @@ class OutlierExtractionSummary:
 
     config_path: Path
     """The path to the DeepLabCut project's config.yaml the run used."""
-    outlier_algorithm: str
+    outlier_algorithm: OutlierAlgorithm
     """The outlier-detection algorithm that flagged the candidate frames."""
-    extraction_algorithm: str
+    extraction_algorithm: ExtractionAlgorithm
     """The frame-selection algorithm that picked the extracted frames from the candidates."""
     total_video_count: int
     """The total number of videos considered in the run."""
@@ -104,7 +122,7 @@ def extract_outlier_frames_parallel(
     *,
     shuffle_index: int = 1,
     training_set_index: int = 0,
-    outlier_algorithm: str = "jump",
+    outlier_algorithm: OutlierAlgorithm = OutlierAlgorithm.JUMP,
     explicit_frame_indices: tuple[int, ...] = (),
     comparison_bodyparts: tuple[str, ...] = (),
     pixel_distance_threshold: float = 20.0,
@@ -112,7 +130,7 @@ def extract_outlier_frames_parallel(
     autoregressive_degree: int = 3,
     moving_average_degree: int = 1,
     significance_level: float = 0.01,
-    extraction_algorithm: str = "kmeans",
+    extraction_algorithm: ExtractionAlgorithm = ExtractionAlgorithm.KMEANS,
     frames_per_video: int = -1,
     clustering_resize_width: int = 30,
     cluster_in_color: bool = False,
@@ -120,7 +138,7 @@ def extract_outlier_frames_parallel(
     copy_videos: bool = False,
     predictions_directory: Path | None = None,
     model_prefix: str = "",
-    tracking_method: str = "",
+    tracking_method: TrackingMethod | None = None,
     pose_snapshot_index: int | None = None,
     detector_snapshot_index: int | None = None,
     video_extensions: tuple[str, ...] = (),
@@ -172,8 +190,8 @@ def extract_outlier_frames_parallel(
         copy_videos: Determines whether newly added videos are copied into the project rather than symlinked.
         predictions_directory: The directory holding the analyzed predictions, or None to look beside each video.
         model_prefix: The model subdirectory prefix, matching the trained shuffle.
-        tracking_method: The multi-animal tracker used to generate the data (``"box"``, ``"skeleton"``, or
-            ``"ellipse"``), or an empty string to read it from config.yaml.
+        tracking_method: The multi-animal tracker that produced the predictions, or None to read it from the project
+            configuration.
         pose_snapshot_index: The pose snapshot index whose scorer named the prediction files, or None for the default.
         detector_snapshot_index: The detector snapshot index, for top-down models, or None for the default.
         video_extensions: The file extensions used to filter videos found inside a supplied directory.
@@ -201,23 +219,31 @@ def extract_outlier_frames_parallel(
     if not config_path.is_file():
         message = f"Unable to extract outlier frames. The config path '{config_path}' does not point to a file."
         raise FileNotFoundError(message)
-    if outlier_algorithm not in OUTLIER_ALGORITHMS:
+    try:
+        outlier_algorithm = OutlierAlgorithm(outlier_algorithm)
+    except ValueError:
+        valid_algorithms = ", ".join(algorithm.value for algorithm in OutlierAlgorithm)
         message = (
-            f"Unable to extract outlier frames. The outlier algorithm must be one of {OUTLIER_ALGORITHMS}, but got "
+            f"Unable to extract outlier frames. The outlier algorithm must be one of ({valid_algorithms}), but got "
             f"'{outlier_algorithm}'."
         )
-        raise ValueError(message)
-    if extraction_algorithm not in _EXTRACTION_ALGORITHMS:
+        raise ValueError(message) from None
+    try:
+        extraction_algorithm = ExtractionAlgorithm(extraction_algorithm)
+    except ValueError:
+        valid_algorithms = ", ".join(algorithm.value for algorithm in ExtractionAlgorithm)
         message = (
-            f"Unable to extract outlier frames. The extraction algorithm must be one of {_EXTRACTION_ALGORITHMS}, but "
-            f"got '{extraction_algorithm}'."
+            f"Unable to extract outlier frames. The extraction algorithm must be one of ({valid_algorithms}), but got "
+            f"'{extraction_algorithm}'."
         )
-        raise ValueError(message)
-    if outlier_algorithm == "list" and not explicit_frame_indices:
+        raise ValueError(message) from None
+    if outlier_algorithm is OutlierAlgorithm.LIST and not explicit_frame_indices:
         message = "Unable to extract outlier frames. The 'list' algorithm requires an explicit list of frames to use."
         raise ValueError(message)
 
-    _normalize_project_config(config_path, frames_per_video=frames_per_video)
+    normalize_project_config(
+        config_path, frames_per_video=frames_per_video, error_context="Unable to extract outlier frames."
+    )
     configuration = auxiliaryfunctions.read_config(str(config_path))
 
     resolved_comparison_bodyparts = auxiliaryfunctions.intersection_of_body_parts_and_ones_given_by_user(
@@ -226,7 +252,7 @@ def extract_outlier_frames_parallel(
     if not resolved_comparison_bodyparts:
         message = "Unable to extract outlier frames. The requested comparison bodyparts matched none in the project."
         raise ValueError(message)
-    resolved_tracking_method = auxfun_multianimal.get_track_method(configuration, track_method=tracking_method)
+    resolved_tracking_method = auxfun_multianimal.get_track_method(configuration, track_method=tracking_method or "")
     scorer, _ = auxiliaryfunctions.get_scorer_name(
         configuration,
         shuffle_index,
@@ -309,41 +335,6 @@ def extract_outlier_frames_parallel(
         unanalyzed_videos=tuple(unanalyzed_videos),
         detection_errors=errors,
     )
-
-
-def _normalize_project_config(config_path: Path, *, frames_per_video: int) -> None:
-    """Persists a normalized project_path and optional numframes2pick before any worker reads the configuration.
-
-    DeepLabCut's read_config rewrites config.yaml whenever project_path differs from the config's own directory, which
-    races against the concurrent workers' reads. The path is normalized here, single-threaded, and any per-video frame
-    override is written alongside it, so every later read is a pure read.
-
-    Args:
-        config_path: The resolved path to the project's config.yaml.
-        frames_per_video: The per-video frame count to persist as numframes2pick, or -1 to leave it untouched.
-
-    Raises:
-        ValueError: If ``frames_per_video`` is set below one and is not the -1 sentinel.
-    """
-    yaml = YAML()
-    configuration = yaml.load(config_path.read_text())
-    config_changed = False
-    project_directory = str(config_path.parent)
-    if configuration.get("project_path") != project_directory:
-        configuration["project_path"] = project_directory
-        config_changed = True
-    if frames_per_video != -1:
-        if frames_per_video < 1:
-            message = (
-                f"Unable to extract outlier frames. The frame count per video must be at least one, but got "
-                f"{frames_per_video}."
-            )
-            raise ValueError(message)
-        configuration["numframes2pick"] = int(frames_per_video)
-        config_changed = True
-    if config_changed:
-        with config_path.open("w") as config_file:
-            yaml.dump(configuration, config_file)
 
 
 def _detect_all_videos(
@@ -559,8 +550,8 @@ def _extract_all_videos(
     predictions_directory: str | None,
     scorer: str,
     tracking_method: str,
-    outlier_algorithm: str,
-    extraction_algorithm: str,
+    outlier_algorithm: OutlierAlgorithm,
+    extraction_algorithm: ExtractionAlgorithm,
     clustering_resize_width: int,
     cluster_in_color: bool,
     save_labeled_frames: bool,
@@ -613,33 +604,6 @@ def _extract_all_videos(
     frame_totals = {index: max(1, len(candidates[video])) for index, video in enumerate(videos)}
     candidate_frame_count = sum(len(candidates[video]) for video in videos)
 
-    context = multiprocessing.get_context("spawn")
-    manager = context.Manager()
-    progress_queue = manager.Queue()
-    core_set_queue = manager.Queue()
-    for core_set in core_sets:
-        core_set_queue.put(core_set)
-
-    video_indices = {video: index for index, video in enumerate(videos)}
-    tasks = [
-        (
-            video,
-            index,
-            candidates[video],
-            str(config_path),
-            predictions_directory,
-            scorer,
-            tracking_method,
-            extraction_algorithm,
-            clustering_resize_width,
-            cluster_in_color,
-            save_labeled_frames,
-            copy_videos,
-            progress_queue if display_progress else None,
-        )
-        for video, index in video_indices.items()
-    ]
-
     if display_progress:
         _report_plan(
             video_count=len(videos),
@@ -651,38 +615,51 @@ def _extract_all_videos(
             total_core_count=total_core_count,
             config_path=config_path,
         )
-    bar = AggregateBar(
-        progress_queue=progress_queue,
-        total_video_count=len(tasks),
-        frame_totals=frame_totals,
-        minimum_progress_interval=minimum_progress_interval,
-    )
+
+    config_path_string = str(config_path)
+
+    def build_tasks(reporting_queue: Any | None) -> list[tuple[Any, ...]]:
+        """Packs one work item per video, embedding the progress queue only when progress is displayed."""
+        return [
+            (
+                video,
+                index,
+                candidates[video],
+                config_path_string,
+                predictions_directory,
+                scorer,
+                tracking_method,
+                extraction_algorithm,
+                clustering_resize_width,
+                cluster_in_color,
+                save_labeled_frames,
+                copy_videos,
+                reporting_queue,
+            )
+            for index, video in enumerate(videos)
+        ]
 
     extracted_video_count = 0
     extracted_frame_count = 0
     errors = list(detection_errors)
     unanalyzed_video_list = list(unanalyzed_videos)
-    try:
-        with context.Pool(
-            processes=resolved_worker_count, initializer=pin_worker_to_cores, initargs=(core_set_queue,)
-        ) as pool:
-            if display_progress:
-                bar.start()
-            for video, written, status in pool.imap_unordered(_extract_one_video, tasks):
-                if status == "ok":
-                    extracted_video_count += 1
-                    extracted_frame_count += written
-                elif status == "not_analyzed":
-                    unanalyzed_video_list.append(video)
-                else:
-                    errors.append((video, status))
-                if display_progress:
-                    progress_queue.put(("done", video_indices[video]))
-    finally:
-        if display_progress:
-            bar.stop()
-            bar.join(timeout=3)
-        manager.shutdown()
+    for video, written, status in iter_pinned_extraction(
+        videos=videos,
+        make_tasks=build_tasks,
+        worker=_extract_one_video,
+        worker_count=resolved_worker_count,
+        core_sets=core_sets,
+        frame_totals=frame_totals,
+        minimum_progress_interval=minimum_progress_interval,
+        display_progress=display_progress,
+    ):
+        if status == "ok":
+            extracted_video_count += 1
+            extracted_frame_count += written
+        elif status == "not_analyzed":
+            unanalyzed_video_list.append(video)
+        else:
+            errors.append((video, status))
 
     return OutlierExtractionSummary(
         config_path=config_path,

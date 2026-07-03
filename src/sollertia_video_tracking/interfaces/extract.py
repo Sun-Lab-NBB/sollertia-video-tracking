@@ -4,7 +4,7 @@ from pathlib import Path
 
 import click
 
-from ..frame_extraction import DEFAULT_RESERVED_CORE_COUNT, extract_frames_kmeans
+from ..frame_extraction import extract_frames_kmeans
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the lab standard."""
@@ -13,196 +13,182 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 @click.command("extract-frames", context_settings=_CONTEXT_SETTINGS)
 @click.argument("config", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(
-    "-s",
+    "-cs",
     "--clustering-stride",
-    "clustering_stride",
     default=500,
     show_default=True,
-    help="The clustering stride passed to DeepLabCut as cluster_step; every Nth frame is sampled. Larger values "
-    "issue far fewer of the expensive video encoder seeks and finish sooner on long-GOP video.",
+    help="How far apart, in frames, to sample the video when selecting training frames. Larger values scan fewer "
+    "frames and finish faster; smaller values sample more densely but take longer.",
 )
 @click.option(
     "-w",
     "--workers",
-    "worker_count",
     type=int,
     default=-1,
     show_default=True,
-    help="The number of videos to decode in parallel. Set to -1 to fill the usable CPU cores automatically.",
+    help="How many videos to process at the same time. Set to -1 to use the available CPU cores automatically.",
 )
 @click.option(
-    "-c",
-    "--cores-per-worker",
-    "cores_per_worker",
+    "-co",
+    "--cores",
     type=int,
     default=-1,
     show_default=True,
-    help="The number of CPU cores pinned to each worker. Set to -1 to spread the usable cores evenly across workers. "
-    "Video decoding keeps roughly four cores per video busy, so larger values mostly idle cores while smaller values "
-    "throttle each decode.",
+    help="How many CPU cores to devote to each video being processed. Set to -1 to share the available cores evenly. "
+    "Each video keeps about four cores busy while it decodes, so larger values mostly idle cores and smaller values "
+    "slow each video worker down.",
 )
 @click.option(
-    "-r",
-    "--reserve-cores",
-    "reserved_core_count",
-    default=DEFAULT_RESERVED_CORE_COUNT,
-    show_default=True,
-    help="The number of CPU cores left free for other tasks while extraction runs.",
-)
-@click.option(
-    "-n",
+    "-fpv",
     "--frames-per-video",
-    "frames_per_video",
     type=int,
-    default=-1,
+    default=10,
     show_default=True,
-    help="The number of frames to keep per video, overriding numframes2pick in config.yaml. Set to -1 to use the "
-    "value already stored in the configuration file.",
+    help="How many frames to keep from each processed video. Set to -1 to use the project's configured amount.",
 )
 @click.option(
-    "-t",
+    "-tf",
     "--total-frames",
-    "total_frame_budget",
     type=int,
-    default=-1,
+    default=200,
     show_default=True,
-    help="The total number of frames to hold across the project. When set, a random subset of not-yet-extracted "
-    "videos is sampled to reach this budget (each contributing --frames-per-video frames), growing coverage on "
-    "repeated runs. Set to -1 to extract every selected video instead.",
+    help="The total number of frames you want across the whole project. When set, not-yet-processed videos are "
+    "sampled at random until this many frames are reached, so coverage grows over repeated runs (each video "
+    "contributes --frames-per-video frames). Set to -1 to process every selected video instead.",
 )
 @click.option(
+    "-s",
     "--seed",
-    "random_seed",
     type=int,
     default=None,
-    help="The seed for the random video subset draw. Omit for a different random subset each run, or set it to make "
-    "the selection reproducible.",
+    help="A fixed seed for the random video sampling. Set it to make the selection repeatable; omit for a different "
+    "draw each run.",
 )
 @click.option(
+    "-bg",
     "--balance-groups",
-    "balance_groups",
     is_flag=True,
-    help="Balance the budgeted sample across groups instead of drawing uniformly, so every group is represented and "
-    "coverage evens out across repeated runs. The group of each video is inferred from the non-date components its "
-    "file name shares with the others. Only applies together with --total-frames.",
+    help="Spread the sampled frames evenly across groups of related videos instead of drawing purely at random, so "
+    "every group is represented. Groups are inferred from the parts of the file names the videos share. Only applies "
+    "together with --total-frames.",
 )
 @click.option(
+    "-gb",
     "--group-by",
-    "group_by_pattern",
     default=None,
     metavar="REGEX",
-    help="A regular expression whose first capturing group names the group for each video's file name, overriding the "
-    "built-in inference for naming schemes it does not cover (for example '(Grp\\d+)' for names like D1_Grp2). "
-    "Implies --balance-groups.",
+    help="A regular expression whose first capturing group names the group for each video, for naming schemes the "
+    "automatic grouping does not recognize (for example '(Grp\\d+)' for names like D1_Grp2). Implies --balance-groups.",
 )
 @click.option(
+    "-ai",
     "--always-include",
-    "always_include_videos",
     multiple=True,
     metavar="SUBSTRING",
-    help="A path substring naming a video to always include in the budgeted sample, selected before the balanced or "
-    "uniform draw fills the rest. Provide the option multiple times to pin several videos. Only applies together with "
+    help="A path substring naming a video that must always be included in the sample, chosen before the rest of the "
+    "budget is filled. Provide the option several times to pin multiple videos. Only applies together with "
     "--total-frames.",
 )
 @click.option(
+    "-crw",
     "--clustering-resize-width",
-    "clustering_resize_width",
-    default=30,
+    default=50,
     show_default=True,
-    help="The downsample width applied before clustering, passed to DeepLabCut as cluster_resizewidth.",
+    help="The width, in pixels, that frames are shrunk to before they are compared for similarity. Smaller values are "
+    "faster but compare more coarsely.",
 )
 @click.option(
+    "-cl",
     "--color/--grayscale",
-    "cluster_in_color",
     default=False,
     show_default=True,
-    help="Determines whether to cluster on color channels instead of grayscale.",
+    help="Compare frames in color instead of grayscale when selecting them.",
 )
 @click.option(
+    "-o",
     "--overwrite",
     is_flag=True,
-    help="Determines whether to re-extract videos whose labeled-data directory already contains frames. WARNING: "
-    "this deletes the existing extracted frames AND their labels in each re-extracted directory, which the new "
-    "frames would otherwise orphan. Mutually exclusive with --reset.",
+    help="Re-process videos that already have extracted frames. WARNING: this deletes the existing extracted frames "
+    "AND their labels in each affected folder, which the new frames would otherwise orphan. Mutually exclusive with "
+    "--reset.",
 )
 @click.option(
+    "-r",
     "--reset",
     is_flag=True,
-    help="Determines whether to discard ALL extracted frames and their labels in the selection and re-extract from "
-    "scratch. WARNING: this permanently deletes the extracted frames and any labels in every selected video folder. "
-    "Mutually exclusive with --overwrite.",
+    help="Discard ALL extracted frames and their labels across the selection and start over. WARNING: this "
+    "permanently deletes the extracted frames and any labels in every selected folder. Mutually exclusive with "
+    "--overwrite.",
 )
 @click.option(
+    "-pf",
     "--path-filter",
-    "path_filters",
     multiple=True,
     metavar="SUBSTRING",
-    help="The path substring that restricts the run to videos whose path contains it. Provide the option multiple "
-    "times to match several substrings.",
+    help="Restrict the run to videos whose path contains this substring. Provide the option several times to allow "
+    "multiple substrings.",
 )
 @click.option(
+    "-mpi",
     "--minimum-progress-interval",
-    "minimum_progress_interval",
     default=30.0,
     show_default=True,
     metavar="SECONDS",
-    help="The minimum interval, in seconds, between progress lines when the output is not a TTY.",
+    help="The shortest time, in seconds, between progress updates when the output is not a live terminal.",
 )
 @click.option(
+    "-pg",
     "--progress/--no-progress",
-    "display_progress",
     default=True,
     show_default=True,
-    help="Determines whether to display the aggregate progress bar during extraction.",
+    help="Show the aggregate progress bar during extraction.",
 )
 def extract_frames_command(
     config: Path,
     clustering_stride: int,
-    worker_count: int,
-    cores_per_worker: int,
-    reserved_core_count: int,
+    workers: int,
+    cores: int,
     frames_per_video: int,
-    total_frame_budget: int,
-    random_seed: int | None,
-    group_by_pattern: str | None,
-    always_include_videos: tuple[str, ...],
+    total_frames: int,
+    seed: int | None,
+    group_by: str | None,
+    always_include: tuple[str, ...],
     clustering_resize_width: int,
-    path_filters: tuple[str, ...],
+    path_filter: tuple[str, ...],
     minimum_progress_interval: float,
     *,
     balance_groups: bool,
-    cluster_in_color: bool,
+    color: bool,
     overwrite: bool,
     reset: bool,
-    display_progress: bool,
+    progress: bool,
 ) -> None:
-    """Selects DeepLabCut training frames from a project's videos by clustering them in parallel.
+    """Selects training frames from a project's videos by clustering them in parallel.
 
-    CONFIG is the path to the DeepLabCut project's config.yaml. Each video is clustered in its own worker process
-    pinned to a disjoint block of CPU cores, and videos whose labeled-data directory already contains frames are
-    skipped unless ``--overwrite`` is given. Passing ``--total-frames`` instead samples a random subset of
-    not-yet-extracted videos sized to reach that project-wide frame budget, growing coverage across repeated runs.
+    CONFIG is the path to the project's config.yaml. Each video is clustered in its own worker process pinned to a
+    disjoint block of CPU cores, and videos that already contain extracted frames are skipped unless ``--overwrite``
+    is given. Passing ``--total-frames`` instead samples a random subset of not-yet-processed videos sized to reach
+    that project-wide frame budget, growing coverage across repeated runs.
     """
     try:
         summary = extract_frames_kmeans(
             config_path=config,
             clustering_stride=clustering_stride,
-            worker_count=worker_count,
-            cores_per_worker=cores_per_worker,
-            reserved_core_count=reserved_core_count,
+            worker_count=workers,
+            cores_per_worker=cores,
             frames_per_video=frames_per_video,
-            total_frame_budget=total_frame_budget,
-            random_seed=random_seed,
+            total_frame_budget=total_frames,
+            random_seed=seed,
             balance_groups=balance_groups,
-            group_by_pattern=group_by_pattern,
-            always_include_videos=always_include_videos,
+            group_by_pattern=group_by,
+            always_include_videos=always_include,
             clustering_resize_width=clustering_resize_width,
-            cluster_in_color=cluster_in_color,
+            cluster_in_color=color,
             overwrite=overwrite,
             reset=reset,
-            path_filters=path_filters,
+            path_filters=path_filter,
             minimum_progress_interval=minimum_progress_interval,
-            display_progress=display_progress,
+            display_progress=progress,
         )
     except (ValueError, FileNotFoundError) as error:
         raise click.ClickException(message=str(error)) from error

@@ -5,7 +5,7 @@ import contextlib
 
 import psutil
 
-DEFAULT_RESERVED_CORE_COUNT: int = 4
+DEFAULT_RESERVED_CORE_COUNT: int = 2
 """The number of CPU cores left free by default for other work while frame extraction is running."""
 
 _SATURATING_CORES_PER_WORKER: int = 4
