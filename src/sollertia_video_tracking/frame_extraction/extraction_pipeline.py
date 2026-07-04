@@ -302,14 +302,12 @@ def extract_frames_kmeans(
         )
 
     # Each worker decodes one video pinned to a disjoint core block, streaming progress to the shared aggregate bar.
-    config_path_string = str(config_path)
-
     def build_tasks(reporting_queue: Any | None) -> list[tuple[Any, ...]]:
         """Packs one work item per selected video, embedding the progress queue only when progress is displayed."""
         return [
             (
                 video,
-                config_path_string,
+                config_path,
                 clustering_stride,
                 clustering_resize_width,
                 cluster_in_color,
@@ -588,7 +586,7 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
         cv2.setNumThreads(1)
 
         stem = Path(video_path).stem
-        output_directory = Path(config_path).parent / "labeled-data" / stem
+        output_directory = config_path.parent / "labeled-data" / stem
 
         existing_frame_paths = sorted(output_directory.glob("img*.png")) if output_directory.exists() else []
         if existing_frame_paths and not overwrite:
@@ -609,7 +607,7 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
             contextlib.redirect_stderr(null_stream),
         ):
             deeplabcut.extract_frames(
-                config_path,
+                str(config_path),
                 mode="automatic",
                 algo="kmeans",
                 # Applies the per-video crop stored in config.yaml.

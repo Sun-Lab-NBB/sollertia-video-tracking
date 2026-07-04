@@ -97,7 +97,7 @@ def fitting_keypoint_series(predictions: pd.DataFrame) -> list[KeypointSeries]:
         One ``(horizontal_positions, vertical_positions, confidences)`` tuple of per-frame arrays for each keypoint,
         in column order.
     """
-    channels = predictions.to_numpy().reshape((predictions.shape[0], -1, 3))
+    channels = predictions.to_numpy(dtype=np.float64).reshape((predictions.shape[0], -1, 3))
     horizontal_positions, vertical_positions, confidences = channels.T
     return [
         (
@@ -160,7 +160,7 @@ def fit_keypoint_distance(
                 MAdegree=moving_average_degree,
             )
         except Exception:  # noqa: BLE001 -- a keypoint whose fit raises yields NaN, like one with too few points.
-            return np.full(horizontal_positions.shape, np.nan, dtype=float)
+            return np.full(horizontal_positions.shape, np.nan, dtype=np.float64)
     return np.sqrt((horizontal_positions - mean_x) ** 2 + (vertical_positions - mean_y) ** 2)
 
 

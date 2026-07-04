@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from enum import StrEnum
+import math
 from typing import TYPE_CHECKING, Any
 from pathlib import Path
 import traceback
@@ -283,10 +284,9 @@ def extract_outlier_frames_parallel(
         message = "Unable to extract outlier frames. No videos matched the requested selection."
         raise ValueError(message)
 
-    predictions_directory_string = str(predictions_directory) if predictions_directory is not None else None
     candidates, unanalyzed_videos, errors = _detect_all_videos(
         video_paths=video_paths,
-        predictions_directory=predictions_directory_string,
+        predictions_directory=predictions_directory,
         scorer=scorer,
         configuration=configuration,
         tracking_method=resolved_tracking_method,
@@ -324,7 +324,7 @@ def extract_outlier_frames_parallel(
         # DeepLabCut's own frame writer adds each video to the project, which the concurrent workers would otherwise
         # race on; pre-adding here and neutralizing the per-worker add keeps the configuration file writes serialized.
         _register_videos(
-            config_path=str(config_path),
+            config_path=config_path,
             configuration=configuration,
             videos=extraction_videos,
             copy_videos=copy_videos,
@@ -333,7 +333,7 @@ def extract_outlier_frames_parallel(
             config_path=config_path,
             videos=extraction_videos,
             candidates=candidates,
-            predictions_directory=predictions_directory_string,
+            predictions_directory=predictions_directory,
             scorer=scorer,
             tracking_method=resolved_tracking_method,
             outlier_algorithm=outlier_algorithm,
@@ -359,7 +359,7 @@ def extract_outlier_frames_parallel(
 def _detect_all_videos(
     *,
     video_paths: list[str],
-    predictions_directory: str | None,
+    predictions_directory: Path | None,
     scorer: str,
     configuration: dict[str, Any],
     tracking_method: str,
@@ -405,9 +405,7 @@ def _detect_all_videos(
     errors: list[tuple[str, str]] = []
 
     for video in video_paths:
-        video_predictions_directory = (
-            predictions_directory if predictions_directory is not None else str(Path(video).parents[0])
-        )
+        video_predictions_directory = predictions_directory if predictions_directory is not None else Path(video).parent
         try:
             predictions = _load_sliced_predictions(
                 video=video,
@@ -537,7 +535,7 @@ def _detect_fitting_outliers(
 
 
 def _register_videos(
-    config_path: str,
+    config_path: Path,
     configuration: dict[str, Any],
     videos: list[str],
     *,
@@ -551,13 +549,13 @@ def _register_videos(
         videos: The videos that will be extracted from.
         copy_videos: Determines whether newly added videos are copied into the project rather than symlinked.
     """
-    registered = {str(Path(video).resolve()) for video in configuration.get("video_sets", {})}
+    registered = {Path(video).resolve() for video in configuration.get("video_sets", {})}
     for video in videos:
-        if str(Path(video).resolve()) in registered:
+        if Path(video).resolve() in registered:
             continue
         with contextlib.suppress(Exception):
             dlc_outlier_frames.attempt_to_add_video(
-                config=config_path, video=video, copy_videos=copy_videos, coords=None
+                config=str(config_path), video=video, copy_videos=copy_videos, coords=None
             )
 
 
@@ -566,7 +564,7 @@ def _extract_all_videos(
     config_path: Path,
     videos: list[str],
     candidates: dict[str, list[int]],
-    predictions_directory: str | None,
+    predictions_directory: Path | None,
     scorer: str,
     tracking_method: str,
     outlier_algorithm: OutlierAlgorithm,
@@ -635,8 +633,6 @@ def _extract_all_videos(
             config_path=config_path,
         )
 
-    config_path_string = str(config_path)
-
     def build_tasks(reporting_queue: Any | None) -> list[tuple[Any, ...]]:
         """Packs one work item per video, embedding the progress queue only when progress is displayed."""
         return [
@@ -644,7 +640,7 @@ def _extract_all_videos(
                 video,
                 index,
                 candidates[video],
-                config_path_string,
+                config_path,
                 predictions_directory,
                 scorer,
                 tracking_method,
@@ -732,7 +728,7 @@ def _report_plan(
 
 def _load_sliced_predictions(
     video: str,
-    video_predictions_directory: str,
+    video_predictions_directory: Path,
     scorer: str,
     configuration: dict[str, Any],
     tracking_method: str,
@@ -759,15 +755,15 @@ def _load_sliced_predictions(
     """
     video_stem = Path(video).stem
     predictions, _, _, _ = auxiliaryfunctions.load_analyzed_data(
-        folder=video_predictions_directory, videoname=video_stem, scorer=scorer, track_method=tracking_method
+        folder=str(video_predictions_directory), videoname=video_stem, scorer=scorer, track_method=tracking_method
     )
     metadata = auxiliaryfunctions.load_video_metadata(
-        folder=video_predictions_directory, videoname=video_stem, scorer=scorer
+        folder=str(video_predictions_directory), videoname=video_stem, scorer=scorer
     )
     frame_count = len(predictions)
-    start_index = max(int(np.floor(frame_count * configuration["start"])), 0)
-    stop_index = min(int(np.ceil(frame_count * configuration["stop"])), frame_count)
-    window = np.arange(stop_index - start_index) + start_index
+    start_index = max(math.floor(frame_count * configuration["start"]), 0)
+    stop_index = min(math.ceil(frame_count * configuration["stop"]), frame_count)
+    window = np.arange(start_index, stop_index)
 
     output_crop_x, output_crop_y = _video_cropping_offset(configuration, video)
     if metadata.get("data", {}).get("cropping"):
@@ -790,7 +786,7 @@ def _video_cropping_offset(configuration: dict[str, Any], video: str) -> tuple[i
     Raises:
         ValueError: If the video's crop specification is not four comma-separated integers.
     """
-    crop = configuration.get("video_sets", {}).get(str(video), {}).get("crop")
+    crop = configuration.get("video_sets", {}).get(video, {}).get("crop")
     if crop is None:
         return 0, 0
     parts = [part.strip() for part in str(crop).split(",")]
@@ -836,10 +832,8 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
     ) = task
     try:
         cv2.setNumThreads(1)
-        configuration = auxiliaryfunctions.read_config(config_path)
-        video_predictions_directory = (
-            predictions_directory if predictions_directory is not None else str(Path(video).parents[0])
-        )
+        configuration = auxiliaryfunctions.read_config(str(config_path))
+        video_predictions_directory = predictions_directory if predictions_directory is not None else Path(video).parent
         predictions = _load_sliced_predictions(
             video=video,
             video_predictions_directory=video_predictions_directory,
@@ -870,7 +864,7 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
                 data=predictions,
                 video=video,
                 cfg=configuration,
-                config=config_path,
+                config=str(config_path),
                 opencv=True,
                 cluster_resizewidth=clustering_resize_width,
                 cluster_color=cluster_in_color,
