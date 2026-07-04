@@ -20,7 +20,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     type=click.Path(file_okay=False, path_type=Path),
     default=None,
     help="The directory prediction files are written to. Omit to write each video's predictions beside the video "
-    "itself, matching DeepLabCut and the location the 'extract-outliers' step reads.",
+    "itself, matching DeepLabCut and the location the 'extract outliers' step reads.",
 )
 @click.option("-s", "--shuffle", default=1, show_default=True, help="The shuffle index whose trained model is used.")
 @click.option(

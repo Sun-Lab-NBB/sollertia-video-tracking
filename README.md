@@ -98,19 +98,23 @@ This library provides the `slvt` CLI that exposes the following commands:
 
 | Command                   | Description                                                                              |
 |---------------------------|------------------------------------------------------------------------------------------|
-| `extract-frames`          | Selects DeepLabCut training frames by clustering every video in a project in parallel    |
+| `extract frames`          | Selects DeepLabCut training frames by clustering every video in a project in parallel    |
+| `extract outliers`        | Extracts a trained model's likely-wrong frames from analyzed videos to refine the model  |
 | `create-training-dataset` | Creates a training-dataset shuffle with a chosen network architecture and train/test split |
 | `train`                   | Trains a shuffle with mixed precision and multi-GPU DistributedDataParallel               |
 | `infer`                   | Analyzes videos across multiple GPUs, a single GPU, or the CPU, with in-flight polars output |
 
-Use `slvt --help` or `slvt COMMAND --help` for detailed usage information.
+The `extract` group owns the parameters shared by both subcommands (the project config.yaml, parallelism, and
+frame-selection options); these must be given before the `frames` or `outliers` subcommand name, which then carries
+its own parameters. Use `slvt --help`, `slvt extract --help`, or `slvt COMMAND --help` for detailed usage information.
 
 For example, the following command extracts training frames from every video referenced by a project's config.yaml,
-sampling every 500th frame for clustering: `slvt extract-frames /path/to/project/config.yaml --step 500`
+sampling every 500th frame for clustering:
+`slvt extract --config-path /path/to/project/config.yaml frames --clustering-stride 500`
 
 The following command grows the project toward a two-thousand-frame training set while ensuring every group is
 represented, balancing the sampled videos across the groups inferred from the components their file names share:
-`slvt extract-frames /path/to/project/config.yaml --total-frames 2000 --balance-groups`
+`slvt extract --config-path /path/to/project/config.yaml frames --total-frames 2000 --balance-groups`
 
 The following command analyzes two videos with a project's trained model, writing a polars feather of predictions per
 video into an output directory: `slvt infer /path/to/project/config.yaml video1.mp4 video2.mp4 --dest /path/to/output`

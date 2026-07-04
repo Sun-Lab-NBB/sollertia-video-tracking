@@ -4,8 +4,7 @@ import click
 
 from .infer import infer_command
 from .train import train_command
-from .extract import extract_frames_command
-from .extract_outliers import extract_outliers_command
+from .extract import extract_group
 from .create_training_dataset import create_training_dataset_command
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
@@ -17,8 +16,7 @@ def slvt_cli() -> None:
     """Designs and deploys DeepLabCut video-tracking pipelines for the Sollertia platform."""
 
 
-slvt_cli.add_command(cmd=extract_frames_command)
-slvt_cli.add_command(cmd=extract_outliers_command)
+slvt_cli.add_command(cmd=extract_group)
 slvt_cli.add_command(cmd=create_training_dataset_command)
 slvt_cli.add_command(cmd=train_command)
 slvt_cli.add_command(cmd=infer_command)
