@@ -1,9 +1,11 @@
 """Provides the parallel outlier-frame extraction pipeline that refines a DeepLabCut model on likely-wrong frames."""
 
+from __future__ import annotations
+
 import os
 import sys
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from pathlib import Path
 import traceback
 import contextlib
@@ -17,9 +19,14 @@ from deeplabcut.utils.auxfun_videos import collect_video_paths
 from deeplabcut.refine_training_dataset import outlier_frames as dlc_outlier_frames
 
 from .progress import make_progress_reporter
-from .utilities import iter_pinned_extraction, normalize_project_config
+from .utilities import (
+    iter_pinned_extraction,
+    normalize_project_config,
+    prune_empty_labeled_data_directories,
+)
 from .cpu_allocation import DEFAULT_RESERVED_CORE_COUNT, plan_core_allocation
 from .outlier_detection import (
+    KeypointSeries,
     OutlierAlgorithm,
     jump_outlier_indices,
     fit_keypoint_distance,
@@ -27,6 +34,9 @@ from .outlier_detection import (
     fitting_outlier_indices,
     uncertain_outlier_indices,
 )
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
 
 _CROP_FIELD_COUNT: int = 4
 """The number of comma-separated integers, ``x1,x2,y1,y2``, in a video's config.yaml crop specification."""
@@ -167,6 +177,9 @@ def extract_outlier_frames_parallel(
         Outlier extraction is additive: re-running a video appends further frames rather than replacing the existing
         ones, so coverage grows across repeated passes.
 
+        Empty ``labeled-data`` folders left by videos that were registered but never extracted are removed after every
+        run, so the labeling GUI shows only the videos that have frames.
+
     Args:
         config_path: The path to the DeepLabCut project's config.yaml.
         videos: The video files (or directories of videos) to refine on; every video must already be analyzed.
@@ -248,7 +261,7 @@ def extract_outlier_frames_parallel(
     configuration = auxiliaryfunctions.read_config(str(config_path))
 
     resolved_comparison_bodyparts = auxiliaryfunctions.intersection_of_body_parts_and_ones_given_by_user(
-        configuration, list(comparison_bodyparts) if comparison_bodyparts else "all"
+        cfg=configuration, comparisonbodyparts=list(comparison_bodyparts) if comparison_bodyparts else "all"
     )
     if not resolved_comparison_bodyparts:
         message = "Unable to extract outlier frames. The requested comparison bodyparts matched none in the project."
@@ -292,7 +305,7 @@ def extract_outlier_frames_parallel(
 
     extraction_videos = [video for video in video_paths if candidates.get(video)]
     if not extraction_videos:
-        return OutlierExtractionSummary(
+        summary = OutlierExtractionSummary(
             config_path=config_path,
             outlier_algorithm=outlier_algorithm,
             extraction_algorithm=extraction_algorithm,
@@ -306,36 +319,41 @@ def extract_outlier_frames_parallel(
             unanalyzed_videos=tuple(unanalyzed_videos),
             errors=tuple(errors),
         )
+    else:
+        # Register every extraction video in config.yaml once, single-threaded, before the workers start.
+        # DeepLabCut's own frame writer adds each video to the project, which the concurrent workers would otherwise
+        # race on; pre-adding here and neutralizing the per-worker add keeps the configuration file writes serialized.
+        _register_videos(
+            config_path=str(config_path),
+            configuration=configuration,
+            videos=extraction_videos,
+            copy_videos=copy_videos,
+        )
+        summary = _extract_all_videos(
+            config_path=config_path,
+            videos=extraction_videos,
+            candidates=candidates,
+            predictions_directory=predictions_directory_string,
+            scorer=scorer,
+            tracking_method=resolved_tracking_method,
+            outlier_algorithm=outlier_algorithm,
+            extraction_algorithm=extraction_algorithm,
+            clustering_resize_width=clustering_resize_width,
+            cluster_in_color=cluster_in_color,
+            save_labeled_frames=save_labeled_frames,
+            copy_videos=copy_videos,
+            worker_count=worker_count,
+            cores_per_worker=cores_per_worker,
+            reserved_core_count=reserved_core_count,
+            minimum_progress_interval=minimum_progress_interval,
+            display_progress=display_progress,
+            total_video_count=len(video_paths),
+            unanalyzed_videos=tuple(unanalyzed_videos),
+            detection_errors=errors,
+        )
 
-    # Register every extraction video in config.yaml once, single-threaded, before the workers start. DeepLabCut's own
-    # frame writer adds each video to the project, which the concurrent workers would otherwise race on; pre-adding
-    # here and neutralizing the per-worker add keeps the configuration file writes serialized.
-    _register_videos(
-        config_path=str(config_path), configuration=configuration, videos=extraction_videos, copy_videos=copy_videos
-    )
-
-    return _extract_all_videos(
-        config_path=config_path,
-        videos=extraction_videos,
-        candidates=candidates,
-        predictions_directory=predictions_directory_string,
-        scorer=scorer,
-        tracking_method=resolved_tracking_method,
-        outlier_algorithm=outlier_algorithm,
-        extraction_algorithm=extraction_algorithm,
-        clustering_resize_width=clustering_resize_width,
-        cluster_in_color=cluster_in_color,
-        save_labeled_frames=save_labeled_frames,
-        copy_videos=copy_videos,
-        worker_count=worker_count,
-        cores_per_worker=cores_per_worker,
-        reserved_core_count=reserved_core_count,
-        minimum_progress_interval=minimum_progress_interval,
-        display_progress=display_progress,
-        total_video_count=len(video_paths),
-        unanalyzed_videos=tuple(unanalyzed_videos),
-        detection_errors=errors,
-    )
+    prune_empty_labeled_data_directories(config_path.parent, display_progress=display_progress)
+    return summary
 
 
 def _detect_all_videos(
@@ -375,14 +393,14 @@ def _detect_all_videos(
         significance_level: The significance level for ``fitting``.
         fitting_worker_count: The number of SARIMAX fit processes, or -1 to use every usable core.
         reserved_core_count: The number of cores to leave free when sizing the fit pool.
-        display_progress: Whether to report the detection progress line.
+        display_progress: Determines whether to report the detection progress line.
 
     Returns:
         A tuple of the sorted, de-duplicated candidate frames keyed by video, the unanalyzed video paths, and the
         ``(video, detail)`` detection failures.
     """
     candidates: dict[str, list[int]] = {}
-    keypoint_series_by_video: dict[str, list[tuple[np.ndarray, np.ndarray, np.ndarray]]] = {}
+    keypoint_series_by_video: dict[str, list[KeypointSeries]] = {}
     unanalyzed_videos: list[str] = []
     errors: list[tuple[str, str]] = []
 
@@ -440,7 +458,7 @@ def _detect_all_videos(
 
 def _detect_fitting_outliers(
     *,
-    keypoint_series_by_video: dict[str, list[tuple[np.ndarray, np.ndarray, np.ndarray]]],
+    keypoint_series_by_video: dict[str, list[KeypointSeries]],
     frames_per_video_count: int,
     pixel_distance_threshold: float,
     minimum_confidence: float,
@@ -467,12 +485,12 @@ def _detect_fitting_outliers(
         significance_level: The significance level for the fitted model's confidence interval.
         fitting_worker_count: The number of fit processes, or -1 to use every usable core.
         reserved_core_count: The number of cores to leave free when sizing the pool.
-        display_progress: Whether to report the number of fits being run.
+        display_progress: Determines whether to report the number of fits being run.
 
     Returns:
         The outlier candidate frames keyed by video.
     """
-    tasks: list[tuple[np.ndarray, np.ndarray, np.ndarray, float, float, int, int]] = []
+    tasks: list[tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], float, float, int, int]] = []
     owner_videos: list[str] = []
     for video, keypoint_series in keypoint_series_by_video.items():
         for horizontal_positions, vertical_positions, confidences in keypoint_series:
@@ -504,7 +522,7 @@ def _detect_fitting_outliers(
     with context.Pool(processes=resolved_fitting_worker_count) as pool:
         keypoint_deviations = pool.starmap(fit_keypoint_distance, tasks)
 
-    deviations_by_video: dict[str, list[np.ndarray]] = {video: [] for video in keypoint_series_by_video}
+    deviations_by_video: dict[str, list[NDArray[np.float64]]] = {video: [] for video in keypoint_series_by_video}
     for video, deviation in zip(owner_videos, keypoint_deviations, strict=True):
         deviations_by_video[video].append(deviation)
 
@@ -531,7 +549,7 @@ def _register_videos(
         config_path: The project's config.yaml path.
         configuration: The loaded project configuration, read for the already-registered videos.
         videos: The videos that will be extracted from.
-        copy_videos: Whether newly added videos are copied into the project rather than symlinked.
+        copy_videos: Determines whether newly added videos are copied into the project rather than symlinked.
     """
     registered = {str(Path(video).resolve()) for video in configuration.get("video_sets", {})}
     for video in videos:
@@ -578,14 +596,14 @@ def _extract_all_videos(
         outlier_algorithm: The detection algorithm that produced the candidates.
         extraction_algorithm: The frame-selection algorithm applied to the candidates.
         clustering_resize_width: The downsample width for k-means selection.
-        cluster_in_color: Whether k-means selection clusters on color channels.
-        save_labeled_frames: Whether to also save each frame with the model's predictions drawn on it.
-        copy_videos: Whether newly added videos are copied rather than symlinked.
+        cluster_in_color: Determines whether k-means selection clusters on color channels.
+        save_labeled_frames: Determines whether to also save each frame with the model's predictions drawn on it.
+        copy_videos: Determines whether newly added videos are copied rather than symlinked.
         worker_count: The requested extraction worker count, or -1 to resolve automatically.
         cores_per_worker: The requested cores per worker, or -1 to spread them evenly.
         reserved_core_count: The number of cores to leave free.
         minimum_progress_interval: The minimum interval between progress lines when the output is not a TTY.
-        display_progress: Whether to render the run header and progress bar.
+        display_progress: Determines whether to render the run header and progress bar.
         total_video_count: The total number of videos considered, for the summary.
         unanalyzed_videos: The unanalyzed videos, for the summary.
         detection_errors: The detection-phase failures, extended with any extraction failures.
@@ -741,9 +759,11 @@ def _load_sliced_predictions(
     """
     video_stem = Path(video).stem
     predictions, _, _, _ = auxiliaryfunctions.load_analyzed_data(
-        video_predictions_directory, video_stem, scorer, track_method=tracking_method
+        folder=video_predictions_directory, videoname=video_stem, scorer=scorer, track_method=tracking_method
     )
-    metadata = auxiliaryfunctions.load_video_metadata(video_predictions_directory, video_stem, scorer)
+    metadata = auxiliaryfunctions.load_video_metadata(
+        folder=video_predictions_directory, videoname=video_stem, scorer=scorer
+    )
     frame_count = len(predictions)
     start_index = max(int(np.floor(frame_count * configuration["start"])), 0)
     stop_index = min(int(np.ceil(frame_count * configuration["stop"])), frame_count)
@@ -845,12 +865,12 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
             contextlib.redirect_stderr(null_stream),
         ):
             dlc_outlier_frames.ExtractFramesbasedonPreselection(
-                indices,
-                extraction_algorithm,
-                predictions,
-                video,
-                configuration,
-                config_path,
+                Index=indices,
+                extractionalgorithm=extraction_algorithm,
+                data=predictions,
+                video=video,
+                cfg=configuration,
+                config=config_path,
                 opencv=True,
                 cluster_resizewidth=clustering_resize_width,
                 cluster_color=cluster_in_color,

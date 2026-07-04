@@ -3,47 +3,104 @@
 import re
 from pathlib import Path
 
-# A date is recognized only when it is anchored by an unambiguous signal, never as a lone numeric run, so a name
-# component that happens to contain a year-like number (a token numbered 2019, a "Cohort2020" prefix) or a run of
-# counters (a session_trial_rep triple) is not mistaken for a date and dropped. Two anchors are trusted: a full
-# four-digit year ``(19|20)YY``, and an alphabetic month name (``Jan``, ``September``). Every supported span carries one
-# of these anchors, so purely two-digit numeric dates are left to the pattern override rather than guessed at. Grouping
-# only needs to locate and remove the date, not read it, so day-first and month-first orders are both accepted wherever
-# they cannot be told apart: the same components are stripped either way.
-_YEAR = r"(?:19|20)\d{2}"
-_MONTH = r"(?:0[1-9]|1[0-2])"
-_DAY = r"(?:0[1-9]|[12]\d|3[01])"
-_DAY_LOOSE = r"(?:0?[1-9]|[12]\d|3[01])"
-_MONTH_NAMES = (
+# A date is recognized only when it is anchored by an unambiguous signal, never by a lone numeric run. A name
+# component that merely contains a year-like number (a token numbered 2019, a "Cohort2020" prefix) or a run of
+# counters (a session_trial_rep triple) is therefore preserved rather than mistaken for a date. Two anchors are
+# trusted: a full four-digit year and an alphabetic month name. Every supported span carries one of these, so purely
+# two-digit numeric dates are left to the pattern override. Grouping only locates and removes the date, so day-first
+# and month-first orders are both accepted wherever they cannot be told apart.
+_YEAR: str = r"(?:19|20)\d{2}"
+"""Matches a full four-digit year in the 1900s or 2000s."""
+_MONTH: str = r"(?:0[1-9]|1[0-2])"
+"""Matches a zero-padded two-digit month (01-12)."""
+_DAY: str = r"(?:0[1-9]|[12]\d|3[01])"
+"""Matches a zero-padded two-digit day of month (01-31)."""
+_DAY_LOOSE: str = r"(?:0?[1-9]|[12]\d|3[01])"
+"""Matches a one- or two-digit day of month (1-31), with optional zero padding."""
+_MONTH_NAMES: str = (
     r"January|February|March|April|May|June|July|August|September|October|November|December|"
     r"Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept|Sep|Oct|Nov|Dec"
 )
+"""Alternation of the full and abbreviated English month names."""
 
-# Single all-digit component spanning one index: a compact ``YYYYMMDD`` run at the start (any trailing time digits are
-# ignored), or an eight-digit ``DDMMYYYY``/``MMDDYYYY`` run whose trailing four digits are a year.
-_COMPACT_YEAR_FIRST = re.compile(rf"^{_YEAR}{_MONTH}{_DAY}")
-_COMPACT_YEAR_LAST = re.compile(rf"^(?:{_MONTH}{_DAY}|{_DAY}{_MONTH}){_YEAR}$")
+_COMPACT_YEAR_FIRST: re.Pattern[str] = re.compile(rf"^{_YEAR}{_MONTH}{_DAY}")
+"""Matches a compact ``YYYYMMDD`` run at the start of a component, ignoring any trailing time digits."""
+_COMPACT_YEAR_LAST: re.Pattern[str] = re.compile(rf"^(?:{_MONTH}{_DAY}|{_DAY}{_MONTH}){_YEAR}$")
+"""Matches an eight-digit ``DDMMYYYY`` or ``MMDDYYYY`` run whose trailing four digits are a year."""
 
-# A single fused alphanumeric component carrying a month name and a full year, with an optional day, in any of the
-# component orders that keep the name and the year adjacent to the month (``15Jan2024``, ``Jan2024``, ``2024Jan15``).
-_FUSED_NAMED_DATE = re.compile(
+_FUSED_NAMED_DATE: re.Pattern[str] = re.compile(
     rf"^(?:{_DAY_LOOSE}(?:{_MONTH_NAMES}){_YEAR}"
     rf"|(?:{_MONTH_NAMES}){_DAY_LOOSE}?{_YEAR}"
     rf"|{_YEAR}(?:{_MONTH_NAMES}){_DAY_LOOSE}?)$",
     re.IGNORECASE,
 )
+"""Matches a single fused component carrying a month name and a full year with an optional day, in any order that keeps
+the name and the year adjacent to the month (``15Jan2024``, ``Jan2024``, ``2024Jan15``)."""
 
-# Whole-component matchers used to classify the pieces of a delimiter-separated date.
-_YEAR_PIECE = re.compile(rf"^{_YEAR}$")
-_MONTH_PIECE = re.compile(rf"^{_MONTH}$")
-_DAY_PIECE = re.compile(rf"^{_DAY}$")
-_DAY_LOOSE_PIECE = re.compile(rf"^{_DAY_LOOSE}$")
-_TWO_DIGIT_PIECE = re.compile(r"^\d\d$")
-_MONTH_NAME_PIECE = re.compile(rf"^(?:{_MONTH_NAMES})$", re.IGNORECASE)
+_YEAR_PIECE: re.Pattern[str] = re.compile(rf"^{_YEAR}$")
+"""Matches a whole component that is exactly a four-digit year."""
+_MONTH_PIECE: re.Pattern[str] = re.compile(rf"^{_MONTH}$")
+"""Matches a whole component that is exactly a two-digit month."""
+_DAY_PIECE: re.Pattern[str] = re.compile(rf"^{_DAY}$")
+"""Matches a whole component that is exactly a two-digit day."""
+_DAY_LOOSE_PIECE: re.Pattern[str] = re.compile(rf"^{_DAY_LOOSE}$")
+"""Matches a whole component that is exactly a one- or two-digit day."""
+_TWO_DIGIT_PIECE: re.Pattern[str] = re.compile(r"^\d\d$")
+"""Matches a whole component that is exactly two digits, used for a two-digit year beside a month name."""
+_MONTH_NAME_PIECE: re.Pattern[str] = re.compile(rf"^(?:{_MONTH_NAMES})$", re.IGNORECASE)
+"""Matches a whole component that is exactly a full or abbreviated month name."""
+
+
+def group_videos(videos: list[str], group_by_pattern: str | None = None) -> dict[str, list[str]]:
+    """Groups video paths that share the same non-date file-name components, preserving first-seen order per group.
+
+    Each video is keyed either by a caller-supplied regular expression or, by default, by the structural inference in
+    ``_infer_group_key``. A video the inference cannot key (no recognizable date) becomes its own group, so an unusual
+    file name never collapses the rest of the project. Supplying ``group_by_pattern`` overrides the inference entirely
+    for conventions it does not cover (two-digit-year numeric dates, session counters, and similar).
+
+    Args:
+        videos: The candidate video paths to group.
+        group_by_pattern: A regular expression whose first capturing group names the group for each video's stem, or
+            the whole match when the pattern has no capturing groups or its first group did not participate in the
+            match. A stem the pattern fails to match is keyed by its full stem, forming its own group. Set to None to
+            infer the key structurally from the file-name date span.
+
+    Returns:
+        A mapping of grouping key to the list of that group's video paths, in first-seen order.
+
+    Raises:
+        ValueError: If ``group_by_pattern`` is not a valid regular expression.
+    """
+    compiled = None
+    if group_by_pattern is not None:
+        try:
+            compiled = re.compile(group_by_pattern)
+        except re.error as error:
+            message = f"Unable to group videos. The group-by pattern is not a valid regular expression: {error}."
+            raise ValueError(message) from error
+
+    groups: dict[str, list[str]] = {}
+    for video in videos:
+        stem = Path(video).stem
+        if compiled is not None:
+            match = compiled.search(stem)
+            if match is None:
+                key = stem
+            elif match.groups() and match.group(1) is not None:
+                # A non-participating optional group (for example "M(\\d+)?" against "Mouse") yields a None group, so
+                # fall through to the whole match rather than keying the video under None.
+                key = match.group(1)
+            else:
+                key = match.group(0) or stem
+        else:
+            key = _infer_group_key(stem) or stem
+        groups.setdefault(key, []).append(video)
+    return groups
 
 
 def _infer_group_key(stem: str) -> str | None:
-    """Infers a grouping key from a video's file-name stem from its non-date components.
+    """Infers a grouping key for a video from the non-date components of its file-name stem.
 
     Splits the stem into delimiter-bounded components (leaving fused alphanumeric tokens such as ``M01`` or ``MF11``
     intact), locates the first date span, and joins the components on the identity side of that date with an underscore.
@@ -55,9 +112,9 @@ def _infer_group_key(stem: str) -> str | None:
 
     Notes:
         A span is recognized only when it is anchored by a full four-digit year or an alphabetic month name, never by a
-        bare numeric run, so a component that contains a year-like value or a run of counters is preserved rather than
-        treated as a date boundary. Supported spans cover compact ``YYYYMMDD`` and ``DDMMYYYY``/``MMDDYYYY`` runs,
-        year-first and year-last numeric triples, and named-month dates both fused (``15Jan2024``) and delimited
+        bare numeric run. A component that only contains a year-like value or a run of counters is therefore preserved
+        rather than treated as a date boundary. Supported spans cover compact ``YYYYMMDD`` and ``DDMMYYYY``/``MMDDYYYY``
+        runs, year-first and year-last numeric triples, and named-month dates both fused (``15Jan2024``) and delimited
         (``2024_January_15``). Because grouping only removes the date, day-first and month-first orders are both
         accepted. Two-digit-year numeric dates and other schemes are left to the pattern override in ``group_videos``.
 
@@ -231,51 +288,3 @@ def _is_fused_named_date_piece(piece: str) -> bool:
         ``2024Jan15``.
     """
     return bool(_FUSED_NAMED_DATE.match(piece))
-
-
-def group_videos(videos: list[str], group_by_pattern: str | None = None) -> dict[str, list[str]]:
-    """Groups video paths that share the same non-date file-name components, preserving first-seen order per group.
-
-    Each video is keyed either by a caller-supplied regular expression or, by default, by the structural inference in
-    ``_infer_group_key``. A video the inference cannot key (no recognizable date) becomes its own group, so an unusual
-    file name never collapses the rest of the project. Supplying ``group_by_pattern`` overrides the inference entirely
-    for conventions it does not cover (two-digit-year numeric dates, session counters, and similar).
-
-    Args:
-        videos: The candidate video paths to group.
-        group_by_pattern: A regular expression whose first capturing group names the group for each video's stem, or
-            the whole match when the pattern has no capturing groups or its first group did not participate in the
-            match. A stem the pattern fails to match is keyed by its full stem, forming its own group. Set to None to
-            infer the key structurally from the file-name date span.
-
-    Returns:
-        A mapping of grouping key to the list of that group's video paths, in first-seen order.
-
-    Raises:
-        ValueError: If ``group_by_pattern`` is not a valid regular expression.
-    """
-    compiled = None
-    if group_by_pattern is not None:
-        try:
-            compiled = re.compile(group_by_pattern)
-        except re.error as error:
-            message = f"Unable to group videos. The group-by pattern is not a valid regular expression: {error}."
-            raise ValueError(message) from error
-
-    groups: dict[str, list[str]] = {}
-    for video in videos:
-        stem = Path(video).stem
-        if compiled is not None:
-            match = compiled.search(stem)
-            if match is None:
-                key = stem
-            elif match.groups() and match.group(1) is not None:
-                # A non-participating optional group (for example "M(\\d+)?" against "Mouse") yields a None group, so
-                # fall through to the whole match rather than keying the video under None.
-                key = match.group(1)
-            else:
-                key = match.group(0) or stem
-        else:
-            key = _infer_group_key(stem) or stem
-        groups.setdefault(key, []).append(video)
-    return groups

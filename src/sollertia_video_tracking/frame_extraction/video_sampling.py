@@ -123,7 +123,6 @@ def plan_video_sampling(
             random_seed=random_seed,
         )
     else:
-        # A single uniform draw over the not-yet-extracted candidates.
         generator = Random(random_seed)  # noqa: S311 -- video sampling is not security-sensitive.
         selected_videos = tuple(generator.sample(unextracted_videos, needed_video_count))
 

@@ -3,6 +3,7 @@
 import os
 import sys
 import math
+import shutil
 from typing import Any
 from pathlib import Path
 import traceback
@@ -15,7 +16,11 @@ import deeplabcut
 import deeplabcut.utils.frameselectiontools as frame_selection_tools
 
 from .progress import make_progress_reporter
-from .utilities import iter_pinned_extraction, normalize_project_config
+from .utilities import (
+    iter_pinned_extraction,
+    normalize_project_config,
+    prune_empty_labeled_data_directories,
+)
 from .cpu_allocation import DEFAULT_RESERVED_CORE_COUNT, plan_core_allocation
 from .video_grouping import group_videos
 from .video_sampling import VideoSamplingPlan, plan_video_sampling
@@ -119,6 +124,9 @@ def extract_frames_kmeans(
         alongside its frames. The ``random_seed`` controls only the random choice of videos, not the frames within a
         video.
 
+        Empty ``labeled-data`` folders left by videos that were registered but never extracted are removed after every
+        run, so the labeling GUI shows only the videos that have frames.
+
     Args:
         config_path: The path to the DeepLabCut project's config.yaml.
         clustering_stride: The clustering stride passed to DeepLabCut as ``cluster_step``; every Nth frame is sampled,
@@ -132,10 +140,10 @@ def extract_frames_kmeans(
             extracted videos. Set to -1 to extract every selected video instead of sampling toward a budget.
         random_seed: The seed for the random video sampling. Set to None to draw a different subset each run, or to an
             integer to make the selection reproducible.
-        balance_groups: Whether to balance the budgeted sampling across groups rather than drawing uniformly, so every
-            group is represented and coverage evens out across repeated passes. The group of each video is inferred from
-            its file name, with videos that share their non-date name components grouped together. Only affects the run
-            when ``total_frame_budget`` is set.
+        balance_groups: Determines whether the budgeted sampling is balanced across groups rather than drawn
+            uniformly, so every group is represented and coverage evens out across repeated passes. The group of each
+            video is inferred from its file name, with videos that share their non-date name components grouped
+            together. Only affects the run when ``total_frame_budget`` is set.
         group_by_pattern: A regular expression whose first capturing group names the group for each video's file-name
             stem, overriding the built-in inference for naming schemes it does not cover. Setting it implies
             ``balance_groups``.
@@ -148,9 +156,9 @@ def extract_frames_kmeans(
         overwrite: Determines whether to re-extract videos whose labeled-data directory already contains frames.
             Re-extraction deletes the existing ``img*.png`` frames in each affected directory and the matching
             ``CollectedData`` labels, which the new frames would otherwise orphan. Mutually exclusive with ``reset``.
-        reset: Determines whether to discard all extracted frames and their labels across the selection and
-            re-extract from scratch. This permanently deletes the extracted frames and any labels in every selected
-            video folder. Mutually exclusive with ``overwrite``.
+        reset: Determines whether to discard every selected video's extracted frames and re-extract from scratch. This
+            permanently deletes each selected video's entire ``labeled-data`` folder, including its extracted frames
+            and labels, leaving no empty folder behind. Mutually exclusive with ``overwrite``.
         path_filters: The substrings used to restrict the run to videos whose path contains any of them. An empty
             tuple selects every video in the project.
         minimum_progress_interval: The minimum interval, in seconds, between progress lines when the output is not a
@@ -164,10 +172,10 @@ def extract_frames_kmeans(
 
     Raises:
         FileNotFoundError: If ``config_path`` does not point to an existing file.
-        ValueError: If ``frames_per_video`` or ``total_frame_budget`` is set below one (other than the -1 sentinel), if
-            ``overwrite`` and ``reset`` are both set, if budgeted sampling is requested without a valid
-            ``numframes2pick``, if config.yaml defines no ``video_sets``, or if no videos in config.yaml match
-            ``path_filters``.
+        ValueError: If ``overwrite`` and ``reset`` are both set, or if ``frames_per_video`` or ``total_frame_budget``
+            is set below one (other than the -1 sentinel). Also raised when budgeted sampling is requested without a
+            valid ``numframes2pick``, when config.yaml defines no ``video_sets``, or when no videos in config.yaml
+            match ``path_filters``.
     """
     config_path = config_path.resolve()
     if overwrite and reset:
@@ -202,15 +210,15 @@ def extract_frames_kmeans(
 
     project_directory_path = config_path.parent
     if reset:
-        cleared = sum(
-            1 for video in videos if any((project_directory_path / "labeled-data" / Path(video).stem).glob("img*.png"))
-        )
+        reset_directories = [project_directory_path / "labeled-data" / Path(video).stem for video in videos]
+        cleared = sum(1 for directory in reset_directories if directory.exists())
         sys.stderr.write(
-            f"WARNING: --reset is deleting all extracted frames and labels from {cleared} video folder(s).\n"
+            f"WARNING: --reset is removing {cleared} labeled-data video folder(s), including all their extracted "
+            f"frames and labels.\n"
         )
         sys.stderr.flush()
-        for video in videos:
-            _clear_extracted_data(output_directory=project_directory_path / "labeled-data" / Path(video).stem)
+        for directory in reset_directories:
+            _remove_labeled_data_directory(directory=directory)
 
     if total_frame_budget == -1 and (balance_groups or group_by_pattern is not None or always_include_videos):
         sys.stderr.write(
@@ -248,6 +256,7 @@ def extract_frames_kmeans(
         )
         _report_sampling_plan(plan=plan)
         if not plan.selected_videos:
+            prune_empty_labeled_data_directories(project_directory_path, display_progress=display_progress)
             return FrameExtractionSummary(
                 extracted_video_count=0,
                 skipped_video_count=0,
@@ -331,6 +340,7 @@ def extract_frames_kmeans(
         else:
             errors.append((video, status))
 
+    prune_empty_labeled_data_directories(project_directory_path, display_progress=display_progress)
     return FrameExtractionSummary(
         extracted_video_count=extracted_count,
         skipped_video_count=skipped_count,
@@ -363,7 +373,7 @@ def _report_plan(
     Args:
         video_count: The number of videos selected for the run.
         configured_frames_per_video: The resolved ``numframes2pick`` value from config.yaml.
-        clustering_stride: The clustering stride.
+        clustering_stride: The stride, in frames, between the frames sampled for clustering.
         clustering_resize_width: The downsample width applied before clustering.
         cluster_in_color: Determines whether clustering runs on color channels.
         worker_count: The resolved number of concurrent workers.
@@ -496,6 +506,19 @@ def _clear_extracted_data(output_directory: Path) -> None:
     for pattern in _REEXTRACTION_ARTIFACT_PATTERNS:
         for target in output_directory.glob(pattern):
             target.unlink()
+
+
+def _remove_labeled_data_directory(directory: Path) -> None:
+    """Deletes a video's entire labeled-data directory, including its extracted frames, labels, and the folder itself.
+
+    The reset workflow starts a video's extraction over from scratch, so the whole folder is removed rather than only
+    its known artifacts, leaving no empty directory behind for the labeler to sift through.
+
+    Args:
+        directory: The ``labeled-data/<video>`` directory to remove.
+    """
+    if directory.exists():
+        shutil.rmtree(directory)
 
 
 def _count_clustering_frames(

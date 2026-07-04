@@ -1,11 +1,20 @@
 """Provides the outlier-frame detection algorithms that flag candidate frames from a video's DeepLabCut predictions."""
 
+from __future__ import annotations
+
 from enum import StrEnum
+from typing import TYPE_CHECKING
 import warnings
 
 import numpy as np
-import pandas as pd
 from deeplabcut.refine_training_dataset.outlier_frames import FitSARIMAXModel
+
+if TYPE_CHECKING:
+    import pandas as pd
+    from numpy.typing import NDArray
+
+type KeypointSeries = tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]
+"""One keypoint's per-frame horizontal positions, vertical positions, and confidences, as three float arrays."""
 
 
 class OutlierAlgorithm(StrEnum):
@@ -72,7 +81,7 @@ def jump_outlier_indices(predictions: pd.DataFrame, pixel_distance_threshold: fl
     return predictions.index[(per_bodypart > pixel_distance_threshold**2).any(axis=1)].tolist()
 
 
-def fitting_keypoint_series(predictions: pd.DataFrame) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+def fitting_keypoint_series(predictions: pd.DataFrame) -> list[KeypointSeries]:
     """Splits a prediction table into per-keypoint position-and-confidence trajectories for SARIMAX fitting.
 
     Notes:
@@ -101,14 +110,14 @@ def fitting_keypoint_series(predictions: pd.DataFrame) -> list[tuple[np.ndarray,
 
 
 def fit_keypoint_distance(
-    horizontal_positions: np.ndarray,
-    vertical_positions: np.ndarray,
-    confidences: np.ndarray,
+    horizontal_positions: NDArray[np.float64],
+    vertical_positions: NDArray[np.float64],
+    confidences: NDArray[np.float64],
     minimum_confidence: float,
     significance_level: float,
     autoregressive_degree: int,
     moving_average_degree: int,
-) -> np.ndarray:
+) -> NDArray[np.float64]:
     """Fits a SARIMAX model to one keypoint's trajectory and returns its per-frame deviation from the fit.
 
     Notes:
@@ -135,20 +144,20 @@ def fit_keypoint_distance(
         warnings.simplefilter("ignore")
         try:
             mean_x, _ = FitSARIMAXModel(
-                horizontal_positions,
-                confidences,
-                minimum_confidence,
-                significance_level,
-                autoregressive_degree,
-                moving_average_degree,
+                x=horizontal_positions,
+                p=confidences,
+                pcutoff=minimum_confidence,
+                alpha=significance_level,
+                ARdegree=autoregressive_degree,
+                MAdegree=moving_average_degree,
             )
             mean_y, _ = FitSARIMAXModel(
-                vertical_positions,
-                confidences,
-                minimum_confidence,
-                significance_level,
-                autoregressive_degree,
-                moving_average_degree,
+                x=vertical_positions,
+                p=confidences,
+                pcutoff=minimum_confidence,
+                alpha=significance_level,
+                ARdegree=autoregressive_degree,
+                MAdegree=moving_average_degree,
             )
         except Exception:  # noqa: BLE001 -- a keypoint whose fit raises yields NaN, like one with too few points.
             return np.full(horizontal_positions.shape, np.nan, dtype=float)
@@ -156,7 +165,7 @@ def fit_keypoint_distance(
 
 
 def fitting_outlier_indices(
-    keypoint_deviations: list[np.ndarray], frames_per_video_count: int, pixel_distance_threshold: float
+    keypoint_deviations: list[NDArray[np.float64]], frames_per_video_count: int, pixel_distance_threshold: float
 ) -> list[int]:
     """Selects outlier frames from per-keypoint SARIMAX deviations, averaging across keypoints as DeepLabCut does.
 

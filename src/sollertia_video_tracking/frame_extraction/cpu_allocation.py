@@ -23,10 +23,13 @@ def plan_core_allocation(
 
     Partitions the usable cores (total minus reserved) into one disjoint block per worker, so the running workers
     occupy the usable cores without oversubscribing them. When both the worker count and cores-per-worker are left
-    automatic, the worker count is capped so each worker holds a roughly saturating core block rather than spreading
-    the cores thin across more, throttled workers; any remaining videos run in later waves. An explicit cores-per-worker
-    instead sizes an automatic worker count to give each worker exactly that many cores. Explicit worker or core counts
-    are honored as given and may overlap only within the usable band, leaving the reserved cores free regardless.
+    automatic, each worker is given a roughly saturating core block and only as many workers run as the selected
+    videos need. The full core budget is therefore deployed only when there are enough videos to fill it, and any
+    remaining videos run in later waves. When more videos than full blocks remain and the budget does not divide
+    evenly, one extra worker runs on the leftover cores as a smaller block so the whole budget is used. An explicit
+    cores-per-worker instead sizes an automatic worker count to give each worker exactly that many cores, while an
+    explicit worker count spreads the usable cores evenly across those workers. Explicit counts are honored as given
+    and may overlap only within the usable band, leaving the reserved cores free regardless.
 
     Notes:
         DeepLabCut reads a single video's frames in one serial Python loop that cannot be sped up, but each frame's
@@ -37,7 +40,9 @@ def plan_core_allocation(
         video_count: The number of videos that will be processed.
         total_core_count: The total number of CPU cores available on the machine.
         worker_count: The requested number of concurrent workers, or -1 to resolve the count automatically.
-        cores_per_worker: The requested number of cores per worker, or -1 to spread the usable cores evenly.
+        cores_per_worker: The requested number of cores per worker. Set to -1 to give each worker a saturating core
+            block when the worker count is automatic, or to split the usable cores evenly across an explicit worker
+            count.
         reserved_core_count: The number of cores to leave free for other tasks.
 
     Returns:
@@ -47,14 +52,31 @@ def plan_core_allocation(
 
     if cores_per_worker < 1:
         if worker_count < 1:
-            # Prefers saturated workers: runs only as many as can each hold a saturating block, leaving any remaining
-            # videos for subsequent waves.
-            worker_count = min(video_count, max(1, usable_core_count // _SATURATING_CORES_PER_WORKER))
-        worker_count = max(1, min(worker_count, video_count))
-        base_cores_per_worker, remainder = divmod(usable_core_count, worker_count)
-        per_worker_core_counts = [
-            max(1, base_cores_per_worker + (1 if worker < remainder else 0)) for worker in range(worker_count)
-        ]
+            # Automatic worker and core counts: give each worker a saturating core block and run only as many workers
+            # as the selected videos need, so the full budget is deployed solely when there are enough videos to fill
+            # it. When more videos than full blocks remain and the budget does not divide evenly, one extra worker
+            # takes the leftover cores as a smaller block.
+            full_worker_count = usable_core_count // _SATURATING_CORES_PER_WORKER
+            if full_worker_count == 0:
+                worker_count = 1
+                per_worker_core_counts = [usable_core_count]
+            elif video_count <= full_worker_count:
+                worker_count = max(1, video_count)
+                per_worker_core_counts = [_SATURATING_CORES_PER_WORKER] * worker_count
+            else:
+                worker_count = full_worker_count
+                per_worker_core_counts = [_SATURATING_CORES_PER_WORKER] * full_worker_count
+                leftover_core_count = usable_core_count - full_worker_count * _SATURATING_CORES_PER_WORKER
+                if leftover_core_count > 0 and video_count > full_worker_count:
+                    worker_count += 1
+                    per_worker_core_counts.append(leftover_core_count)
+        else:
+            # Explicit worker count with automatic cores: spread the usable cores evenly across the workers.
+            worker_count = max(1, min(worker_count, video_count))
+            base_cores_per_worker, remainder = divmod(usable_core_count, worker_count)
+            per_worker_core_counts = [
+                max(1, base_cores_per_worker + (1 if worker < remainder else 0)) for worker in range(worker_count)
+            ]
     else:
         if worker_count < 1:
             worker_count = max(1, usable_core_count // cores_per_worker)

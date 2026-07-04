@@ -1,5 +1,6 @@
 """Provides the shared assets the k-means and outlier frame-extraction pipelines both build on."""
 
+import sys
 from typing import Any
 from pathlib import Path
 from collections.abc import Callable, Iterator
@@ -44,7 +45,7 @@ def normalize_project_config(config_path: Path, *, frames_per_video: int, error_
         config_changed = True
     if config_changed:
         with config_path.open("w") as config_file:
-            yaml.dump(configuration, config_file)
+            yaml.dump(data=configuration, stream=config_file)
     return configuration
 
 
@@ -59,7 +60,7 @@ def iter_pinned_extraction(
     minimum_progress_interval: float,
     display_progress: bool,
 ) -> Iterator[tuple[str, int, str]]:
-    """Runs the extraction workers over a pinned process pool, yielding each video's ``(path, written, status)`` result.
+    """Runs the workers over a pinned process pool, yielding each ``(video_path, frames_written, status)`` result.
 
     Owns the spawn context, the manager-backed progress and core-set queues, and the aggregate progress bar, so both
     pipelines share one worker-pool lifecycle. Each worker claims its assigned core block for CPU-affinity pinning
@@ -72,12 +73,12 @@ def iter_pinned_extraction(
         videos: The ordered video paths, used to map each result back to its progress-bar slot.
         make_tasks: A callable that builds the worker task tuples, receiving the progress queue when progress is
             displayed or None when it is not.
-        worker: The per-video worker callable applied to each task, returning ``(video, frames_written, status)``.
+        worker: The per-video worker callable applied to each task, returning ``(video_path, frames_written, status)``.
         worker_count: The resolved number of concurrent workers.
         core_sets: The per-worker core-id sets the workers are pinned across.
         frame_totals: The mapping of video index to that video's frame contribution, driving the aggregate bar.
         minimum_progress_interval: The minimum interval, in seconds, between progress lines when output is not a TTY.
-        display_progress: Whether to render the aggregate progress bar and stream progress to it.
+        display_progress: Determines whether the aggregate progress bar is rendered and progress is streamed to it.
 
     Yields:
         Each worker's ``(video_path, frames_written, status)`` result, in completion order.
@@ -101,7 +102,7 @@ def iter_pinned_extraction(
         with context.Pool(processes=worker_count, initializer=pin_worker_to_cores, initargs=(core_set_queue,)) as pool:
             if display_progress:
                 bar.start()
-            for video, written, status in pool.imap_unordered(worker, tasks):
+            for video, written, status in pool.imap_unordered(func=worker, iterable=tasks):
                 yield video, written, status
                 if display_progress:
                     progress_queue.put(("done", video_indices[video]))
@@ -110,3 +111,31 @@ def iter_pinned_extraction(
             bar.stop()
             bar.join(timeout=3)
         manager.shutdown()
+
+
+def prune_empty_labeled_data_directories(project_directory: Path, *, display_progress: bool = False) -> int:
+    """Removes empty per-video folders from the project's labeled-data tree so unlabeled videos do not clutter it.
+
+    A project may register many videos upfront while only a subset has frames extracted, and DeepLabCut leaves an
+    empty labeled-data folder for every registered video that was not sampled. Deleting the folders that hold no
+    extracted frames keeps the labeling GUI focused on the videos that actually have frames to label.
+
+    Args:
+        project_directory: The DeepLabCut project directory that holds the labeled-data tree.
+        display_progress: Determines whether the number of pruned folders is reported to the standard error stream.
+
+    Returns:
+        The number of empty labeled-data folders removed.
+    """
+    labeled_data_directory = project_directory / "labeled-data"
+    if not labeled_data_directory.exists():
+        return 0
+    removed_count = 0
+    for directory in sorted(labeled_data_directory.iterdir()):
+        if directory.is_dir() and not any(directory.iterdir()):
+            directory.rmdir()
+            removed_count += 1
+    if display_progress and removed_count:
+        sys.stderr.write(f"pruned {removed_count} empty labeled-data folder(s)\n")
+        sys.stderr.flush()
+    return removed_count
