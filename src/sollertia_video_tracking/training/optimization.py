@@ -179,6 +179,16 @@ def resolve_optimization_profile(
     base_device, resolved_gpus = _resolve_target_device(device=device, gpus=gpus)
     strategy = _resolve_multi_gpu(multi_gpu=multi_gpu, gpus=resolved_gpus)
     amp_dtype, use_gradient_scaler = _resolve_amp(amp=amp, device=base_device, gpus=resolved_gpus)
+    if strategy == "dp" and amp_dtype is not None:
+        # Mixed precision cannot take effect under DataParallel: autocast state is thread-local and does not reach the
+        # per-GPU replica threads DataParallel spawns, so the forward runs in float32 regardless. Disable it here so
+        # the resolved profile reports the precision that actually runs and drops the then-pointless gradient scaler.
+        _warn(
+            "Mixed precision has no effect under DataParallel (--multi-gpu dp) because autocast does not reach its "
+            "per-GPU replica threads; training would run in float32. Disabling mixed precision. Use DDP (the default "
+            "when two or more GPUs are selected) to combine mixed precision with multi-GPU training."
+        )
+        amp_dtype, use_gradient_scaler = None, False
 
     on_cuda = base_device == "cuda"
     resolved_tf32 = _resolve_toggle(value=tf32, auto=_resolve_tf32_support(resolved_gpus)) if on_cuda else False

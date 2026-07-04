@@ -11,6 +11,7 @@ from deeplabcut.core.engine import Engine
 from deeplabcut.core.weight_init import WeightInitialization
 from deeplabcut.generate_training_dataset import (
     create_training_dataset as dlc_create_training_dataset,
+    get_existing_shuffle_indices,
     create_training_dataset_from_existing_split as dlc_create_training_dataset_from_existing_split,
 )
 from deeplabcut.pose_estimation_pytorch.config.utils import available_models, available_detectors
@@ -258,6 +259,18 @@ def create_training_dataset(
             weight_init=weight_init,
             ctd_conditions=ctd_conditions,
         )
+
+    # DeepLabCut silently returns without creating the shuffle when it finds no labeled data to build it from (for
+    # example, every labeled frame was annotated by a scorer other than the one named in the project configuration, or
+    # no frames are annotated yet). Confirm the shuffle now exists so a success summary is never reported for a no-op.
+    if shuffle not in get_existing_shuffle_indices(str(config)):
+        message = (
+            f"Unable to create the training dataset for shuffle {shuffle}. DeepLabCut created no shuffle, which "
+            f"usually means it found no labeled data to build it from (for example, every labeled frame was annotated "
+            f"by a scorer other than the one named in the project configuration, or no frames are annotated yet). "
+            f"Review the DeepLabCut output above for details."
+        )
+        raise ValueError(message)
 
     if weight_init is None:
         weight_init_description = "imagenet"

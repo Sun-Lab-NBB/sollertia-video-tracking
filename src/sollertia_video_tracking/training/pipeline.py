@@ -356,17 +356,26 @@ def _plan_training_tasks(loader: DLCLoader) -> tuple[str, ...]:
     return tuple(tasks)
 
 
-def _resolve_process_placement(profile: OptimizationProfile, rank: int) -> tuple[str, list[int] | None, bool, int]:
+def _resolve_process_placement(
+    profile: OptimizationProfile, rank: int, task: Task | None = None
+) -> tuple[str, list[int] | None, bool, int]:
     """Resolves the device, GPU indices, DDP flag, and local rank the runner uses for one training process.
 
     Args:
         profile: The resolved optimization profile.
         rank: The global rank of this process.
+        task: The task the process is about to train, used to apply task-specific device fallbacks, or None when the
+            placement is only needed for the DDP flag and local rank rather than a task's runner device.
 
     Returns:
         A tuple of the runner device string, the GPU index list (or None), whether DDP is used, and the local rank.
     """
     if profile.device != "cuda":
+        # DeepLabCut cannot train object detectors on MPS (the torchvision NMS and ROI-align ops are unimplemented
+        # there), so fall the detector back to the CPU exactly as deeplabcut.train does, while the pose model may
+        # still train on MPS.
+        if profile.device == "mps" and task == Task.DETECT:
+            return "cpu", None, False, 0
         return profile.device, None, False, 0
     if profile.multi_gpu_strategy == "ddp":
         gpu_index = profile.gpus[rank]
@@ -493,7 +502,7 @@ def _train_single_model(
         maximum_snapshots_to_keep: The maximum number of snapshots to retain, or None to use the configured value.
         progress_queue: The shared monitor queue, or None when progress reporting is disabled.
     """
-    device, gpus, ddp, local_rank = _resolve_process_placement(profile, rank)
+    device, gpus, ddp, local_rank = _resolve_process_placement(profile, rank, task)
     if maximum_snapshots_to_keep is not None:
         run_config["runner"]["snapshots"]["max_snapshots"] = maximum_snapshots_to_keep
 

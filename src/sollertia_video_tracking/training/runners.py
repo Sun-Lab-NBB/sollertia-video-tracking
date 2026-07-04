@@ -112,13 +112,22 @@ class _OptimizedTrainingRunnerMixin(TrainingRunner):
             model = model.module
         return getattr(model, "_orig_mod", model)
 
-    def _build_autocast_context(self) -> AbstractContextManager[None]:
+    def _build_autocast_context(self, *, enabled: bool = True) -> AbstractContextManager[None]:
         """Builds the autocast context for the forward pass and loss, or a no-op context when precision is float32.
 
+        Autocast is a training-throughput optimization only and must be disabled for evaluation forward passes. The
+        code downstream of an evaluation step assumes float32 tensors: the PAF predictor convolves the heatmaps with a
+        float32 Gaussian kernel (a reduced-precision heatmap raises a dtype-mismatch error), and both the pose and the
+        detector runners convert predictions to NumPy, which has no bfloat16 dtype. Evaluation also runs on the main
+        process alone over the small labeled set, so the mixed-precision speed-up would be immaterial there anyway.
+
+        Args:
+            enabled: Whether mixed precision may be enabled; pass False to force a no-op context (e.g. for evaluation).
+
         Returns:
-            A context manager that enables mixed precision on the runner's device when configured.
+            A context manager that enables mixed precision on the runner's device when configured and enabled.
         """
-        if self._amp_dtype is None:
+        if self._amp_dtype is None or not enabled:
             return nullcontext()
         device_type = "cuda" if str(self.device).startswith("cuda") else str(self.device)
         return torch.autocast(device_type=device_type, dtype=self._amp_dtype)
@@ -328,7 +337,7 @@ class _OptimizedPoseTrainingRunner(_OptimizedTrainingRunnerMixin, PoseTrainingRu
 
         inputs = batch["image"].to(self.device).float()
         underlying_model = self._unwrap()
-        with self._build_autocast_context():
+        with self._build_autocast_context(enabled=mode == "train"):
             if "cond_keypoints" in batch["context"]:
                 outputs = self.model(inputs, cond_kpts=batch["context"]["cond_keypoints"])
             else:
@@ -407,7 +416,7 @@ class _OptimizedDetectorTrainingRunner(_OptimizedTrainingRunnerMixin, DetectorTr
                 if item[key] is not None:
                     item[key] = item[key].to(self.device)
 
-        with self._build_autocast_context():
+        with self._build_autocast_context(enabled=mode == "train"):
             losses, predictions = self.model(images, target)
 
         # Losses are only returned during training, not evaluation.

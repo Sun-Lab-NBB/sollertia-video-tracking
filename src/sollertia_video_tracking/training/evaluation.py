@@ -26,8 +26,10 @@ import numpy as np
 import polars as pl
 import deeplabcut
 from ruamel.yaml import YAML
+from deeplabcut.utils import auxiliaryfunctions
 from deeplabcut.core.metrics.api import prepare_evaluation_data
-from deeplabcut.pose_estimation_pytorch.data import DLCLoader
+from deeplabcut.core.weight_init import WeightInitialization
+from deeplabcut.pose_estimation_pytorch.data import DLCLoader, PoseDatasetParameters
 from deeplabcut.pose_estimation_pytorch.task import Task
 from deeplabcut.core.metrics.distance_metrics import match_predictions_for_rmse
 from deeplabcut.pose_estimation_pytorch.apis.utils import get_model_snapshots, get_inference_runners
@@ -206,6 +208,12 @@ def evaluate_trained_model(
         device=device,
     )
 
+    # The inference runners above are built for the network's own output space. A memory-replay model still predicts
+    # the full SuperAnimal bodypart set, but evaluate() down-converts predictions (and the loader returns ground truth)
+    # in the smaller project bodypart space, so the parameters used for scoring and row accumulation must be realigned
+    # to the project bodyparts to keep the per-keypoint loop in range.
+    parameters = _realign_memory_replay_parameters(loader, parameters)
+
     snapshot_name = pose_snapshot.path.stem
     columns: dict[str, list[Any]] = {name: [] for name in _FEATHER_SCHEMA}
     split_metrics: dict[str, SplitMetrics] = {}
@@ -332,6 +340,38 @@ def _resolve_snapshot(loader: DLCLoader, index: int | str, task: Task, *, requir
     return snapshots[0]
 
 
+def _realign_memory_replay_parameters(loader: DLCLoader, parameters: PoseDatasetParameters) -> PoseDatasetParameters:
+    """Realigns evaluation parameters to the project bodyparts for SuperAnimal memory-replay models.
+
+    A memory-replay model keeps predicting the full SuperAnimal bodypart set, so ``get_dataset_parameters`` reports
+    that full set, but DeepLabCut's ``evaluate`` down-converts predictions to the project's bodypart subset (and the
+    loader returns ground truth in that subset). This rebuilds the parameters in the project bodypart space so the
+    per-keypoint accumulation aligns with the scored predictions, mirroring DeepLabCut's ``evaluate_snapshot``. For all
+    other models the parameters are returned unchanged.
+
+    Args:
+        loader: The loader for the evaluated shuffle.
+        parameters: The dataset parameters reported for the model.
+
+    Returns:
+        The parameters to use for scoring, realigned to the project bodyparts when the shuffle used memory replay.
+    """
+    weight_init_config = loader.model_cfg["train_settings"].get("weight_init")
+    if not weight_init_config:
+        return parameters
+    weight_init = WeightInitialization.from_dict(weight_init_config)
+    if not weight_init.memory_replay:
+        return parameters
+    bodyparts = weight_init.bodyparts
+    if bodyparts is None:
+        bodyparts = auxiliaryfunctions.get_bodyparts(loader.project_cfg)
+    return PoseDatasetParameters(
+        bodyparts=bodyparts,
+        unique_bpts=parameters.unique_bpts,
+        individuals=parameters.individuals,
+    )
+
+
 def _accumulate_split_rows(
     columns: dict[str, list[Any]],
     *,
@@ -407,7 +447,9 @@ def _accumulate_split_rows(
                 columns["error_px"].append(float(errors[keypoint]))
                 columns["above_pcutoff"].append(likelihood >= pcutoff)
                 columns["matched"].append(matched)
-                columns["oks"].append(float(match.oks))
+                # OKS is only meaningful for a matched prediction; an unmatched prediction keeps the match object's
+                # default 0.0, so store NaN instead to honor the "populated only for matched predictions" contract.
+                columns["oks"].append(float(match.oks) if matched else float("nan"))
         if not matched_any:
             unmatched_images += 1
 
