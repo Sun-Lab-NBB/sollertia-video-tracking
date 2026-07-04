@@ -62,8 +62,9 @@ def iter_pinned_extraction(
     """Runs the extraction workers over a pinned process pool, yielding each video's ``(path, written, status)`` result.
 
     Owns the spawn context, the manager-backed progress and core-set queues, and the aggregate progress bar, so both
-    pipelines share one worker-pool lifecycle. Each worker claims a disjoint core block for CPU-affinity pinning. The
-    progress queue is handed to ``make_tasks`` only when progress is displayed (None otherwise), so the workers never
+    pipelines share one worker-pool lifecycle. Each worker claims its assigned core block for CPU-affinity pinning
+    (disjoint in the default allocation; explicit worker/core counts may overlap within the usable band). The progress
+    queue is handed to ``make_tasks`` only when progress is displayed (None otherwise), so the workers never
     stream to a queue nobody drains. The bar and manager are always torn down, even if the caller's consumption of
     the results raises.
 

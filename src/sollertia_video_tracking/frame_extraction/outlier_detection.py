@@ -9,7 +9,11 @@ from deeplabcut.refine_training_dataset.outlier_frames import FitSARIMAXModel
 
 
 class OutlierAlgorithm(StrEnum):
-    """The supported algorithms for flagging likely-wrong frames from a trained model's predictions."""
+    """The supported frame-selection modes.
+
+    ``jump``, ``uncertain``, and ``fitting`` flag likely-wrong frames from a trained model's predictions; ``list``
+    extracts an explicit, caller-supplied index list instead.
+    """
 
     JUMP = "jump"
     """Flags frames in which a bodypart moves further than the pixel threshold from the previous frame."""

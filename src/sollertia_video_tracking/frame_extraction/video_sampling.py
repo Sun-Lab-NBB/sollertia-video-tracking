@@ -58,7 +58,7 @@ def plan_video_sampling(
     Without ``groups`` the additional videos are drawn uniformly at random. With ``groups`` the additional videos are
     balanced across groups by repeatedly assigning the next video to the group with the fewest projected frames
     (counting frames from prior passes). This ensures that every group is represented and coverage evens out over
-    repeated passes. In both modes any ``pinned_videos`` are selected first and always included.
+    repeated passes. In both modes any ``pinned_videos`` are selected first and always included in the draw.
 
     Args:
         videos: The ordered candidate video paths the pass may sample from.
@@ -69,8 +69,9 @@ def plan_video_sampling(
             fixes the random choice of which of a group's videos are sampled.
         groups: A mapping of group to that group's candidate videos, enabling balanced per-group selection. Set to None
             to draw uniformly across all candidates.
-        pinned_videos: The videos to always include, selected before the budgeted draw. Duplicates and already-extracted
-            or unknown entries are ignored.
+        pinned_videos: The videos to include whenever the pass extracts frames — they are skipped entirely if the
+            budget is already met — selected before the budgeted draw. Duplicates and already-extracted or unknown
+            entries are ignored.
 
     Returns:
         A VideoSamplingPlan naming the selected videos and reporting the existing, target, and projected frame counts

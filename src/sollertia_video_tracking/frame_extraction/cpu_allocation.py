@@ -9,7 +9,7 @@ DEFAULT_RESERVED_CORE_COUNT: int = 2
 """The number of CPU cores left free by default for other work while frame extraction is running."""
 
 _SATURATING_CORES_PER_WORKER: int = 4
-"""The number of cores one video's decode keeps busy at high concurrency (measured at ~3.9 across 24 workers)."""
+"""The number of cores one video's decode keeps busy at high concurrency, measured to be close to four."""
 
 
 def plan_core_allocation(
@@ -22,10 +22,11 @@ def plan_core_allocation(
     """Determines how many videos run at once and which cores each worker is pinned to.
 
     Partitions the usable cores (total minus reserved) into one disjoint block per worker, so the running workers
-    occupy the usable cores without oversubscribing them. When the worker count is left automatic, it is capped so
-    each worker receives at least a saturating core budget rather than spreading the cores thin across more, throttled
-    workers; any remaining videos run in later waves. Explicit worker or core counts are honored as given and may
-    overlap only within the usable band, leaving the reserved cores free regardless.
+    occupy the usable cores without oversubscribing them. When both the worker count and cores-per-worker are left
+    automatic, the worker count is capped so each worker holds a roughly saturating core block rather than spreading
+    the cores thin across more, throttled workers; any remaining videos run in later waves. An explicit cores-per-worker
+    instead sizes an automatic worker count to give each worker exactly that many cores. Explicit worker or core counts
+    are honored as given and may overlap only within the usable band, leaving the reserved cores free regardless.
 
     Notes:
         DeepLabCut reads a single video's frames in one serial Python loop that cannot be sped up, but each frame's

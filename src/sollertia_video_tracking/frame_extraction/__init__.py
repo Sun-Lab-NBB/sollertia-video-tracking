@@ -2,7 +2,8 @@
 
 The k-means pipeline clusters raw video to bootstrap a project's training frames; the outlier pipeline reads a trained
 model's predictions and extracts the frames it most likely got wrong to refine the model. Both decode one video per
-worker pinned to a disjoint block of CPU cores and share the same CPU-allocation and progress-reporting logic.
+worker pinned to its own block of CPU cores (disjoint under the default automatic allocation) and share the same
+CPU-allocation and progress-reporting logic.
 """
 
 from .cpu_allocation import DEFAULT_RESERVED_CORE_COUNT

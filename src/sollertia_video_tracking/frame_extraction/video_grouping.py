@@ -45,7 +45,7 @@ _MONTH_NAME_PIECE = re.compile(rf"^(?:{_MONTH_NAMES})$", re.IGNORECASE)
 def _infer_group_key(stem: str) -> str | None:
     """Infers a grouping key from a video's file-name stem from its non-date components.
 
-    Splits the stem into delimiter-bounded components (leaving fused alphanumeric tokens such as ``M01`` or ``MF_11``
+    Splits the stem into delimiter-bounded components (leaving fused alphanumeric tokens such as ``M01`` or ``MF11``
     intact), locates the first date span, and joins the components on the identity side of that date with an underscore.
     The working assumption is that the non-date components a set of file names share denote a common category (e.g. a
     subject), so files with the same key belong together while the date distinguishes recordings within a category.
@@ -65,7 +65,8 @@ def _infer_group_key(stem: str) -> str | None:
         stem: The video file name without its directory or extension, for example ``MF_11_2025_07_21``.
 
     Returns:
-        The inferred grouping key, or None when the stem contains no recognizable date span.
+        The inferred grouping key, or None when the stem contains no recognizable date span, or when the recognized
+        date span leaves no non-date components on either side.
     """
     # The ISO 8601 date-time separator ``T`` is a letter, so a timestamp like ``20240115T093000`` would otherwise fuse
     # into one non-numeric component and hide the date. Splitting only a ``T`` that sits between digits exposes the date
@@ -242,8 +243,10 @@ def group_videos(videos: list[str], group_by_pattern: str | None = None) -> dict
 
     Args:
         videos: The candidate video paths to group.
-        group_by_pattern: A regular expression whose first capturing group (or whole match, if it has no groups) names
-            the group for each video's stem. Set to None to infer the key structurally from the file-name date span.
+        group_by_pattern: A regular expression whose first capturing group names the group for each video's stem, or
+            the whole match when the pattern has no capturing groups or its first group did not participate in the
+            match. A stem the pattern fails to match is keyed by its full stem, forming its own group. Set to None to
+            infer the key structurally from the file-name date span.
 
     Returns:
         A mapping of grouping key to the list of that group's video paths, in first-seen order.

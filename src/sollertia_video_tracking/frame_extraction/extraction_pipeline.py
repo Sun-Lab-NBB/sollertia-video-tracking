@@ -35,8 +35,9 @@ class FrameExtractionSummary:
 
     Notes:
         The pipeline never aborts on a single bad video, so failures are collected here as ``(video_path, detail)``
-        pairs rather than raised, where the detail is a traceback or the marker ``"empty"`` for a video that produced
-        no frames. Callers inspect ``failed_video_count`` (or ``errors``) to decide the process exit status.
+        pairs rather than raised, where the detail is an ``error:``-prefixed traceback or the marker ``"empty"`` for a
+        video that produced no frames. Callers inspect ``failed_video_count`` (or ``errors``) to decide the process
+        exit status.
     """
 
     extracted_video_count: int
@@ -52,19 +53,20 @@ class FrameExtractionSummary:
     total_core_count: int
     """The total number of CPU cores available on the machine."""
     clustering_frame_count: int
-    """The total number of frames that were read and clustered across all videos."""
+    """The total number of frames scheduled to be read and clustered across all selected videos, estimated from the
+    video headers before extraction; this includes videos that are later skipped on a resumable re-run."""
     existing_frame_count: int = 0
     """The number of frames already extracted across the selection before this run, reported in sampling mode."""
     target_frame_count: int = -1
     """The requested total-frame budget when sampling videos, or -1 when budgeted sampling was disabled."""
     errors: tuple[tuple[str, str], ...] = ()
     """The ``(video_path, detail)`` pairs for every video that failed to extract or produced no frames, where the
-    detail is a traceback or the marker ``"empty"``.
+    detail is an ``error:``-prefixed traceback or the marker ``"empty"``.
     """
 
     @property
     def failed_video_count(self) -> int:
-        """Returns the number of videos that failed to extract."""
+        """Returns the number of videos that failed to extract or produced no frames."""
         return len(self.errors)
 
     @property

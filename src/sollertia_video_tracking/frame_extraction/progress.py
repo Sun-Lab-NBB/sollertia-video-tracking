@@ -12,7 +12,8 @@ _PROGRESS_BAR_WIDTH: int = 30
 """The width, in characters, of the rendered aggregate progress bar."""
 
 _MAX_PROGRESS_UPDATES_PER_VIDEO: int = 100
-"""The upper bound on progress messages each worker emits, used to throttle queue traffic."""
+"""The approximate number of progress messages each worker targets per video; it sets the per-video update stride
+(``frame_total // this value``), so the real count can exceed it for videos with fewer than 200 frames."""
 
 
 def make_progress_reporter(progress_queue: Any, video_index: int, frame_total: int) -> Callable[..., Iterable[Any]]:
@@ -50,8 +51,8 @@ class AggregateBar(Thread):
     Notes:
         The renderer consumes ``("progress", video_index, count)`` and ``("done", video_index)`` messages from the
         shared queue, plus a terminal ``("stop",)`` sentinel. On a TTY the bar updates in place with carriage
-        returns; when the output is redirected, it prints at most one line every
-        ``minimum_progress_interval`` seconds.
+        returns; when the output is redirected, it prints at most one line every ``minimum_progress_interval``
+        seconds (clamped to at least 1.0 second).
 
     Attributes:
         _progress_queue: The shared queue the workers stream progress and completion messages to.
@@ -59,7 +60,7 @@ class AggregateBar(Thread):
         _frame_totals: The mapping of video index to the number of frames that video contributes to the bar.
         _grand_frame_total: The sum of all per-video frame totals, clamped to at least one.
         _minimum_progress_interval: The minimum interval, in seconds, between rendered lines when the output
-            is not a TTY.
+            is not a TTY; the effective interval is clamped to at least 1.0 second.
         _width: The width, in characters, of the rendered bar.
         _stream: The output stream the bar renders to.
         _is_tty: True when the output stream is an interactive terminal.
@@ -85,7 +86,7 @@ class AggregateBar(Thread):
             total_video_count: The total number of videos in the extraction run.
             frame_totals: The mapping of video index to the number of frames that video contributes to the bar.
             minimum_progress_interval: The minimum interval, in seconds, between rendered lines when the output
-                is not a TTY.
+                is not a TTY; the effective interval is clamped to at least 1.0 second.
             width: The width, in characters, of the rendered bar.
             stream: The output stream to render to, defaulting to the standard error stream.
         """

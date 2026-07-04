@@ -80,7 +80,8 @@ class OutlierExtractionSummary:
     total_core_count: int
     """The total number of CPU cores available on the machine."""
     candidate_frame_count: int
-    """The total number of putative outlier frames flagged across the extracted videos."""
+    """The total number of putative outlier frames flagged across all videos that had candidates, i.e. the videos
+    submitted for extraction."""
     extracted_frame_count: int
     """The total number of frames freshly written into the project's labeled-data tree across all videos."""
     unanalyzed_videos: tuple[str, ...] = ()
@@ -735,6 +736,8 @@ def _load_sliced_predictions(
 
     Raises:
         FileNotFoundError: If the video has no matching prediction or metadata files.
+        ValueError: If the video's crop specification in config.yaml is not four comma-separated integers, propagated
+            from ``_video_cropping_offset``.
     """
     video_stem = Path(video).stem
     predictions, _, _, _ = auxiliaryfunctions.load_analyzed_data(
