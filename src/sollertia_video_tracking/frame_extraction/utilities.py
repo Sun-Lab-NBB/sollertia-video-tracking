@@ -107,7 +107,10 @@ def iter_pinned_extraction(
                 if display_progress:
                     progress_queue.put(("done", video_indices[video]))
     finally:
-        if display_progress:
+        # The bar thread is only started once the pool is created, so joining it when progress is off or when pool
+        # construction raised before the start would hit an unstarted thread and mask the real error with a
+        # RuntimeError. Stop and join it only while it is actually running.
+        if display_progress and bar.is_alive():
             bar.stop()
             bar.join(timeout=3)
         manager.shutdown()
@@ -132,10 +135,43 @@ def prune_empty_labeled_data_directories(project_directory: Path, *, display_pro
         return 0
     removed_count = 0
     for directory in sorted(labeled_data_directory.iterdir()):
-        if directory.is_dir() and not any(directory.iterdir()):
+        # A symlink is never pruned: is_dir() and iterdir() follow it to its target, but rmdir() would act on the
+        # link itself and raise NotADirectoryError, so only real, empty directories are removed.
+        if directory.is_symlink() or not directory.is_dir():
+            continue
+        if not any(directory.iterdir()):
             directory.rmdir()
             removed_count += 1
     if display_progress and removed_count:
         sys.stderr.write(f"pruned {removed_count} empty labeled-data folder(s)\n")
         sys.stderr.flush()
     return removed_count
+
+
+def ensure_unique_video_stems(videos: list[str], *, error_context: str) -> None:
+    """Raises when two selected videos share a file-name stem and would collide in the labeled-data tree.
+
+    DeepLabCut stores every video's extracted frames under ``labeled-data/<stem>/``, keyed by the video's file-name
+    stem alone. Two videos with the same stem but different directories therefore map to one shared folder: run in
+    parallel they race on identically named frame files, and a budgeted-sampling pass counts one sibling's frames as
+    the other's. The collision cannot be resolved safely here, so it is reported up front rather than silently
+    corrupting the dataset.
+
+    Args:
+        videos: The selected video paths to check for stem collisions.
+        error_context: The leading sentence of the raised ValueError, naming the operation.
+
+    Raises:
+        ValueError: If two videos with different paths share a file-name stem.
+    """
+    stems: dict[str, str] = {}
+    for video in videos:
+        stem = Path(video).stem
+        existing = stems.get(stem)
+        if existing is not None and existing != video:
+            message = (
+                f"{error_context} Two videos share the file-name stem '{stem}' and would collide in the "
+                f"labeled-data tree: '{existing}' and '{video}'. Rename one so their stems differ."
+            )
+            raise ValueError(message)
+        stems[stem] = video

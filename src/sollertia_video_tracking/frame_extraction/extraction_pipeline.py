@@ -19,6 +19,7 @@ from .progress import make_progress_reporter
 from .utilities import (
     iter_pinned_extraction,
     normalize_project_config,
+    ensure_unique_video_stems,
     prune_empty_labeled_data_directories,
 )
 from .cpu_allocation import DEFAULT_RESERVED_CORE_COUNT, plan_core_allocation
@@ -172,10 +173,11 @@ def extract_frames_kmeans(
 
     Raises:
         FileNotFoundError: If ``config_path`` does not point to an existing file.
-        ValueError: If ``overwrite`` and ``reset`` are both set, or if ``frames_per_video`` or ``total_frame_budget``
-            is set below one (other than the -1 sentinel). Also raised when budgeted sampling is requested without a
-            valid ``numframes2pick``, when config.yaml defines no ``video_sets``, or when no videos in config.yaml
-            match ``path_filters``.
+        ValueError: If ``overwrite`` and ``reset`` are both set, if ``clustering_stride`` is below one, or if
+            ``frames_per_video`` or ``total_frame_budget`` is set below one (other than the -1 sentinel). Also raised
+            when budgeted sampling is requested without a valid ``numframes2pick``, when config.yaml defines no
+            ``video_sets``, when no videos in config.yaml match ``path_filters``, or when two selected videos share a
+            file-name stem and would collide in the labeled-data tree.
     """
     config_path = config_path.resolve()
     if overwrite and reset:
@@ -185,6 +187,9 @@ def extract_frames_kmeans(
         message = (
             f"Unable to extract frames. The total frame budget must be at least one, but got {total_frame_budget}."
         )
+        raise ValueError(message)
+    if clustering_stride < 1:
+        message = f"Unable to extract frames. The clustering stride must be at least one, but got {clustering_stride}."
         raise ValueError(message)
     # DeepLabCut's read_config rewrites config.yaml whenever project_path differs from the config's own directory. With
     # many workers reading concurrently, that write races against sibling reads and intermittently returns an empty
@@ -207,6 +212,9 @@ def extract_frames_kmeans(
     if not videos:
         message = "Unable to extract frames. No videos in the project's config.yaml matched the requested selection."
         raise ValueError(message)
+    # Two videos that share a stem would map to one labeled-data folder, so their frame counts and writes collide;
+    # this is checked before sampling, whose per-video accounting reads those same stem-keyed folders.
+    ensure_unique_video_stems(videos, error_context="Unable to extract frames.")
 
     project_directory_path = config_path.parent
     if reset:
@@ -474,6 +482,25 @@ def _resolve_video_overrides(
     return ordered_matches, unmatched_substrings
 
 
+def _extracted_frame_paths(directory: Path) -> list[Path]:
+    """Lists a labeled-data directory's extracted frames, excluding any predicted-label overlays.
+
+    The outlier-refinement pipeline may leave ``imgNNNNlabeled.png`` prediction overlays beside the extracted
+    ``imgNNNN.png`` frames when it saves labeled frames. Those overlays are not training frames, so counting them
+    would inflate both the budgeted-sampling accounting and the per-video totals; they are filtered out here.
+
+    Args:
+        directory: The ``labeled-data/<video>`` directory whose extracted frames are listed.
+
+    Returns:
+        The sorted paths of the ``img*.png`` frames that are not ``*labeled.png`` prediction overlays, or an empty
+        list when the directory does not exist.
+    """
+    if not directory.exists():
+        return []
+    return sorted(frame for frame in directory.glob("img*.png") if not frame.stem.endswith("labeled"))
+
+
 def _count_extracted_frames(videos: list[str], project_directory: Path) -> dict[str, int]:
     """Counts the frames already extracted for each video, keyed by the video's path.
 
@@ -482,12 +509,13 @@ def _count_extracted_frames(videos: list[str], project_directory: Path) -> dict[
         project_directory: The DeepLabCut project directory that holds the ``labeled-data`` tree.
 
     Returns:
-        A mapping of video path to the number of ``img*.png`` frames currently in its labeled-data directory.
+        A mapping of video path to the number of extracted ``img*.png`` frames currently in its labeled-data
+        directory, excluding any ``*labeled.png`` prediction overlays.
     """
     counts: dict[str, int] = {}
     for video in videos:
         directory = project_directory / "labeled-data" / Path(video).stem
-        counts[video] = len(list(directory.glob("img*.png"))) if directory.exists() else 0
+        counts[video] = len(_extracted_frame_paths(directory))
     return counts
 
 
@@ -588,7 +616,7 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
         stem = Path(video_path).stem
         output_directory = config_path.parent / "labeled-data" / stem
 
-        existing_frame_paths = sorted(output_directory.glob("img*.png")) if output_directory.exists() else []
+        existing_frame_paths = _extracted_frame_paths(output_directory)
         if existing_frame_paths and not overwrite:
             return video_path, len(existing_frame_paths), "skipped"
         # On overwrite, drop the stale frames and the labels they would orphan before re-extracting.
@@ -623,5 +651,5 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
     except Exception:  # noqa: BLE001 -- one bad video must not kill the pool; the traceback is returned as status.
         return video_path, 0, "error:\n" + traceback.format_exc()
     else:
-        written = len(list(output_directory.glob("img*.png")))
+        written = len(_extracted_frame_paths(output_directory))
         return video_path, written, "ok" if written else "empty"

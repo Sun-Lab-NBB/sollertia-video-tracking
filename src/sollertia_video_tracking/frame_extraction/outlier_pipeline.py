@@ -23,6 +23,7 @@ from .progress import make_progress_reporter
 from .utilities import (
     iter_pinned_extraction,
     normalize_project_config,
+    ensure_unique_video_stems,
     prune_empty_labeled_data_directories,
 )
 from .cpu_allocation import DEFAULT_RESERVED_CORE_COUNT, plan_core_allocation
@@ -227,8 +228,8 @@ def extract_outlier_frames_parallel(
         FileNotFoundError: If ``config_path`` does not point to an existing file.
         ValueError: If ``outlier_algorithm`` or ``extraction_algorithm`` is unknown, if ``frames_per_video`` is set
             below one (other than the -1 sentinel), if ``outlier_algorithm`` is ``"list"`` without
-            ``explicit_frame_indices``, if the comparison bodyparts resolve to none, or if no videos match the requested
-            selection.
+            ``explicit_frame_indices``, if the comparison bodyparts resolve to none, if no videos match the requested
+            selection, or if two selected videos share a file-name stem and would collide in the labeled-data tree.
     """
     config_path = config_path.resolve()
     if not config_path.is_file():
@@ -283,6 +284,8 @@ def extract_outlier_frames_parallel(
     if not video_paths:
         message = "Unable to extract outlier frames. No videos matched the requested selection."
         raise ValueError(message)
+    # Two videos that share a stem would write into one labeled-data folder, racing in the parallel extraction pool.
+    ensure_unique_video_stems(video_paths, error_context="Unable to extract outlier frames.")
 
     candidates, unanalyzed_videos, errors = _detect_all_videos(
         video_paths=video_paths,
@@ -406,6 +409,9 @@ def _detect_all_videos(
 
     for video in video_paths:
         video_predictions_directory = predictions_directory if predictions_directory is not None else Path(video).parent
+        # Detection compute is inside the try alongside the load, so a malformed prediction table (empty, missing a
+        # likelihood level, or a column count the fitting reshape rejects) is recorded per-video rather than aborting
+        # the whole run, upholding the summary's per-video error contract.
         try:
             predictions = _load_sliced_predictions(
                 video=video,
@@ -414,24 +420,23 @@ def _detect_all_videos(
                 configuration=configuration,
                 tracking_method=tracking_method,
             )
+            comparison_predictions = predictions.loc[
+                :, predictions.columns.get_level_values("bodyparts").isin(resolved_comparison_bodyparts)
+            ]
+            if outlier_algorithm == "list":
+                candidates[video] = sorted({int(frame) for frame in explicit_frame_indices})
+            elif outlier_algorithm == "uncertain":
+                candidates[video] = uncertain_outlier_indices(comparison_predictions, minimum_confidence)
+            elif outlier_algorithm == "jump":
+                candidates[video] = jump_outlier_indices(comparison_predictions, pixel_distance_threshold)
+            else:
+                keypoint_series_by_video[video] = fitting_keypoint_series(comparison_predictions)
         except FileNotFoundError:
             unanalyzed_videos.append(video)
             continue
-        except Exception:  # noqa: BLE001 -- one unreadable prediction file must not abort detection for the rest.
+        except Exception:  # noqa: BLE001 -- a missing or malformed prediction table is recorded, never aborting the rest.
             errors.append((video, "detection error:\n" + traceback.format_exc()))
             continue
-
-        comparison_predictions = predictions.loc[
-            :, predictions.columns.get_level_values("bodyparts").isin(resolved_comparison_bodyparts)
-        ]
-        if outlier_algorithm == "list":
-            candidates[video] = sorted({int(frame) for frame in explicit_frame_indices})
-        elif outlier_algorithm == "uncertain":
-            candidates[video] = uncertain_outlier_indices(comparison_predictions, minimum_confidence)
-        elif outlier_algorithm == "jump":
-            candidates[video] = jump_outlier_indices(comparison_predictions, pixel_distance_threshold)
-        else:
-            keypoint_series_by_video[video] = fitting_keypoint_series(comparison_predictions)
 
     if keypoint_series_by_video:
         candidates.update(

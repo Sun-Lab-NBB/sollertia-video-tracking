@@ -106,9 +106,10 @@ def _infer_group_key(stem: str) -> str | None:
     intact), locates the first date span, and joins the components on the identity side of that date with an underscore.
     The working assumption is that the non-date components a set of file names share denote a common category (e.g. a
     subject), so files with the same key belong together while the date distinguishes recordings within a category.
-    When the date leads the name, the components after it are used instead, so both ``M01_2024-01-15`` and
-    ``2024-01-15_M01`` infer ``M01``. A name with no recognizable date returns None so the caller can fall back rather
-    than fold a session or counter token into the key.
+    When the date leads the name, the components after it are used instead, skipping any numeric time components that
+    trail the date, so ``M01_2024-01-15``, ``2024-01-15_M01``, and ``2024-01-15_09-30-00_M01`` all infer ``M01``. A
+    name with no recognizable date returns None so the caller can fall back rather than fold a session or counter
+    token into the key.
 
     Notes:
         A span is recognized only when it is anchored by a full four-digit year or an alphabetic month name, never by a
@@ -122,8 +123,8 @@ def _infer_group_key(stem: str) -> str | None:
         stem: The video file name without its directory or extension, for example ``MF_11_2025_07_21``.
 
     Returns:
-        The inferred grouping key, or None when the stem contains no recognizable date span, or when the recognized
-        date span leaves no non-date components on either side.
+        The inferred grouping key, or None when the stem contains no recognizable date span, or when the date span
+        and any time components trailing it leave no identity components on either side.
     """
     # The ISO 8601 date-time separator ``T`` is a letter, so a timestamp like ``20240115T093000`` would otherwise fuse
     # into one non-numeric component and hide the date. Splitting only a ``T`` that sits between digits exposes the date
@@ -138,7 +139,15 @@ def _infer_group_key(stem: str) -> str | None:
         return None
 
     start, end = span
-    identity_pieces = pieces[:start] or pieces[end:]
+    if pieces[:start]:
+        identity_pieces = pieces[:start]
+    else:
+        # The date leads the name, so the identity is on the trailing side. Drop any numeric time components sitting
+        # between the date and the identity (a delimited HH_MM_SS run, or an ISO time split off by the T
+        # normalization above), mirroring how a fused YYYYMMDDHHMMSS date already ignores its own trailing time.
+        identity_pieces = pieces[end:]
+        while identity_pieces and identity_pieces[0].isdigit():
+            identity_pieces = identity_pieces[1:]
     if not identity_pieces:
         return None
     return "_".join(identity_pieces)
