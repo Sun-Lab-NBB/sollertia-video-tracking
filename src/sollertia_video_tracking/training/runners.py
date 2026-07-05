@@ -61,6 +61,11 @@ class _OptimizedTrainingRunnerMixin(TrainingRunner):
     _epoch_predictions: Any
     _epoch_ground_truth: Any
 
+    _ddp_static_graph: bool = True
+    """Whether DDP may treat this runner's training graph as static, discovering the always-unused parameters once and
+    keeping gradient bucketing and computation/communication overlap. Pose models satisfy this; the detector runner
+    overrides it to False because its graph varies with the per-image proposal count."""
+
     def __init__(
         self,
         *args: Any,
@@ -156,17 +161,23 @@ class _OptimizedTrainingRunnerMixin(TrainingRunner):
             # validation forward would issue a buffer broadcast that the other ranks (parked at the end-of-epoch
             # barrier) never join, deadlocking the group. Gradients are still all-reduced each step so weights stay in
             # sync; only BatchNorm running statistics remain per-rank, which is the standard multi-GPU trade-off.
-            # find_unused_parameters=True because pretrained backbones (notably timm HRNet) carry an ImageNet
-            # classification head whose parameters never contribute to the pose or detection loss. Those parameters
-            # receive no gradient, so without this flag the DDP reducer waits forever for an all-reduce that never
-            # comes and aborts the first step with an unused-parameter error. It adds a per-iteration graph traversal,
-            # a negligible cost for these small lab datasets.
+            ddp_options: dict[str, Any] = {"broadcast_buffers": False}
+            if self._ddp_static_graph:
+                # Pretrained backbones (notably timm HRNet and ResNet) carry an ImageNet classification head whose
+                # parameters never contribute to the pose loss, so they receive no gradient and would otherwise abort
+                # the reducer. Declaring the graph static lets DDP discover that always-unused set once and keep
+                # gradient bucketing and computation/communication overlap, far cheaper than the per-iteration graph
+                # traversal that find_unused_parameters performs on every step.
+                ddp_options["static_graph"] = True
+            else:
+                # Detectors build a data-dependent graph (the proposal count varies per image), so the used-parameter
+                # set is not static; fall back to per-iteration unused-parameter detection.
+                ddp_options["find_unused_parameters"] = True
             self.model = DistributedDataParallel(
                 module=self.model,
                 device_ids=[self._local_rank],
                 output_device=self._local_rank,
-                broadcast_buffers=False,
-                find_unused_parameters=True,
+                **ddp_options,
             )
         elif getattr(self, "_data_parallel", False):
             self.model = DataParallel(module=self.model, device_ids=self._gpus).cuda()
@@ -387,6 +398,9 @@ class _OptimizedPoseTrainingRunner(_OptimizedTrainingRunnerMixin, PoseTrainingRu
 
 class _OptimizedDetectorTrainingRunner(_OptimizedTrainingRunnerMixin, DetectorTrainingRunner):
     """Trains object detection models with mixed precision and DistributedDataParallel."""
+
+    _ddp_static_graph = False
+    """Detectors build a data-dependent graph, so DDP must detect unused parameters per iteration rather than once."""
 
     def step(self, batch: dict[str, Any], mode: str = "train") -> dict[str, Any]:
         """Runs a single detector training or evaluation step with the forward pass and loss under autocast.
