@@ -170,10 +170,11 @@ def extract_group(
 @click.option(
     "-cs",
     "--clustering-stride",
-    default=500,
+    default=1,
     show_default=True,
-    help="How far apart, in frames, to sample the video when selecting training frames. Larger values scan fewer "
-    "frames and finish faster; smaller values sample more densely but take longer.",
+    help="How far apart, in frames, to sample the video when selecting training frames. The default of 1 clusters "
+    "every frame, matching DeepLabCut; the reader streams the video in one pass, so dense sampling is cheap to decode. "
+    "Raise it on long videos to cluster fewer frames and lower memory use.",
 )
 @click.option(
     "-tf",
@@ -329,6 +330,16 @@ def frames_command(
     help="How the frames to keep are chosen from the flagged candidates.",
 )
 @click.option(
+    "-cst",
+    "--candidate-step",
+    default=1,
+    show_default=True,
+    metavar="N",
+    help="Keep only every Nth flagged candidate before selecting frames from them. Larger values read and cluster "
+    "fewer frames, trading coverage for speed, and when they thin the candidates enough they let the reader seek to "
+    "each frame instead of decoding the whole range.",
+)
+@click.option(
     "-s",
     "--shuffle",
     default=1,
@@ -465,6 +476,7 @@ def outliers_command(
     videos: tuple[Path, ...],
     outlier_algorithm: str,
     extraction_algorithm: str,
+    candidate_step: int,
     shuffle: int,
     training_set_index: int,
     pixel_distance_threshold: float,
@@ -508,6 +520,7 @@ def outliers_command(
             moving_average_degree=moving_average_degree,
             significance_level=significance_level,
             extraction_algorithm=ExtractionAlgorithm(extraction_algorithm),
+            candidate_step=candidate_step,
             frames_per_video=shared.frames_per_video,
             clustering_resize_width=shared.clustering_resize_width,
             cluster_in_color=shared.cluster_in_color,

@@ -22,6 +22,7 @@ from .utilities import (
     ensure_unique_video_stems,
     prune_empty_labeled_data_directories,
 )
+from .frame_reading import make_fast_kmeans_selector
 from .cpu_allocation import DEFAULT_RESERVED_CORE_COUNT, plan_core_allocation
 from .video_grouping import group_videos
 from .video_sampling import VideoSamplingPlan, plan_video_sampling
@@ -84,7 +85,7 @@ class FrameExtractionSummary:
 def extract_frames_kmeans(
     config_path: Path,
     *,
-    clustering_stride: int = 500,
+    clustering_stride: int = 1,
     worker_count: int = -1,
     cores_per_worker: int = -1,
     reserved_core_count: int = DEFAULT_RESERVED_CORE_COUNT,
@@ -622,12 +623,15 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
         # On overwrite, drop the stale frames and the labels they would orphan before re-extracting.
         _clear_extracted_data(output_directory=output_directory)
 
-        # Redirects DeepLabCut's internal tqdm progress to the parent's aggregate bar via the shared queue. The queue
-        # is None when progress is disabled, leaving DeepLabCut's own (stream-suppressed) tqdm in place.
-        if progress_queue is not None:
-            frame_selection_tools.tqdm = make_progress_reporter(
-                progress_queue=progress_queue, video_index=video_index, frame_total=frame_total
-            )
+        # Swaps DeepLabCut's random-seek k-means reader for the decode-aware one, routing its per-candidate progress to
+        # the parent's aggregate bar. The reader streams the video when the clustering stride is dense enough to favor
+        # it, and keeps seeking otherwise. The queue is None when progress is disabled, leaving a plain bar.
+        progress_reporter = (
+            make_progress_reporter(progress_queue=progress_queue, video_index=video_index, frame_total=frame_total)
+            if progress_queue is not None
+            else None
+        )
+        frame_selection_tools.KmeansbasedFrameselectioncv2 = make_fast_kmeans_selector(progress=progress_reporter)
 
         with (
             Path(os.devnull).open("w") as null_stream,

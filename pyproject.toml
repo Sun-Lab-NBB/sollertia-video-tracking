@@ -202,6 +202,9 @@ exclude = [
 [[tool.mypy.overrides]]
 module = [
     "deeplabcut.*",
+    "sklearn.*",
+    "skimage.*",
+    "tqdm",
 ]
 ignore_missing_imports = true
 

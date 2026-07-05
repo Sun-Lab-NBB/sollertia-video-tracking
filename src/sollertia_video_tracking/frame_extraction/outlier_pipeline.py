@@ -26,6 +26,7 @@ from .utilities import (
     ensure_unique_video_stems,
     prune_empty_labeled_data_directories,
 )
+from .frame_reading import make_fast_kmeans_selector
 from .cpu_allocation import DEFAULT_RESERVED_CORE_COUNT, plan_core_allocation
 from .outlier_detection import (
     KeypointSeries,
@@ -144,6 +145,7 @@ def extract_outlier_frames_parallel(
     moving_average_degree: int = 1,
     significance_level: float = 0.01,
     extraction_algorithm: ExtractionAlgorithm = ExtractionAlgorithm.KMEANS,
+    candidate_step: int = 1,
     frames_per_video: int = -1,
     clustering_resize_width: int = 30,
     cluster_in_color: bool = False,
@@ -197,6 +199,9 @@ def extract_outlier_frames_parallel(
         moving_average_degree: The moving-average degree of the ``fitting`` algorithm's SARIMAX model.
         significance_level: The significance level for the ``fitting`` algorithm's confidence interval.
         extraction_algorithm: The frame-selection algorithm applied to the candidates: ``"kmeans"`` or ``"uniform"``.
+        candidate_step: The stride at which the flagged candidates are sub-sampled before selection. A value above one
+            keeps every ``candidate_step``-th flagged frame, trading coverage for a smaller decode and, when it thins
+            the candidates enough, a switch to seeking that avoids decoding the whole frame range.
         frames_per_video: The number of frames to extract per video, overriding ``numframes2pick`` in config.yaml. Set
             to -1 to use the value already stored in the configuration file.
         clustering_resize_width: The downsample width applied before clustering when selecting with ``"kmeans"``.
@@ -227,9 +232,10 @@ def extract_outlier_frames_parallel(
     Raises:
         FileNotFoundError: If ``config_path`` does not point to an existing file.
         ValueError: If ``outlier_algorithm`` or ``extraction_algorithm`` is unknown, if ``frames_per_video`` is set
-            below one (other than the -1 sentinel), if ``outlier_algorithm`` is ``"list"`` without
-            ``explicit_frame_indices``, if the comparison bodyparts resolve to none, if no videos match the requested
-            selection, or if two selected videos share a file-name stem and would collide in the labeled-data tree.
+            below one (other than the -1 sentinel), if ``candidate_step`` is below one, if ``outlier_algorithm`` is
+            ``"list"`` without ``explicit_frame_indices``, if the comparison bodyparts resolve to none, if no videos
+            match the requested selection, or if two selected videos share a file-name stem and would collide in the
+            labeled-data tree.
     """
     config_path = config_path.resolve()
     if not config_path.is_file():
@@ -255,6 +261,11 @@ def extract_outlier_frames_parallel(
         raise ValueError(message) from None
     if outlier_algorithm is OutlierAlgorithm.LIST and not explicit_frame_indices:
         message = "Unable to extract outlier frames. The 'list' algorithm requires an explicit list of frames to use."
+        raise ValueError(message)
+    if candidate_step < 1:
+        message = (
+            f"Unable to extract outlier frames. The candidate step must be at least one, but got {candidate_step}."
+        )
         raise ValueError(message)
 
     normalize_project_config(
@@ -305,6 +316,11 @@ def extract_outlier_frames_parallel(
         reserved_core_count=reserved_core_count,
         display_progress=display_progress,
     )
+
+    # Sub-sampling the flagged candidates thins the pool the frames are selected from. When it thins a dense pool
+    # enough that seeking beats streaming, it avoids decoding the whole frame range, at the cost of coverage.
+    if candidate_step > 1:
+        candidates = {video: indices[::candidate_step] for video, indices in candidates.items()}
 
     extraction_videos = [video for video in video_paths if candidates.get(video)]
     if not extraction_videos:
@@ -850,12 +866,17 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
         output_directory = Path(configuration["project_path"]) / "labeled-data" / Path(video).stem
         frame_count_before = _count_extracted_frames(output_directory)
 
-        # Route DeepLabCut's frame-reading progress to the parent's aggregate bar and stop its per-worker config write.
-        # The queue is None when progress is disabled, leaving DeepLabCut's own (stream-suppressed) tqdm in place.
-        if progress_queue is not None:
-            frameselectiontools.tqdm = make_progress_reporter(
+        # Swap DeepLabCut's random-seek k-means reader for the streaming one, routing its per-candidate progress to the
+        # parent's aggregate bar. The queue is None when progress is disabled, leaving a plain (stream-suppressed) bar.
+        # DeepLabCut's per-worker config write is neutralized because the pipeline already registered every video.
+        progress_reporter = (
+            make_progress_reporter(
                 progress_queue=progress_queue, video_index=video_index, frame_total=max(1, len(indices))
             )
+            if progress_queue is not None
+            else None
+        )
+        frameselectiontools.KmeansbasedFrameselectioncv2 = make_fast_kmeans_selector(progress=progress_reporter)
         dlc_outlier_frames.attempt_to_add_video = _skip_video_registration
 
         with (
