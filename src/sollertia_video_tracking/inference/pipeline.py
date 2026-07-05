@@ -203,6 +203,7 @@ def run_inference(
             total_video_count=len(video_paths),
             frame_totals=totals,
             minimum_progress_interval=heartbeat,
+            preparing_label="compiling model...",
         )
         bar.start()
 

@@ -1,17 +1,12 @@
 """Provides the clean training progress monitor that replaces DeepLabCut's per-iteration terminal logging stream."""
 
-import sys
 import math
-import time
-from queue import Empty
 from typing import Any, TextIO
-from threading import Thread
 import contextlib
 
 from deeplabcut.pose_estimation_pytorch.runners.logger import BaseLogger
 
-_PROGRESS_BAR_WIDTH: int = 30
-"""The width, in characters, of the rendered training progress bar."""
+from ..reporting import LiveBar, format_duration
 
 _MAX_RENDERED_METRICS: int = 3
 """The maximum number of evaluation metrics shown on the progress line to keep it compact."""
@@ -81,91 +76,72 @@ class QueueTrainingLogger(BaseLogger):
             self._progress_queue.put_nowait(message)
 
 
-class TrainingMonitor(Thread):
+class TrainingMonitor(LiveBar):
     """Renders a single live training progress bar from the metrics streamed by the rank-0 training process.
 
     Notes:
-        The renderer consumes ``{"kind": "config", ...}`` and ``{"kind": "metrics", ...}`` messages plus a terminal
-        ``{"kind": "stop"}`` sentinel. On a TTY the bar updates in place with carriage returns; when the output is
-        redirected, it prints at most one line every ``heartbeat`` seconds. Because evaluation epochs deliver a train
-        message and an evaluation message at the same epoch, the latest of each is retained and merged onto one line.
+        The renderer consumes ``{"kind": "config", ...}`` and ``{"kind": "metrics", ...}`` messages, on top of the
+        warm-up, spinner, interval, and ``stop``-sentinel handling inherited from ``LiveBar``. The warm-up line shows
+        while no epoch budget has been reported yet, which covers the workers still preparing: initializing the process
+        group, downloading pretrained weights, building the model, and any ``torch.compile`` warm-up. Because
+        evaluation epochs deliver a train message and an evaluation message at the same epoch, the latest of each is
+        retained and merged onto one line.
 
     Attributes:
-        _progress_queue: The shared queue the training process streams progress messages to.
-        _heartbeat: The minimum interval, in seconds, between rendered lines when the output is not a TTY.
-        _width: The width, in characters, of the rendered bar.
-        _stream: The output stream the bar renders to.
-        _is_tty: True when the output stream is an interactive terminal.
         _total_epochs: The total number of epochs the run trains for, once reported by the configuration message.
         _task: The training task label reported by the configuration message.
         _current_epoch: The most recent epoch reported by the training process.
         _training_loss: The most recent training loss, or None before the first epoch completes.
         _validation_loss: The most recent validation loss, or None before the first evaluation epoch.
         _metrics: The most recent evaluation metrics keyed by their full metric name.
-        _start_time: The monotonic timestamp captured when the renderer was constructed.
-        _last_render_time: The monotonic timestamp of the most recent render.
     """
 
-    def __init__(
-        self,
-        progress_queue: Any,
-        heartbeat: float,
-        stream: TextIO | None = None,
-        width: int = _PROGRESS_BAR_WIDTH,
-    ) -> None:
+    def __init__(self, progress_queue: Any, heartbeat: float, stream: TextIO | None = None) -> None:
         """Initializes the monitor thread over the shared progress queue.
 
         Args:
             progress_queue: The shared queue the training process streams progress messages to.
             heartbeat: The minimum interval, in seconds, between rendered lines when the output is not a TTY.
             stream: The output stream to render to, defaulting to the standard error stream.
-            width: The width, in characters, of the rendered bar.
         """
-        super().__init__(daemon=True)
-        self._progress_queue = progress_queue
-        self._heartbeat = heartbeat
-        self._width = width
-        self._stream = stream if stream is not None else sys.stderr
-        self._is_tty = self._stream.isatty()
+        super().__init__(
+            progress_queue=progress_queue,
+            heartbeat=heartbeat,
+            preparing_label="preparing model...",
+            stream=stream,
+        )
         self._total_epochs = 0
         self._task = "pose"
         self._current_epoch = 0
         self._training_loss: float | None = None
         self._validation_loss: float | None = None
         self._metrics: dict[str, Any] = {}
-        self._start_time = time.monotonic()
-        self._last_render_time = 0.0
 
     def __repr__(self) -> str:
         """Returns a string representation of the TrainingMonitor instance."""
         return f"TrainingMonitor(task={self._task}, epoch={self._current_epoch}/{self._total_epochs})"
 
-    def run(self) -> None:
-        """Consumes queue messages and re-renders the bar until a ``{"kind": "stop"}`` sentinel arrives."""
-        while True:
-            try:
-                message = self._progress_queue.get(timeout=0.2 if self._is_tty else 1.0)
-            except Empty:
-                self._render()
-                continue
-            kind = message.get("kind")
-            if kind == "config":
-                self._total_epochs = message.get("epochs") or 0
-                self._task = message.get("task") or "pose"
-                self._render(force=True)
-            elif kind == "metrics":
-                self._ingest_metrics(message)
-                self._render()
-            elif kind == "stop":
-                break
-        self._render(force=True)
-        if self._is_tty:
-            self._stream.write("\n")
-            self._stream.flush()
+    def _ingest(self, message: Any) -> bool:
+        """Merges one ``config`` or ``metrics`` message into the retained training state.
 
-    def stop(self) -> None:
-        """Signals the renderer to draw a final frame and exit."""
-        self._progress_queue.put({"kind": "stop"})
+        Args:
+            message: A ``{"kind": "config", ...}`` or ``{"kind": "metrics", ...}`` message.
+
+        Returns:
+            True for a ``config`` message so the transition off the warm-up line is drawn immediately, False otherwise.
+        """
+        kind = message.get("kind")
+        if kind == "config":
+            self._total_epochs = message.get("epochs") or 0
+            self._task = message.get("task") or "pose"
+            return True
+        if kind == "metrics":
+            self._ingest_metrics(message)
+        return False
+
+    def _is_preparing(self) -> bool:
+        """Returns whether no epoch budget has been reported yet, so the model is still preparing."""
+        return self._total_epochs <= 0
 
     def _ingest_metrics(self, message: dict[str, Any]) -> None:
         """Merges one phase of epoch metrics into the retained state used for rendering.
@@ -201,39 +177,16 @@ class TrainingMonitor(Thread):
         matched.sort(key=lambda item: item[0])
         return " ".join(part for _, part in matched[:_MAX_RENDERED_METRICS])
 
-    def _render(self, *, force: bool = False) -> None:
-        """Draws the bar, honoring the per-mode minimum render interval unless ``force`` is set.
+    def _compose_active(self, elapsed: float) -> str:
+        """Builds the active line body from the retained epoch, losses, and evaluation metrics.
 
         Args:
-            force: Determines whether to render immediately, bypassing the minimum interval between renders.
+            elapsed: The seconds elapsed since the renderer was constructed.
+
+        Returns:
+            The composed active line body.
         """
-        now = time.monotonic()
-        interval = 0.2 if self._is_tty else max(1.0, self._heartbeat)
-        if not force and (now - self._last_render_time) < interval:
-            return
-        self._last_render_time = now
-
-        elapsed = now - self._start_time
-
-        if self._total_epochs <= 0:
-            # No epoch budget has been reported yet, so the workers are still preparing: initializing the process
-            # group, downloading pretrained weights, building the model, and any torch.compile warm-up. That can run
-            # for minutes on a first run, so show elapsed time rather than a static empty bar that looks stalled.
-            message = f"[{'-' * self._width}] preparing model... | {_format_duration(elapsed)} elapsed"
-            if self._is_tty:
-                self._stream.write("\r" + message + "\033[K")
-            else:
-                self._stream.write(message + "\n")
-            self._stream.flush()
-            return
-
-        fraction = min(1.0, self._current_epoch / self._total_epochs)
-        percent = 100.0 * fraction
-        filled = int(self._width * fraction)
-        bar = "#" * filled + "-" * (self._width - filled)
-        rate = self._current_epoch / elapsed if elapsed > 0 else 0.0
-        remaining = (self._total_epochs - self._current_epoch) / rate if rate > 0 and fraction < 1.0 else 0.0
-
+        bar, percent = self._bar(self._current_epoch / self._total_epochs)
         segments = [f"epoch {self._current_epoch}/{self._total_epochs}"]
         if self._training_loss is not None:
             segments.append(f"training {self._training_loss:.5f}")
@@ -242,28 +195,5 @@ class TrainingMonitor(Thread):
         metric_text = self._format_metrics()
         if metric_text:
             segments.append(metric_text)
-
-        message = (
-            f"[{bar}] {percent:5.1f}% | {' | '.join(segments)} | "
-            f"{_format_duration(elapsed)} | ETA {_format_duration(remaining)}"
-        )
-        if self._is_tty:
-            self._stream.write("\r" + message + "\033[K")
-        else:
-            self._stream.write(message + "\n")
-        self._stream.flush()
-
-
-def _format_duration(seconds: float) -> str:
-    """Formats a duration as ``MM:SS``, or as ``H:MM:SS`` when it spans an hour or more.
-
-    Args:
-        seconds: The duration to format, in seconds.
-
-    Returns:
-        The formatted duration string.
-    """
-    seconds = int(max(0, seconds))
-    hours, remainder = divmod(seconds, 3600)
-    minutes, whole_seconds = divmod(remainder, 60)
-    return f"{hours:d}:{minutes:02d}:{whole_seconds:02d}" if hours else f"{minutes:02d}:{whole_seconds:02d}"
+        eta = self._eta(done=self._current_epoch, total=self._total_epochs, elapsed=elapsed)
+        return f"[{bar}] {percent:5.1f}% | {' | '.join(segments)} | {format_duration(elapsed)} | ETA {eta}"
