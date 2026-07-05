@@ -10,6 +10,7 @@ from collections.abc import Iterator
 import cv2
 import psutil
 import torch.multiprocessing as mp
+from deeplabcut.utils.auxiliaryfunctions import read_config
 from deeplabcut.pose_estimation_pytorch.apis import videos as dlc_videos
 
 from .runners import patch_dlc_runner_builders
@@ -100,6 +101,24 @@ class _InferenceLaunch:
     video_queue: Any
     progress_queue: Any
     results_queue: Any
+
+
+def resolve_project_videos(config: str | Path) -> list[Path]:
+    """Returns the existing video files registered in the project configuration's ``video_sets``.
+
+    Reads the paths the DeepLabCut project configuration registers and keeps the ones that still exist on disk, so
+    inference can analyze the whole project without re-listing every video on the command line.
+
+    Args:
+        config: The path of the DeepLabCut project configuration file.
+
+    Returns:
+        The registered video paths that currently exist on disk, in the order the configuration lists them.
+    """
+    project = read_config(str(Path(config)))
+    registered = project.get("video_sets") or {}
+    videos = [Path(entry) for entry in registered]
+    return [video for video in videos if video.exists()]
 
 
 def run_inference(

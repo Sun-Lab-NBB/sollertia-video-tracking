@@ -4,7 +4,7 @@ from pathlib import Path
 
 import click
 
-from ..inference import Toggle, AmpMode, run_inference, resolve_inference_profile
+from ..inference import Toggle, AmpMode, run_inference, resolve_project_videos, resolve_inference_profile
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the lab standard."""
@@ -12,7 +12,14 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 
 @click.command("infer", context_settings=_CONTEXT_SETTINGS)
 @click.argument("config", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@click.argument("videos", nargs=-1, required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("videos", nargs=-1, required=False, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--project-videos",
+    "project_videos",
+    is_flag=True,
+    help="Analyze every video registered in the project configuration's video_sets, in addition to any VIDEOS given "
+    "explicitly. Registered videos that no longer exist on disk are skipped.",
+)
 @click.option(
     "-d",
     "--dest",
@@ -214,6 +221,7 @@ def infer_command(
     pin_memory: Toggle,
     heartbeat: float,
     *,
+    project_videos: bool,
     to_polars: bool,
     save_as_csv: bool,
     keep_dlc_outputs: bool,
@@ -222,12 +230,13 @@ def infer_command(
 ) -> None:
     """Analyzes videos with a trained DeepLabCut model, distributing whole videos across GPU or CPU worker slots.
 
-    CONFIG is the path to the DeepLabCut project's config.yaml, and VIDEOS are the video files to analyze. Each worker
-    analyzes whole videos pulled from a shared queue, so the work is balanced without splitting any video, and every
-    forward pass runs with the mixed precision and memory format chosen for the detected hardware. By default it writes
-    DeepLabCut's native prediction files (preserving them for the evaluation and outlier-extraction steps of the
-    refinement loop); pass ``--to-polars`` to also convert them to wide polars feather files. The same command runs on
-    multiple GPUs, one GPU, or a CPU-only machine.
+    CONFIG is the path to the DeepLabCut project's config.yaml, and VIDEOS are the video files to analyze. VIDEOS may be
+    omitted when ``--project-videos`` is passed, which analyzes every existing video registered in the project
+    configuration. Each worker analyzes whole videos pulled from a shared queue, so the work is balanced without
+    splitting any video, and every forward pass runs with the mixed precision and memory format chosen for the detected
+    hardware. By default it writes DeepLabCut's native prediction files (preserving them for the evaluation and
+    outlier-extraction steps of the refinement loop); pass ``--to-polars`` to also convert them to wide polars feather
+    files. The same command runs on multiple GPUs, one GPU, or a CPU-only machine.
     """
     try:
         gpu_indices = tuple(int(part) for part in gpus.split(",")) if gpus else None
@@ -236,6 +245,25 @@ def infer_command(
             f"Unable to parse the --gpus value. Expected comma-separated GPU indices such as '0,1', but got '{gpus}'."
         )
         raise click.ClickException(message=message) from error
+
+    resolved_videos = list(videos)
+    if project_videos:
+        resolved_videos.extend(resolve_project_videos(config))
+    seen: set[str] = set()
+    unique_videos: list[str | Path] = []
+    for video in resolved_videos:
+        key = str(video.resolve())
+        if key not in seen:
+            seen.add(key)
+            unique_videos.append(video)
+    if not unique_videos:
+        message = (
+            "No videos to analyze. Provide one or more VIDEOS, or pass --project-videos to analyze the videos "
+            "registered in the project configuration."
+        )
+        raise click.UsageError(message=message)
+    if project_videos:
+        click.echo(message=f"analyzing {len(unique_videos)} videos from the project configuration")
 
     try:
         profile = resolve_inference_profile(
@@ -254,7 +282,7 @@ def infer_command(
         )
         summary = run_inference(
             config=config,
-            videos=list(videos),
+            videos=unique_videos,
             destination=dest,
             profile=profile,
             shuffle=shuffle,
