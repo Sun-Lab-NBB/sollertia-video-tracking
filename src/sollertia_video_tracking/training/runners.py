@@ -156,11 +156,17 @@ class _OptimizedTrainingRunnerMixin(TrainingRunner):
             # validation forward would issue a buffer broadcast that the other ranks (parked at the end-of-epoch
             # barrier) never join, deadlocking the group. Gradients are still all-reduced each step so weights stay in
             # sync; only BatchNorm running statistics remain per-rank, which is the standard multi-GPU trade-off.
+            # find_unused_parameters=True because pretrained backbones (notably timm HRNet) carry an ImageNet
+            # classification head whose parameters never contribute to the pose or detection loss. Those parameters
+            # receive no gradient, so without this flag the DDP reducer waits forever for an all-reduce that never
+            # comes and aborts the first step with an unused-parameter error. It adds a per-iteration graph traversal,
+            # a negligible cost for these small lab datasets.
             self.model = DistributedDataParallel(
                 module=self.model,
                 device_ids=[self._local_rank],
                 output_device=self._local_rank,
                 broadcast_buffers=False,
+                find_unused_parameters=True,
             )
         elif getattr(self, "_data_parallel", False):
             self.model = DataParallel(module=self.model, device_ids=self._gpus).cuda()

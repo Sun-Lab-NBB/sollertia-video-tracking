@@ -214,7 +214,20 @@ class TrainingMonitor(Thread):
         self._last_render_time = now
 
         elapsed = now - self._start_time
-        fraction = min(1.0, self._current_epoch / self._total_epochs) if self._total_epochs > 0 else 0.0
+
+        if self._total_epochs <= 0:
+            # No epoch budget has been reported yet, so the workers are still preparing: initializing the process
+            # group, downloading pretrained weights, building the model, and any torch.compile warm-up. That can run
+            # for minutes on a first run, so show elapsed time rather than a static empty bar that looks stalled.
+            message = f"[{'-' * self._width}] preparing model... | {_format_duration(elapsed)} elapsed"
+            if self._is_tty:
+                self._stream.write("\r" + message + "\033[K")
+            else:
+                self._stream.write(message + "\n")
+            self._stream.flush()
+            return
+
+        fraction = min(1.0, self._current_epoch / self._total_epochs)
         percent = 100.0 * fraction
         filled = int(self._width * fraction)
         bar = "#" * filled + "-" * (self._width - filled)

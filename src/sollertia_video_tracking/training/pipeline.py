@@ -1,13 +1,15 @@
 """Provides the training pipeline that runs DeepLabCut model training with mixed precision, DDP, and a clean monitor."""
 
 import os
+import sys
 import copy
 import socket
-from typing import Any
+from typing import Any, TextIO
 import logging
 from pathlib import Path
 import contextlib
 from dataclasses import dataclass
+from collections.abc import Iterator
 
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
@@ -92,6 +94,7 @@ class _TrainingLaunch:
     load_head_weights: bool
     maximum_snapshots_to_keep: int | None
     progress_queue: Any
+    preserve_console: bool
     port: int
     world_size: int
 
@@ -205,13 +208,20 @@ def train_model(
     progress_queue = None
     monitor = None
     manager = None
+    monitor_stream = None
     if display_progress:
         manager = mp.Manager()
         progress_queue = manager.Queue()
-        monitor = TrainingMonitor(progress_queue=progress_queue, heartbeat=heartbeat)
+        # Render the monitor to a preserved duplicate of stderr so it keeps reaching the terminal even when the
+        # single-process training path later redirects this process's stdout and stderr to the training log.
+        monitor_stream = _duplicate_stderr()
+        monitor = TrainingMonitor(progress_queue=progress_queue, heartbeat=heartbeat, stream=monitor_stream)
         monitor.start()
 
     world_size = profile.world_size
+    # Worker chatter is diverted into DeepLabCut's train.txt log while the monitor owns the console. The log is always
+    # retained, and the operator is pointed to it when a run fails.
+    training_log = model_folder / "train.txt" if display_progress else None
     launch = _TrainingLaunch(
         config=config,
         shuffle=shuffle,
@@ -223,20 +233,30 @@ def train_model(
         load_head_weights=load_head_weights,
         maximum_snapshots_to_keep=maximum_snapshots_to_keep,
         progress_queue=progress_queue,
+        preserve_console=monitor_stream is not None,
         port=_find_free_port(),
         world_size=world_size,
     )
+    succeeded = False
     try:
         if profile.use_ddp:
             mp.spawn(_run_training_worker, args=(launch,), nprocs=world_size, join=True)
         else:
             _run_training_worker(0, launch)
+        succeeded = True
     finally:
         if monitor is not None:
             monitor.stop()
             monitor.join(timeout=3)
         if manager is not None:
             manager.shutdown()
+        if monitor_stream is not None:
+            with contextlib.suppress(Exception):
+                monitor_stream.close()
+        # The monitor has released the terminal, so on failure the operator can be pointed to the training log that
+        # captured the worker output.
+        if not succeeded and training_log is not None and training_log.exists():
+            _report_training_log(training_log)
 
     evaluation = None
     if evaluate and "pose" in tasks_trained:
@@ -336,6 +356,75 @@ def _route_logging_to_file(model_folder: Path, *, quiet_console: bool) -> None:
     for handler in root.handlers[:]:
         if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
             root.removeHandler(handler)
+
+
+def _duplicate_stderr() -> TextIO | None:
+    """Returns a writable stream on a duplicate of the standard error descriptor, or None when it has none.
+
+    The duplicate refers to the same terminal as the original stderr but is a distinct descriptor, so it survives a
+    later ``os.dup2`` redirection of descriptor 2. The progress monitor renders through it to keep the console while
+    the single-process training path routes descriptors 1 and 2 to the training log.
+
+    Returns:
+        A stream wrapping a duplicate of the stderr descriptor, or None when stderr exposes no descriptor, such as
+        under output capture.
+    """
+    try:
+        descriptor = os.dup(sys.stderr.fileno())
+    except (OSError, ValueError):
+        return None
+    return os.fdopen(descriptor, "w")
+
+
+@contextlib.contextmanager
+def _redirect_worker_console(log_path: Path, *, active: bool) -> Iterator[None]:
+    """Routes this process's stdout and stderr into the training log at the descriptor level while active.
+
+    A descriptor-level redirection, rather than reassigning ``sys.stdout`` and ``sys.stderr``, is required to capture
+    the output the progress monitor must not compete with: DeepLabCut's ``print`` calls, the Hugging Face download bar,
+    and the C++ ``c10d`` and NCCL messages that write straight to descriptor 2. The original descriptors are restored
+    on exit, so a re-raised worker traceback still reaches the console.
+
+    Args:
+        log_path: The training-log file the diverted output is appended to.
+        active: Whether to redirect; when False the context does nothing, leaving raw output on the console.
+
+    Yields:
+        None, for the duration of the redirection.
+    """
+    if not active:
+        yield
+        return
+    sys.stdout.flush()
+    sys.stderr.flush()
+    saved_stdout = os.dup(1)
+    saved_stderr = os.dup(2)
+    log_descriptor = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        os.dup2(log_descriptor, 1)
+        os.dup2(log_descriptor, 2)
+        yield
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.dup2(saved_stdout, 1)
+        os.dup2(saved_stderr, 2)
+        os.close(saved_stdout)
+        os.close(saved_stderr)
+        os.close(log_descriptor)
+
+
+def _report_training_log(training_log: Path) -> None:
+    """Writes a console notice pointing the operator to the training log after a failed run.
+
+    Args:
+        training_log: The training-log file that captured the worker's diverted stdout and stderr.
+    """
+    sys.stderr.write(
+        f"\nTraining did not complete. The worker output (DeepLabCut, Hugging Face, and distributed-backend messages) "
+        f"was captured in the training log at {training_log}. Review it for the underlying cause.\n"
+    )
+    sys.stderr.flush()
 
 
 def _plan_training_tasks(loader: DLCLoader) -> tuple[str, ...]:
@@ -570,59 +659,67 @@ def _run_training_worker(rank: int, launch: _TrainingLaunch) -> None:
     maximum_snapshots_to_keep = launch.maximum_snapshots_to_keep
 
     _device, _gpus, ddp, local_rank = _resolve_process_placement(profile, rank)
+    # The loader is built before the process group so the training-log path is known in time to divert this worker's
+    # console output around distributed initialization, where the c10d and NCCL C++ layers write their first messages.
+    loader = DLCLoader(
+        config=launch.config,
+        shuffle=launch.shuffle,
+        trainset_index=launch.training_set_index,
+        modelprefix=launch.modelprefix,
+    )
+    # A spawned DDP worker is its own process, so redirecting its descriptors never touches the monitor in the parent.
+    # The single-process path shares this process with the monitor, so it may only redirect once the monitor holds a
+    # preserved stderr duplicate to render through.
+    quiet_console = progress_queue is not None
+    redirect_console = quiet_console and (ddp or launch.preserve_console)
     try:
-        if ddp:
-            os.environ["MASTER_ADDR"] = "127.0.0.1"
-            os.environ["MASTER_PORT"] = str(launch.port)
-            dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
-            torch.cuda.set_device(local_rank)
-
-        loader = DLCLoader(
-            config=launch.config,
-            shuffle=launch.shuffle,
-            trainset_index=launch.training_set_index,
-            modelprefix=launch.modelprefix,
-        )
-        fix_seeds(loader.model_cfg["train_settings"]["seed"])
-        apply_runtime_optimizations(profile)
-
-        if rank == 0:
-            _route_logging_to_file(loader.model_folder, quiet_console=progress_queue is not None)
-            _logger.info("Optimized training: %s", profile.describe())
-
-        detector = loader.model_cfg.get("detector")
-        if loader.pose_task == Task.TOP_DOWN and detector is not None and detector["train_settings"]["epochs"] > 0:
-            detector_config = copy.deepcopy(detector)
-            detector_config["device"] = loader.model_cfg["device"]
-            detector_config["train_settings"]["weight_init"] = loader.model_cfg["train_settings"].get("weight_init")
-            _train_single_model(
-                loader,
-                detector_config,
-                Task.DETECT,
-                profile,
-                rank=rank,
-                world_size=world_size,
-                snapshot_path=detector_path,
-                load_head_weights=load_head_weights,
-                maximum_snapshots_to_keep=maximum_snapshots_to_keep,
-                progress_queue=progress_queue,
-            )
+        with _redirect_worker_console(loader.model_folder / "train.txt", active=redirect_console):
             if ddp:
-                dist.barrier()
+                os.environ["MASTER_ADDR"] = "127.0.0.1"
+                os.environ["MASTER_PORT"] = str(launch.port)
+                dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+                torch.cuda.set_device(local_rank)
 
-        if loader.model_cfg["train_settings"]["epochs"] > 0:
-            _train_single_model(
-                loader,
-                loader.model_cfg,
-                loader.pose_task,
-                profile,
-                rank=rank,
-                world_size=world_size,
-                snapshot_path=snapshot_path,
-                load_head_weights=load_head_weights,
-                maximum_snapshots_to_keep=maximum_snapshots_to_keep,
-                progress_queue=progress_queue,
-            )
+            fix_seeds(loader.model_cfg["train_settings"]["seed"])
+            apply_runtime_optimizations(profile)
+
+            if rank == 0:
+                _route_logging_to_file(loader.model_folder, quiet_console=quiet_console)
+                _logger.info("Optimized training: %s", profile.describe())
+
+            detector = loader.model_cfg.get("detector")
+            if loader.pose_task == Task.TOP_DOWN and detector is not None and detector["train_settings"]["epochs"] > 0:
+                detector_config = copy.deepcopy(detector)
+                detector_config["device"] = loader.model_cfg["device"]
+                detector_config["train_settings"]["weight_init"] = loader.model_cfg["train_settings"].get("weight_init")
+                _train_single_model(
+                    loader,
+                    detector_config,
+                    Task.DETECT,
+                    profile,
+                    rank=rank,
+                    world_size=world_size,
+                    snapshot_path=detector_path,
+                    load_head_weights=load_head_weights,
+                    maximum_snapshots_to_keep=maximum_snapshots_to_keep,
+                    progress_queue=progress_queue,
+                )
+                if ddp:
+                    dist.barrier()
+
+            if loader.model_cfg["train_settings"]["epochs"] > 0:
+                _train_single_model(
+                    loader,
+                    loader.model_cfg,
+                    loader.pose_task,
+                    profile,
+                    rank=rank,
+                    world_size=world_size,
+                    snapshot_path=snapshot_path,
+                    load_head_weights=load_head_weights,
+                    maximum_snapshots_to_keep=maximum_snapshots_to_keep,
+                    progress_queue=progress_queue,
+                )
     finally:
         if rank == 0:
             destroy_file_logging()
