@@ -1,9 +1,12 @@
 """Provides a wrapper over DeepLabCut training-dataset creation at parity with the GUI's create-dataset tab."""
 
 import re
-from typing import Any
+import sys
+from typing import Any, TextIO
 from pathlib import Path
+import contextlib
 from dataclasses import dataclass
+from collections.abc import Iterator
 
 import deeplabcut.compat as dlc_compat
 from deeplabcut.modelzoo import build_weight_init
@@ -31,6 +34,10 @@ _CONDITION_PREDICTION_SUFFIXES: tuple[str, ...] = (".h5", ".json")
 
 _CONDITION_SNAPSHOT_SUFFIX: str = ".pt"
 """The conditional-top-down conditioning-file suffix that identifies a snapshot, converted to a (shuffle, name) pair."""
+
+_UNANNOTATED_VIDEO_NOTICE: str = "not found (perhaps not annotated)"
+"""The substring DeepLabCut prints once per registered video that lacks an annotation file, filtered from the
+training-dataset creation output because projects routinely register many more videos than any one shuffle labels."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,30 +242,31 @@ def create_training_dataset(
         raise ValueError(message)
 
     user_feedback = not overwrite
-    if from_shuffle is not None:
-        dlc_create_training_dataset_from_existing_split(
-            config=str(config),
-            from_shuffle=from_shuffle,
-            from_trainsetindex=from_training_set_index,
-            shuffles=[shuffle],
-            net_type=net_type,
-            detector_type=detector_type,
-            augmenter_type=augmenter_type,
-            userfeedback=user_feedback,
-            weight_init=weight_init,
-            ctd_conditions=ctd_conditions,
-        )
-    else:
-        dlc_create_training_dataset(
-            config=str(config),
-            Shuffles=[shuffle],
-            net_type=net_type,
-            detector_type=detector_type,
-            augmenter_type=augmenter_type,
-            userfeedback=user_feedback,
-            weight_init=weight_init,
-            ctd_conditions=ctd_conditions,
-        )
+    with _suppress_unannotated_video_notices():
+        if from_shuffle is not None:
+            dlc_create_training_dataset_from_existing_split(
+                config=str(config),
+                from_shuffle=from_shuffle,
+                from_trainsetindex=from_training_set_index,
+                shuffles=[shuffle],
+                net_type=net_type,
+                detector_type=detector_type,
+                augmenter_type=augmenter_type,
+                userfeedback=user_feedback,
+                weight_init=weight_init,
+                ctd_conditions=ctd_conditions,
+            )
+        else:
+            dlc_create_training_dataset(
+                config=str(config),
+                Shuffles=[shuffle],
+                net_type=net_type,
+                detector_type=detector_type,
+                augmenter_type=augmenter_type,
+                userfeedback=user_feedback,
+                weight_init=weight_init,
+                ctd_conditions=ctd_conditions,
+            )
 
     # DeepLabCut silently returns without creating the shuffle when it finds no labeled data to build it from (for
     # example, every labeled frame was annotated by a scorer other than the one named in the project configuration, or
@@ -287,3 +295,80 @@ def create_training_dataset(
         weight_init=weight_init_description,
         from_shuffle=from_shuffle,
     )
+
+
+class _UnannotatedNoticeFilter:
+    """Forwards written text to a target stream, dropping whole lines that contain a marker substring.
+
+    DeepLabCut's training-set collation prints one notice per registered video that has no annotation file. Projects
+    commonly register many more videos than any single shuffle labels, so these notices flood the console without
+    conveying anything actionable. This wrapper buffers writes until a line break, then forwards each completed line to
+    the target stream unless that line contains the marker.
+    """
+
+    def __init__(self, target: TextIO, marker: str) -> None:
+        """Initializes the filter with the stream to forward to and the marker that selects lines to drop.
+
+        Args:
+            target: The stream that surviving lines are written to.
+            marker: The substring whose presence in a completed line drops that line.
+        """
+        self._target = target
+        self._marker = marker
+        self._pending = ""
+
+    def write(self, text: str) -> int:
+        """Buffers the text and forwards every newly completed line that does not contain the marker.
+
+        Args:
+            text: The text written to the redirected stream.
+
+        Returns:
+            The number of characters accepted, honoring the standard stream write contract.
+        """
+        self._pending += text
+        while "\n" in self._pending:
+            line, self._pending = self._pending.split("\n", 1)
+            if self._marker not in line:
+                self._target.write(f"{line}\n")
+        return len(text)
+
+    def flush(self) -> None:
+        """Flushes the target stream, leaving any incomplete trailing line buffered until it is completed."""
+        self._target.flush()
+
+    def drain(self) -> None:
+        """Forwards any buffered trailing text that never received a line break, unless it contains the marker."""
+        if self._pending and self._marker not in self._pending:
+            self._target.write(self._pending)
+        self._pending = ""
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegates stream attributes not defined on the filter to the underlying target stream.
+
+        Args:
+            name: The attribute requested on the filter.
+
+        Returns:
+            The corresponding attribute of the target stream.
+        """
+        return getattr(self._target, name)
+
+
+@contextlib.contextmanager
+def _suppress_unannotated_video_notices() -> Iterator[None]:
+    """Filters DeepLabCut's per-video "not annotated" notices from standard output within the context.
+
+    DeepLabCut prints one notice for every registered video that lacks an annotation file while collating the training
+    set. These notices are expected whenever a project registers more videos than are labeled and are not actionable,
+    so they are dropped while every other line reaches the console unchanged.
+
+    Yields:
+        None, for the duration of the filtering.
+    """
+    stream_filter = _UnannotatedNoticeFilter(target=sys.stdout, marker=_UNANNOTATED_VIDEO_NOTICE)
+    try:
+        with contextlib.redirect_stdout(stream_filter):
+            yield
+    finally:
+        stream_filter.drain()
