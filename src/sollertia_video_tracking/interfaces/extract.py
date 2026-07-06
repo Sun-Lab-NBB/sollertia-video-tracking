@@ -190,9 +190,9 @@ def extract_group(
     type=int,
     default=200,
     show_default=True,
-    help="The total number of frames you want across the whole project. When set, not-yet-processed videos are "
-    "sampled at random until this many frames are reached, so coverage grows over repeated runs (each sampled video "
-    "contributes --frames-per-video frames). Set to -1 to process every selected video instead.",
+    help="The total number of extracted frames you want across the whole project. When set, not-yet-processed videos "
+    "are sampled at random until this many frames are reached, so coverage grows over repeated runs (each sampled "
+    "video contributes --frames-per-video frames). Set to -1 to process every selected video instead.",
 )
 @click.option(
     "-s",

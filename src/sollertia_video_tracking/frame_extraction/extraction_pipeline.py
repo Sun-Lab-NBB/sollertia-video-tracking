@@ -312,6 +312,10 @@ def extract_frames_kmeans(
             config_path=config_path,
         )
 
+    # Crop the extracted frames to each video's configured region only when the project is set to crop, so extraction
+    # honors the same project-wide cropping toggle inference and outlier extraction do.
+    crop_frames = bool(configuration.get("cropping", False))
+
     # Each worker decodes one video pinned to a disjoint core block, streaming progress to the shared aggregate bar.
     def build_tasks(reporting_queue: Any | None) -> list[tuple[Any, ...]]:
         """Packs one work item per selected video, embedding the progress queue only when progress is displayed."""
@@ -326,6 +330,7 @@ def extract_frames_kmeans(
                 video_index,
                 frame_totals[video_index],
                 reporting_queue,
+                crop_frames,
             )
             for video_index, video in enumerate(videos)
         ]
@@ -568,6 +573,7 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
         video_index,
         frame_total,
         progress_queue,
+        crop_frames,
     ) = task
     try:
         cv2.setNumThreads(1)
@@ -600,8 +606,8 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
                 str(config_path),
                 mode="automatic",
                 algo="kmeans",
-                # Applies the per-video crop stored in config.yaml.
-                crop=True,
+                # Applies the per-video crop stored in config.yaml only when the project is configured to crop.
+                crop=crop_frames,
                 # Runs non-interactively.
                 userfeedback=False,
                 cluster_step=clustering_stride,

@@ -570,14 +570,38 @@ def _register_videos(
         videos: The videos that will be extracted from.
         copy_videos: Determines whether newly added videos are copied into the project rather than symlinked.
     """
+    crop_coords = _project_cropping_coords(configuration)
     registered = {Path(video).resolve() for video in configuration.get("video_sets", {})}
     for video in videos:
         if Path(video).resolve() in registered:
             continue
         with contextlib.suppress(Exception):
             dlc_outlier_frames.attempt_to_add_video(
-                config=str(config_path), video=video, copy_videos=copy_videos, coords=None
+                config=str(config_path), video=video, copy_videos=copy_videos, coords=crop_coords
             )
+
+
+def _project_cropping_coords(configuration: dict[str, Any]) -> list[int] | None:
+    """Returns the project-wide crop rectangle to register new refinement videos with, or None when not cropping.
+
+    When the project is configured to crop, a newly added refinement video must carry a crop so its outlier frames are
+    written in the same cropped coordinate space the model was trained and the video analyzed in. The project's
+    ``x1, x2, y1, y2`` rectangle is used, matching the region ``analyze_videos`` crops an unregistered video to. When
+    the project is not configured to crop, None is returned so the video is registered at its full frame.
+
+    Args:
+        configuration: The loaded project configuration.
+
+    Returns:
+        The ``[x1, x2, y1, y2]`` crop rectangle, or None when the project is not configured to crop or the rectangle
+        is incomplete.
+    """
+    if not configuration.get("cropping", False):
+        return None
+    corners = [configuration.get(key) for key in ("x1", "x2", "y1", "y2")]
+    if any(corner is None for corner in corners):
+        return None
+    return [int(corner) for corner in corners]
 
 
 def _extract_all_videos(

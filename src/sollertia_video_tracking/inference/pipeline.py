@@ -26,6 +26,9 @@ _STOCK_ACCELERATION_DISABLED: dict[str, dict[str, bool]] = {
     "compile": {"enabled": False},
 }
 
+_CROP_FIELD_COUNT: int = 4
+"""The number of comma-separated integers, ``x1,x2,y1,y2``, in a video's config.yaml crop specification."""
+
 
 @dataclass(frozen=True, slots=True)
 class InferenceSummary:
@@ -121,6 +124,56 @@ def resolve_project_videos(config: str | Path) -> list[Path]:
     return [video for video in videos if video.exists()]
 
 
+def _parse_crop(crop: Any) -> list[int] | None:
+    """Parses a ``"x1, x2, y1, y2"`` crop specification into four integers, or None when it is absent or malformed.
+
+    Args:
+        crop: The crop specification stored in the project configuration, a comma-separated string of four integers.
+
+    Returns:
+        The ``[x1, x2, y1, y2]`` crop as integers, or None when the value is missing or not four integers.
+    """
+    if crop is None:
+        return None
+    parts = [part.strip() for part in str(crop).split(",")]
+    if len(parts) != _CROP_FIELD_COUNT:
+        return None
+    try:
+        return [int(part) for part in parts]
+    except ValueError:
+        return None
+
+
+def _resolve_video_cropping(project_config: dict[str, Any], video: str) -> list[int] | None:
+    """Resolves the crop rectangle a video must be analyzed with, honoring the project's cropping configuration.
+
+    When the project is configured to crop, inference must analyze the same region a video's frames are extracted
+    from, so predictions land in the cropped coordinate space the model was trained on. The video's own registered
+    crop is used when present, falling back to the project-wide rectangle for a video that is not yet registered.
+    When the project is not configured to crop, the full frame is analyzed.
+
+    Args:
+        project_config: The loaded DeepLabCut project configuration.
+        video: The path of the video about to be analyzed.
+
+    Returns:
+        The ``[x1, x2, y1, y2]`` crop rectangle to analyze, or None to analyze the full frame.
+    """
+    if not project_config.get("cropping", False):
+        return None
+    target = Path(video).resolve()
+    for registered, meta in (project_config.get("video_sets") or {}).items():
+        if not isinstance(meta, dict) or Path(registered).resolve() != target:
+            continue
+        crop = _parse_crop(meta.get("crop"))
+        if crop is not None:
+            return crop
+    corners = [project_config.get(key) for key in ("x1", "x2", "y1", "y2")]
+    if any(corner is None for corner in corners):
+        return None
+    return [int(corner) for corner in corners]
+
+
 def run_inference(
     config: str | Path,
     videos: list[str | Path],
@@ -187,12 +240,16 @@ def run_inference(
     totals = {index: _probe_frame_count(video) for index, video in enumerate(video_paths)}
     slots = _build_slots(profile, video_count=len(video_paths))
 
+    # Resolve each video's crop once, in the parent, so every worker analyzes the same region the frames were
+    # extracted from when the project is configured to crop, keeping predictions in the model's coordinate space.
+    project_config = read_config(str(config))
+
     manager = mp.Manager()
     video_queue = manager.Queue()
     progress_queue = manager.Queue()
     results_queue = manager.Queue()
     for index, video in enumerate(video_paths):
-        video_queue.put((index, str(video), totals[index]))
+        video_queue.put((index, str(video), totals[index], _resolve_video_cropping(project_config, str(video))))
     for _ in slots:
         video_queue.put(None)
 
@@ -410,15 +467,16 @@ def _run_inference_worker(slot: _Slot, launch: _InferenceLaunch) -> None:
             _analyze_one_video(slot, launch, item)
 
 
-def _analyze_one_video(slot: _Slot, launch: _InferenceLaunch, item: tuple[int, str, int]) -> None:
+def _analyze_one_video(slot: _Slot, launch: _InferenceLaunch, item: tuple[int, str, int, list[int] | None]) -> None:
     """Analyzes a single video from the queue, converts its output, and reports the result and progress.
 
     Args:
         slot: The device and optional CPU-core placement for this worker.
         launch: The bundle of picklable per-run parameters.
-        item: The (video index, video path, frame total) work item pulled from the queue.
+        item: The (video index, video path, frame total, crop rectangle) work item pulled from the queue, where the
+            crop rectangle is the ``[x1, x2, y1, y2]`` region to analyze or None to analyze the full frame.
     """
-    index, video, total = item
+    index, video, total, cropping = item
     output_folder = launch.destination if launch.destination is not None else Path(video).parent
     original_tqdm = dlc_videos.tqdm
     if launch.display_progress:
@@ -431,6 +489,8 @@ def _analyze_one_video(slot: _Slot, launch: _InferenceLaunch, item: tuple[int, s
                 shuffle=launch.shuffle,
                 device=slot.device,
                 destfolder=str(output_folder),
+                # Analyze the same region the frames were extracted from; None analyzes the full frame.
+                cropping=cropping,
                 snapshot_index=launch.snapshot_index,
                 detector_snapshot_index=launch.detector_snapshot_index,
                 batch_size=launch.batch_size,

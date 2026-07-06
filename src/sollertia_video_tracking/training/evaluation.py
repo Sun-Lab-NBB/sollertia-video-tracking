@@ -11,13 +11,17 @@ per-frame, per-keypoint detail that DeepLabCut computes and then discards.
 
 Evaluation runs a single batched forward pass over the labeled frames on one device in full float32 precision. The
 labeled set is small (the hand-labeled train and test frames, not video), so there is no throughput problem to solve,
-and the canonical error numbers are defined at float32; mixed precision is deliberately not used here.
+and the canonical error numbers are defined at float32; mixed precision is deliberately not used here. Frames are
+batched only when they all share one resolution: DeepLabCut's inference runner stacks each batch into a single tensor
+and its evaluation transform pads rather than resizes, so a project whose labeled frames were extracted at more than
+one native resolution is scored one frame at a time.
 
 Because it depends on DeepLabCut's internal evaluation, matching, and runner-construction functions, the DeepLabCut
 version is pinned exactly in ``pyproject.toml`` and must be re-verified against any new release.
 """
 
 from typing import Any
+import logging
 from pathlib import Path
 from datetime import UTC, datetime
 from dataclasses import dataclass
@@ -34,6 +38,9 @@ from deeplabcut.pose_estimation_pytorch.task import Task
 from deeplabcut.core.metrics.distance_metrics import match_predictions_for_rmse
 from deeplabcut.pose_estimation_pytorch.apis.utils import get_model_snapshots, get_inference_runners
 from deeplabcut.pose_estimation_pytorch.apis.evaluation import evaluate
+
+_logger = logging.getLogger(__name__)
+"""The module logger; its records propagate to the root handlers configured for the training run."""
 
 _SPLITS: tuple[str, ...] = ("train", "test")
 """The labeled-data partitions scored during evaluation, in report order."""
@@ -173,7 +180,9 @@ def evaluate_trained_model(
         pcutoff: The confidence cutoff for the cutoff-filtered metrics and the ``above_pcutoff`` column, or None to
             fall back to the project configuration's ``pcutoff`` (0.6 when unset), matching
             ``deeplabcut.evaluate_network``.
-        batch_size: The number of frames scored per forward pass; larger batches use the device more fully.
+        batch_size: The number of frames scored per forward pass; larger batches use the device more fully. It is
+            reduced to one automatically when the labeled frames span more than one resolution, which DeepLabCut cannot
+            stack into a single batch.
         device: The device to evaluate on (for example ``"cuda:0"`` or ``"cpu"``), or None to resolve it from the
             model configuration.
         write_provenance: Whether to write the ``<snapshot>_evaluation.yaml`` sidecar beside the feather.
@@ -189,6 +198,7 @@ def evaluate_trained_model(
     parameters = loader.get_dataset_parameters()
     single_animal = parameters.max_num_animals == 1
     cutoff = float(loader.project_cfg.get("pcutoff", 0.6)) if pcutoff is None else float(pcutoff)
+    batch_size = _resolve_evaluation_batch_size(loader, batch_size)
 
     pose_snapshot = _resolve_snapshot(loader, snapshot_index, loader.pose_task)
     detector_snapshot = None
@@ -305,6 +315,42 @@ def evaluate_trained_model(
         train=split_metrics["train"],
         test=split_metrics["test"],
     )
+
+
+def _resolve_evaluation_batch_size(loader: DLCLoader, requested: int) -> int:
+    """Reduces the evaluation batch size to one unless every labeled frame shares a single native resolution.
+
+    DeepLabCut's inference runner stacks each forward-pass batch into one tensor, and the evaluation transform pads
+    each frame up to a multiple of 32 rather than resizing to a common size. Labeled frames extracted at more than one
+    native resolution therefore cannot share a batch, so this returns one whenever the frames differ in size and the
+    requested size only when they are uniform. Comparing native resolutions is sufficient and safe: frames of one
+    native resolution always pad to one size, while distinct resolutions can pad to distinct sizes. The frame
+    dimensions are read from the loader's already-parsed annotations (populated from image headers), so no pixels are
+    decoded.
+
+    Args:
+        loader: The loader for the evaluated shuffle, holding the labeled train and test frames.
+        requested: The batch size requested for the forward pass.
+
+    Returns:
+        The requested batch size when every labeled frame shares one native resolution, or one otherwise.
+    """
+    if requested <= 1:
+        return 1
+    resolutions: set[tuple[int, int]] = set()
+    for split in _SPLITS:
+        for image in loader.load_data(split)["images"]:
+            height, width = image.get("height"), image.get("width")
+            if height is None or width is None:
+                return 1
+            resolutions.add((int(height), int(width)))
+            if len(resolutions) > 1:
+                _logger.info(
+                    "The labeled frames span multiple resolutions, which DeepLabCut cannot stack into one batch; "
+                    "scoring one frame at a time (batch size 1)."
+                )
+                return 1
+    return requested
 
 
 def _resolve_snapshot(loader: DLCLoader, index: int | str, task: Task, *, required: bool = True) -> Any:
