@@ -18,10 +18,18 @@ _STOP_SENTINEL: tuple[str] = ("__live_bar_stop__",)
 """The canonical terminal message ``stop`` places on the queue. It is distinct from every real progress message, so the
 shared run loop recognizes termination regardless of each subclass's own message protocol."""
 
+_TTY_RENDER_INTERVAL: float = 0.2
+"""The minimum interval, in seconds, between rendered lines on an interactive terminal, where the bar redraws in place
+at a fast live cadence."""
+
 _NON_TTY_RENDER_INTERVAL: float = 30.0
-"""The fixed interval, in seconds, between rendered lines when the output is not an interactive terminal. Redirected
-output cannot redraw a line in place, so each render appends a whole new line; this steady cadence keeps such logs
-greppable without flooding them. Interactive terminals ignore this and redraw in place at a faster live cadence."""
+"""The minimum interval, in seconds, between rendered lines when the output is not an interactive terminal. A forced
+redraw, such as a completion, bypasses it. Redirected output cannot redraw a line in place, so each render appends a
+whole new line; this steady cadence keeps such logs greppable without flooding them."""
+
+_NON_TTY_POLL_INTERVAL: float = 1.0
+"""The interval, in seconds, the non-interactive run loop waits for a message before waking to re-check whether a
+render is due. It stays well below the render interval so a due render waits at most one poll."""
 
 
 def format_duration(seconds: float) -> str:
@@ -31,7 +39,7 @@ def format_duration(seconds: float) -> str:
         seconds: The duration to format, in seconds.
 
     Returns:
-        The formatted duration string.
+        The duration rendered as ``MM:SS``, or ``H:MM:SS`` past an hour.
     """
     seconds = int(max(0, seconds))
     hours, remainder = divmod(seconds, 3600)
@@ -91,11 +99,16 @@ class LiveBar(Thread):
         self._last_render_time = 0.0
         self._spinner_index = 0
 
+    def __repr__(self) -> str:
+        """Returns a string representation of the LiveBar instance."""
+        return f"LiveBar(width={self._width}, is_tty={self._is_tty})"
+
     def run(self) -> None:
         """Consumes queue messages and re-renders the bar until the shared ``stop`` sentinel arrives."""
+        poll_timeout = _TTY_RENDER_INTERVAL if self._is_tty else _NON_TTY_POLL_INTERVAL
         while True:
             try:
-                message = self._progress_queue.get(timeout=0.2 if self._is_tty else 1.0)
+                message = self._progress_queue.get(timeout=poll_timeout)
             except Empty:
                 self._render()
                 continue
@@ -168,7 +181,7 @@ class LiveBar(Thread):
     def _eta(self, done: float, total: float, elapsed: float) -> str:
         """Formats an honest estimated time remaining from the work done so far.
 
-        Shows a placeholder until there is measurable throughput, so warm-up never reads as a finished ``0:00:00``; a
+        Shows a placeholder until there is measurable throughput, so warm-up never reads as a finished ``00:00``; a
         plain zero at completion; and the projected remaining time otherwise.
 
         Args:
@@ -193,12 +206,12 @@ class LiveBar(Thread):
             force: Determines whether to render immediately, bypassing the minimum interval between renders.
         """
         now = time.monotonic()
-        interval = 0.2 if self._is_tty else _NON_TTY_RENDER_INTERVAL
+        interval = _TTY_RENDER_INTERVAL if self._is_tty else _NON_TTY_RENDER_INTERVAL
         if not force and (now - self._last_render_time) < interval:
             return
         self._last_render_time = now
 
-        # The spinner advances on every drawn line so the bar stays visibly alive through the count-static stretches of
+        # Advance the spinner on every drawn line so the bar stays visibly alive through the count-static stretches of
         # a run: warm-up before the first unit of work is reported, and the decode/cluster gaps between updates.
         spinner = _SPINNER_FRAMES[self._spinner_index % len(_SPINNER_FRAMES)]
         self._spinner_index += 1
