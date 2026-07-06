@@ -161,7 +161,6 @@ def extract_outlier_frames_parallel(
     cores_per_worker: int = -1,
     reserved_core_count: int = DEFAULT_RESERVED_CORE_COUNT,
     fitting_worker_count: int = -1,
-    minimum_progress_interval: float = 30.0,
     display_progress: bool = True,
 ) -> OutlierExtractionSummary:
     """Flags and extracts a trained model's likely-wrong frames across many analyzed videos in parallel.
@@ -221,8 +220,6 @@ def extract_outlier_frames_parallel(
         reserved_core_count: The number of CPU cores to leave free for other tasks.
         fitting_worker_count: The number of processes fitting SARIMAX models during ``fitting`` detection. Set to -1 to
             use every usable core.
-        minimum_progress_interval: The minimum interval, in seconds, between progress lines when the output is not a
-            TTY.
         display_progress: Determines whether to render the run header and the aggregate progress bar.
 
     Returns:
@@ -364,7 +361,6 @@ def extract_outlier_frames_parallel(
             worker_count=worker_count,
             cores_per_worker=cores_per_worker,
             reserved_core_count=reserved_core_count,
-            minimum_progress_interval=minimum_progress_interval,
             display_progress=display_progress,
             total_video_count=len(video_paths),
             unanalyzed_videos=tuple(unanalyzed_videos),
@@ -621,7 +617,6 @@ def _extract_all_videos(
     worker_count: int,
     cores_per_worker: int,
     reserved_core_count: int,
-    minimum_progress_interval: float,
     display_progress: bool,
     total_video_count: int,
     unanalyzed_videos: tuple[str, ...],
@@ -645,7 +640,6 @@ def _extract_all_videos(
         worker_count: The requested extraction worker count, or -1 to resolve automatically.
         cores_per_worker: The requested cores per worker, or -1 to spread them evenly.
         reserved_core_count: The number of cores to leave free.
-        minimum_progress_interval: The minimum interval between progress lines when the output is not a TTY.
         display_progress: Determines whether to render the run header and progress bar.
         total_video_count: The total number of videos considered, for the summary.
         unanalyzed_videos: The unanalyzed videos, for the summary.
@@ -710,7 +704,6 @@ def _extract_all_videos(
         worker_count=resolved_worker_count,
         core_sets=core_sets,
         frame_totals=frame_totals,
-        minimum_progress_interval=minimum_progress_interval,
         display_progress=display_progress,
     ):
         if status == "ok":

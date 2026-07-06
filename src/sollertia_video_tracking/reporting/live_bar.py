@@ -18,6 +18,11 @@ _STOP_SENTINEL: tuple[str] = ("__live_bar_stop__",)
 """The canonical terminal message ``stop`` places on the queue. It is distinct from every real progress message, so the
 shared run loop recognizes termination regardless of each subclass's own message protocol."""
 
+_NON_TTY_RENDER_INTERVAL: float = 30.0
+"""The fixed interval, in seconds, between rendered lines when the output is not an interactive terminal. Redirected
+output cannot redraw a line in place, so each render appends a whole new line; this steady cadence keeps such logs
+greppable without flooding them. Interactive terminals ignore this and redraw in place at a faster live cadence."""
+
 
 def format_duration(seconds: float) -> str:
     """Formats a duration as ``MM:SS``, or as ``H:MM:SS`` when it spans an hour or more.
@@ -51,7 +56,6 @@ class LiveBar(Thread):
 
     Attributes:
         _progress_queue: The shared queue the producer streams progress messages to.
-        _heartbeat: The minimum interval, in seconds, between rendered lines when the output is not a TTY.
         _preparing_label: The text shown during warm-up, before the first unit of work is reported.
         _width: The width, in characters, of the rendered bar.
         _stream: The output stream the bar renders to.
@@ -64,7 +68,6 @@ class LiveBar(Thread):
     def __init__(
         self,
         progress_queue: Any,
-        heartbeat: float,
         *,
         preparing_label: str = "preparing...",
         stream: TextIO | None = None,
@@ -74,15 +77,12 @@ class LiveBar(Thread):
 
         Args:
             progress_queue: The shared queue the producer streams progress messages to.
-            heartbeat: The minimum interval, in seconds, between rendered lines when the output is not a TTY; the
-                effective interval is clamped to at least 1.0 second.
             preparing_label: The text shown during warm-up, before the first unit of work is reported.
             stream: The output stream to render to, defaulting to the standard error stream.
             width: The width, in characters, of the rendered bar.
         """
         super().__init__(daemon=True)
         self._progress_queue = progress_queue
-        self._heartbeat = heartbeat
         self._preparing_label = preparing_label
         self._width = width
         self._stream = stream if stream is not None else sys.stderr
@@ -193,7 +193,7 @@ class LiveBar(Thread):
             force: Determines whether to render immediately, bypassing the minimum interval between renders.
         """
         now = time.monotonic()
-        interval = 0.2 if self._is_tty else max(1.0, self._heartbeat)
+        interval = 0.2 if self._is_tty else _NON_TTY_RENDER_INTERVAL
         if not force and (now - self._last_render_time) < interval:
             return
         self._last_render_time = now

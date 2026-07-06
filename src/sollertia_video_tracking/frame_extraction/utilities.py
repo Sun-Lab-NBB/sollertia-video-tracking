@@ -57,7 +57,6 @@ def iter_pinned_extraction(
     worker_count: int,
     core_sets: list[set[int]],
     frame_totals: dict[int, int],
-    minimum_progress_interval: float,
     display_progress: bool,
 ) -> Iterator[tuple[str, int, str]]:
     """Runs the workers over a pinned process pool, yielding each ``(video_path, frames_written, status)`` result.
@@ -77,7 +76,6 @@ def iter_pinned_extraction(
         worker_count: The resolved number of concurrent workers.
         core_sets: The per-worker core-id sets the workers are pinned across.
         frame_totals: The mapping of video index to that video's frame contribution, driving the aggregate bar.
-        minimum_progress_interval: The minimum interval, in seconds, between progress lines when output is not a TTY.
         display_progress: Determines whether the aggregate progress bar is rendered and progress is streamed to it.
 
     Yields:
@@ -96,7 +94,6 @@ def iter_pinned_extraction(
         progress_queue=progress_queue,
         total_video_count=len(videos),
         frame_totals=frame_totals,
-        minimum_progress_interval=minimum_progress_interval,
     )
     try:
         with context.Pool(processes=worker_count, initializer=pin_worker_to_cores, initargs=(core_set_queue,)) as pool:
@@ -167,32 +164,36 @@ def extracted_frame_paths(directory: Path) -> list[Path]:
     return sorted(frame for frame in directory.glob("img*.png") if not frame.stem.endswith("labeled"))
 
 
-def resolve_video_overrides(
-    always_include_videos: tuple[str, ...], videos: list[str]
-) -> tuple[tuple[str, ...], list[str]]:
-    """Resolves the video-override path substrings to the candidate videos they match, keyed in candidate order.
+def select_registered_videos(
+    registered_videos: list[str], requested_videos: tuple[str | Path, ...]
+) -> tuple[list[str], list[str]]:
+    """Resolves the caller's requested video files to the project's registered videos, in registered order.
 
-    Shared by both pipelines so the ``--always-include`` pins behave identically whether frames are clustered from raw
-    video or selected from flagged outliers.
+    Each requested path and each registered video path is resolved to its absolute form before matching, so a request
+    selects its video regardless of how the path was spelled (relative, symlinked, or otherwise un-normalized). The
+    frames pipeline uses the matches either as always-included pins over the full project or, under exclusive
+    extraction, as the entire set to extract.
 
     Args:
-        always_include_videos: The path substrings naming videos to always include in the budgeted sample.
-        videos: The candidate video paths for the run.
+        registered_videos: The project's registered video paths, in configuration order.
+        requested_videos: The specific project video files the caller named.
 
     Returns:
-        A tuple of the matched video paths, deduplicated and in candidate order, and the list of override substrings
-        that matched no candidate video.
+        A tuple of the matched registered video paths, deduplicated and in registered order, and the list of requested
+        paths, as given, that matched no registered video.
     """
+    resolved_registered = {video: Path(video).resolve() for video in registered_videos}
     matched_videos: set[str] = set()
-    unmatched_substrings: list[str] = []
-    for substring in dict.fromkeys(always_include_videos):
-        matching_videos = [video for video in videos if substring in video]
-        if matching_videos:
-            matched_videos.update(matching_videos)
+    unmatched_requests: list[str] = []
+    for request in dict.fromkeys(str(video) for video in requested_videos):
+        resolved_request = Path(request).resolve()
+        matches = [video for video, resolved in resolved_registered.items() if resolved == resolved_request]
+        if matches:
+            matched_videos.update(matches)
         else:
-            unmatched_substrings.append(substring)
-    ordered_matches = tuple(video for video in videos if video in matched_videos)
-    return ordered_matches, unmatched_substrings
+            unmatched_requests.append(request)
+    ordered_matches = [video for video in registered_videos if video in matched_videos]
+    return ordered_matches, unmatched_requests
 
 
 def ensure_unique_video_stems(videos: list[str], *, error_context: str) -> None:

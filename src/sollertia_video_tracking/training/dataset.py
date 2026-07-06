@@ -221,6 +221,8 @@ def create_training_dataset(
     Raises:
         ValueError: When ``net_type``, ``detector_type``, or ``augmenter_type`` is not in the installed engine's
             catalog.
+        ValueError: When DeepLabCut creates no shuffle (for example, no labeled frames exist, or every labeled frame
+            was annotated by a scorer other than the one named in the project configuration).
     """
     if net_type is not None and net_type not in available_models():
         message = (

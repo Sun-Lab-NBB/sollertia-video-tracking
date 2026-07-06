@@ -196,13 +196,6 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     help="The confidence cutoff for the evaluation's cutoff-filtered metrics. Omit to use the default of 0.6.",
 )
 @click.option(
-    "--heartbeat",
-    default=30.0,
-    show_default=True,
-    metavar="SECONDS",
-    help="The minimum interval, in seconds, between progress lines when the output is not a TTY.",
-)
-@click.option(
     "--progress/--no-progress",
     "display_progress",
     default=True,
@@ -235,7 +228,6 @@ def train_command(
     pin_memory: Toggle,
     evaluation_batch_size: int,
     evaluation_pcutoff: float | None,
-    heartbeat: float,
     *,
     load_head_weights: bool,
     evaluate: bool,
@@ -292,7 +284,6 @@ def train_command(
             evaluate=evaluate,
             evaluation_batch_size=evaluation_batch_size,
             evaluation_pcutoff=evaluation_pcutoff,
-            heartbeat=heartbeat,
             display_progress=display_progress,
         )
     except (ValueError, FileNotFoundError) as error:

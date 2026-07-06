@@ -52,9 +52,6 @@ class SharedExtractionParameters:
     cluster_in_color: bool
     """Whether frames are compared in color instead of grayscale when selecting them."""
 
-    minimum_progress_interval: float
-    """The shortest time, in seconds, between progress updates when the output is not a live terminal."""
-
     display_progress: bool
     """Whether the aggregate progress bar is shown during extraction."""
 
@@ -135,14 +132,6 @@ pass_shared_parameters = click.make_pass_decorator(SharedExtractionParameters)
     help="Compare frames in color instead of grayscale when selecting them.",
 )
 @click.option(
-    "-mpi",
-    "--minimum-progress-interval",
-    default=30.0,
-    show_default=True,
-    metavar="SECONDS",
-    help="The shortest time, in seconds, between progress updates when the output is not a live terminal.",
-)
-@click.option(
     "-pg",
     "--progress/--no-progress",
     default=True,
@@ -158,7 +147,6 @@ def extract_group(
     frames_per_video: int,
     clustering_stride: int,
     clustering_resize_width: int,
-    minimum_progress_interval: float,
     *,
     color: bool,
     progress: bool,
@@ -178,12 +166,21 @@ def extract_group(
         clustering_stride=clustering_stride,
         clustering_resize_width=clustering_resize_width,
         cluster_in_color=color,
-        minimum_progress_interval=minimum_progress_interval,
         display_progress=progress,
     )
 
 
 @extract_group.command("frames", context_settings=_CONTEXT_SETTINGS)
+@click.option(
+    "-v",
+    "--videos",
+    multiple=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    metavar="PATH",
+    help="A project video file that must be included in the sample, chosen before the rest of the --total-frames "
+    "budget is filled from the project's other videos. Matched against the videos registered in config.yaml. Provide "
+    "the option several times to include several; omit to sample the project at large.",
+)
 @click.option(
     "-tf",
     "--total-frames",
@@ -219,21 +216,11 @@ def extract_group(
     "automatic grouping does not recognize (for example '(Grp\\d+)' for names like D1_Grp2). Implies --balance-groups.",
 )
 @click.option(
-    "-ai",
-    "--always-include",
-    multiple=True,
-    metavar="SUBSTRING",
-    help="A path substring naming a video that must always be included in the sample, chosen before the rest of the "
-    "budget is filled. Provide the option several times to pin multiple videos. Only applies together with "
-    "--total-frames.",
-)
-@click.option(
-    "-pf",
-    "--path-filter",
-    multiple=True,
-    metavar="SUBSTRING",
-    help="Restrict the run to videos whose path contains this substring. Provide the option several times to allow "
-    "multiple substrings.",
+    "-x",
+    "--exclusive",
+    is_flag=True,
+    help="Restrict the run to exactly the --videos files, extracting --frames-per-video frames from each and "
+    "ignoring the --total-frames budget and group balancing. Requires --videos.",
 )
 @click.option(
     "-o",
@@ -254,26 +241,33 @@ def extract_group(
 @pass_shared_parameters
 def frames_command(
     shared: SharedExtractionParameters,
+    videos: tuple[Path, ...],
     total_frames: int,
     seed: int | None,
     group_by: str | None,
-    always_include: tuple[str, ...],
-    path_filter: tuple[str, ...],
     *,
     balance_groups: bool,
+    exclusive: bool,
     overwrite: bool,
     reset: bool,
 ) -> None:
-    """Selects training frames from a project's videos by clustering them in parallel.
+    """Selects initial training frames from a subset of the project's videos by clustering them in parallel.
 
     Each video is clustered in its own worker process pinned to a disjoint block of CPU cores, and videos that already
-    contain extracted frames are skipped unless ``--overwrite`` is given. Passing ``--total-frames`` instead samples a
-    random subset of not-yet-processed videos sized to reach that project-wide frame budget, growing coverage across
-    repeated runs.
+    contain extracted frames are skipped unless ``--overwrite`` is given. Passing ``--total-frames`` samples a random
+    subset of not-yet-processed videos sized to reach that project-wide frame budget, growing coverage across repeated
+    runs; any videos named with ``--videos`` are always included first, and the remaining budget is filled from the
+    project's other videos. Passing ``--exclusive`` with ``--videos`` instead restricts the run to exactly those files,
+    extracting ``--frames-per-video`` frames from each and ignoring the budget and group balancing.
     """
+    if exclusive and not videos:
+        message = "The --exclusive flag requires at least one --videos file to restrict the run to."
+        raise click.UsageError(message)
     try:
         summary = extract_frames_kmeans(
             config_path=shared.require_config_path(),
+            requested_videos=videos,
+            exclusive=exclusive,
             clustering_stride=shared.clustering_stride,
             worker_count=shared.worker_count,
             cores_per_worker=shared.cores_per_worker,
@@ -282,13 +276,10 @@ def frames_command(
             random_seed=seed,
             balance_groups=balance_groups,
             group_by_pattern=group_by,
-            always_include_videos=always_include,
             clustering_resize_width=shared.clustering_resize_width,
             cluster_in_color=shared.cluster_in_color,
             overwrite=overwrite,
             reset=reset,
-            path_filters=path_filter,
-            minimum_progress_interval=shared.minimum_progress_interval,
             display_progress=shared.display_progress,
         )
     except (ValueError, FileNotFoundError) as error:
@@ -309,22 +300,21 @@ def frames_command(
 @extract_group.command("outliers", context_settings=_CONTEXT_SETTINGS)
 @click.option(
     "-v",
-    "--video",
-    "videos",
+    "--videos",
     multiple=True,
     required=True,
     type=click.Path(exists=True, path_type=Path),
     metavar="PATH",
-    help="An analyzed video file, or a directory of videos, to refine on. Provide the option several times to "
-    "process multiple videos or directories.",
+    help="An analyzed video file, or a directory of videos, from which to extract outlier frames for model refinement. "
+    "Provide the option several times to process multiple videos or directories.",
 )
 @click.option(
     "-oa",
     "--outlier-algorithm",
     type=click.Choice([algorithm.value for algorithm in OutlierAlgorithm]),
-    default=OutlierAlgorithm.JUMP.value,
+    default=OutlierAlgorithm.UNCERTAIN.value,
     show_default=True,
-    help="How likely-wrong frames are flagged. 'jump' flags large frame-to-frame jumps (motion), 'uncertain' flags "
+    help="How likely-wrong frames are identified. 'jump' flags large frame-to-frame jumps (motion), 'uncertain' flags "
     "low-confidence frames, 'fitting' flags departures from a fitted motion trajectory, and 'list' takes an explicit "
     "frame list.",
 )
@@ -334,7 +324,7 @@ def frames_command(
     type=click.Choice([algorithm.value for algorithm in ExtractionAlgorithm]),
     default=ExtractionAlgorithm.KMEANS.value,
     show_default=True,
-    help="How the frames to keep are chosen from the flagged candidates.",
+    help="How the frames to keep are chosen from the identified candidates.",
 )
 @click.option(
     "-sh",
@@ -495,7 +485,7 @@ def outliers_command(
 ) -> None:
     """Extracts a trained model's likely-wrong frames from analyzed videos to refine the model.
 
-    Refines on the videos given with ``--video``, extracting ``--frames-per-video`` outlier frames from each. Every
+    Refines on the videos given with ``--videos``, extracting ``--frames-per-video`` outlier frames from each. Every
     video must already have been analyzed, since the detectors read the model's predictions rather than re-running the
     model. The flagged outlier frames are clustered in parallel, one video per worker pinned to a disjoint block of CPU
     cores, and added to each video's labeled-data directory alongside the model's predictions as machine pre-labels.
@@ -531,7 +521,6 @@ def outliers_command(
             worker_count=shared.worker_count,
             cores_per_worker=shared.cores_per_worker,
             fitting_worker_count=fit_workers,
-            minimum_progress_interval=shared.minimum_progress_interval,
             display_progress=shared.display_progress,
         )
     except (ValueError, FileNotFoundError) as error:

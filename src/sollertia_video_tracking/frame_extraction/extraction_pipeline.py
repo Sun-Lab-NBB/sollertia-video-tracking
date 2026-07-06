@@ -19,8 +19,8 @@ from .progress import make_progress_reporter
 from .utilities import (
     extracted_frame_paths,
     iter_pinned_extraction,
-    resolve_video_overrides,
     normalize_project_config,
+    select_registered_videos,
     ensure_unique_video_stems,
     prune_empty_labeled_data_directories,
 )
@@ -96,13 +96,12 @@ def extract_frames_kmeans(
     random_seed: int | None = None,
     balance_groups: bool = False,
     group_by_pattern: str | None = None,
-    always_include_videos: tuple[str, ...] = (),
+    requested_videos: tuple[str | Path, ...] = (),
+    exclusive: bool = False,
     clustering_resize_width: int = 30,
     cluster_in_color: bool = False,
     overwrite: bool = False,
     reset: bool = False,
-    path_filters: tuple[str, ...] = (),
-    minimum_progress_interval: float = 30.0,
     display_progress: bool = True,
 ) -> FrameExtractionSummary:
     """Runs DeepLabCut k-means frame extraction across a project's videos in parallel and reports the outcome.
@@ -151,9 +150,12 @@ def extract_frames_kmeans(
         group_by_pattern: A regular expression whose first capturing group names the group for each video's file-name
             stem, overriding the built-in inference for naming schemes it does not cover. Setting it implies
             ``balance_groups``.
-        always_include_videos: The path substrings naming videos to always include in the budgeted sample, selected
-            before the balanced or uniform draw fills the remaining budget. Only affects the run when
-            ``total_frame_budget`` is set.
+        requested_videos: The specific project video files to always include in the budgeted sample, matched against
+            the project's registered videos by resolved path and selected before the remaining budget is filled from
+            the project's other videos. Only affects the run when ``total_frame_budget`` is set.
+        exclusive: Determines whether to restrict the run to exactly the ``requested_videos`` and extract
+            ``frames_per_video`` frames from each, bypassing the total-frame budget and group balancing. Requires
+            ``requested_videos`` to be non-empty.
         clustering_resize_width: The downsample width applied before clustering, passed to DeepLabCut as
             ``cluster_resizewidth``.
         cluster_in_color: Determines whether to cluster on color channels instead of grayscale.
@@ -163,10 +165,6 @@ def extract_frames_kmeans(
         reset: Determines whether to discard every selected video's extracted frames and re-extract from scratch. This
             permanently deletes each selected video's entire ``labeled-data`` folder, including its extracted frames
             and labels, leaving no empty folder behind. Mutually exclusive with ``overwrite``.
-        path_filters: The substrings used to restrict the run to videos whose path contains any of them. An empty
-            tuple selects every video in the project.
-        minimum_progress_interval: The minimum interval, in seconds, between progress lines when the output is not a
-            TTY.
         display_progress: Determines whether to render the run header and the aggregate progress bar to the standard
             error stream.
 
@@ -179,12 +177,15 @@ def extract_frames_kmeans(
         ValueError: If ``overwrite`` and ``reset`` are both set, if ``clustering_stride`` is below one, or if
             ``frames_per_video`` or ``total_frame_budget`` is set below one (other than the -1 sentinel). Also raised
             when budgeted sampling is requested without a valid ``numframes2pick``, when config.yaml defines no
-            ``video_sets``, when no videos in config.yaml match ``path_filters``, or when two selected videos share a
-            file-name stem and would collide in the labeled-data tree.
+            ``video_sets``, or when two selected videos share a file-name stem and would collide in the labeled-data
+            tree.
     """
     config_path = config_path.resolve()
     if overwrite and reset:
         message = "Unable to extract frames. The overwrite and reset options are mutually exclusive."
+        raise ValueError(message)
+    if exclusive and not requested_videos:
+        message = "Unable to extract frames. The exclusive option requires at least one requested video."
         raise ValueError(message)
     if total_frame_budget != -1 and total_frame_budget < 1:
         message = (
@@ -210,11 +211,31 @@ def extract_frames_kmeans(
         message = "Unable to extract frames. The project's config.yaml does not define any video_sets."
         raise ValueError(message)
     videos = list(configuration["video_sets"])
-    if path_filters:
-        videos = [video for video in videos if any(token in video for token in path_filters)]
     if not videos:
-        message = "Unable to extract frames. No videos in the project's config.yaml matched the requested selection."
+        message = "Unable to extract frames. The project's config.yaml does not list any videos in video_sets."
         raise ValueError(message)
+    # The requested videos are resolved only when they will be honored: as always-included pins over the full project
+    # pool in budgeted mode (guaranteed in, remaining budget filled from the project's other videos), or as the whole
+    # pool with exclusive. Without a budget and without exclusive, --videos is ignored (warned below), so resolving it
+    # here would only emit a misleading per-video warning.
+    pinned_videos: tuple[str, ...] = ()
+    if requested_videos and (exclusive or total_frame_budget != -1):
+        matched_videos, unmatched_videos = select_registered_videos(
+            registered_videos=videos, requested_videos=tuple(requested_videos)
+        )
+        for video in unmatched_videos:
+            sys.stderr.write(f"WARNING: {video} is not registered in the project's config.yaml and was skipped.\n")
+        sys.stderr.flush()
+        if exclusive:
+            videos = list(matched_videos)
+            if not videos:
+                message = (
+                    "Unable to extract frames. None of the requested videos matched a registered project video, so "
+                    "the exclusive run has nothing to extract."
+                )
+                raise ValueError(message)
+        else:
+            pinned_videos = tuple(matched_videos)
     # Two videos that share a stem would map to one labeled-data folder, so their frame counts and writes collide;
     # this is checked before sampling, whose per-video accounting reads those same stem-keyed folders.
     ensure_unique_video_stems(videos, error_context="Unable to extract frames.")
@@ -231,16 +252,24 @@ def extract_frames_kmeans(
         for directory in reset_directories:
             _remove_labeled_data_directory(directory=directory)
 
-    if total_frame_budget == -1 and (balance_groups or group_by_pattern is not None or always_include_videos):
+    if exclusive:
+        if balance_groups or group_by_pattern is not None:
+            sys.stderr.write(
+                "WARNING: --balance-groups and --group-by are ignored with --exclusive, which extracts "
+                "--frames-per-video frames from each requested video directly.\n"
+            )
+            sys.stderr.flush()
+    elif total_frame_budget == -1 and (balance_groups or group_by_pattern is not None or requested_videos):
         sys.stderr.write(
-            "WARNING: --balance-groups, --group-by, and --always-include only apply when sampling toward a frame "
-            "budget. Pass --total-frames to enable budgeted sampling, otherwise every selected video is extracted.\n"
+            "WARNING: --balance-groups, --group-by, and --videos only apply when sampling toward a frame budget. Pass "
+            "--total-frames to enable budgeted sampling (or --exclusive to extract only the requested videos), "
+            "otherwise every project video is extracted.\n"
         )
         sys.stderr.flush()
 
     existing_frame_count = 0
     target_frame_count = -1
-    if total_frame_budget != -1:
+    if total_frame_budget != -1 and not exclusive:
         frames_per_video_count = configuration.get("numframes2pick")
         if not isinstance(frames_per_video_count, int) or frames_per_video_count < 1:
             message = (
@@ -253,9 +282,6 @@ def extract_frames_kmeans(
             if (balance_groups or group_by_pattern is not None)
             else None
         )
-        pinned_videos, unmatched = resolve_video_overrides(always_include_videos=always_include_videos, videos=videos)
-        for token in unmatched:
-            sys.stderr.write(f"WARNING: the --always-include value {token!r} matched no video in the selection.\n")
         plan = plan_video_sampling(
             videos=videos,
             extracted_frame_counts=_count_extracted_frames(videos=videos, project_directory=project_directory_path),
@@ -344,7 +370,6 @@ def extract_frames_kmeans(
         worker_count=worker_count,
         core_sets=core_sets,
         frame_totals=frame_totals,
-        minimum_progress_interval=minimum_progress_interval,
         display_progress=display_progress,
     ):
         if status == "ok":
@@ -459,8 +484,8 @@ def _report_sampling_plan(plan: VideoSamplingPlan) -> None:
             )
     if plan.always_included_overshoot:
         sys.stderr.write(
-            "WARNING: the always-included videos alone exceeded the frame budget, so the projected total overshoots "
-            "the target by the surplus always-included videos.\n"
+            "WARNING: the videos named with --videos alone exceeded the frame budget, so the projected total "
+            "overshoots the target by the surplus pinned videos.\n"
         )
     sys.stderr.flush()
 

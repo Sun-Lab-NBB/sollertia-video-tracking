@@ -12,8 +12,9 @@ per-frame, per-keypoint detail that DeepLabCut computes and then discards.
 Evaluation runs a single batched forward pass over the labeled frames on one device in full float32 precision. The
 labeled set is small (the hand-labeled train and test frames, not video), so there is no throughput problem to solve,
 and the canonical error numbers are defined at float32; mixed precision is deliberately not used here. Frames are
-batched only when they all share one resolution: DeepLabCut's inference runner stacks each batch into a single tensor
-and its evaluation transform pads rather than resizes, so a project whose labeled frames were extracted at more than
+batched only when they all share one resolution: DeepLabCut's inference runner stacks each batch into a single tensor,
+and its evaluation transforms do not resize every frame to one common size (the HRNet and DEKR backbones pad to a
+multiple of 32, and detectors run at native resolution), so a project whose labeled frames were extracted at more than
 one native resolution is scored one frame at a time.
 
 Because it depends on DeepLabCut's internal evaluation, matching, and runner-construction functions, the DeepLabCut
@@ -320,13 +321,15 @@ def evaluate_trained_model(
 def _resolve_evaluation_batch_size(loader: DLCLoader, requested: int) -> int:
     """Reduces the evaluation batch size to one unless every labeled frame shares a single native resolution.
 
-    DeepLabCut's inference runner stacks each forward-pass batch into one tensor, and the evaluation transform pads
-    each frame up to a multiple of 32 rather than resizing to a common size. Labeled frames extracted at more than one
-    native resolution therefore cannot share a batch, so this returns one whenever the frames differ in size and the
-    requested size only when they are uniform. Comparing native resolutions is sufficient and safe: frames of one
-    native resolution always pad to one size, while distinct resolutions can pad to distinct sizes. The frame
-    dimensions are read from the loader's already-parsed annotations (populated from image headers), so no pixels are
-    decoded.
+    DeepLabCut's inference runner stacks each forward-pass batch into one tensor, and its evaluation transforms do not
+    resize every frame to a single common size: the HRNet and DEKR backbones pad each frame up to a multiple of 32, and
+    a detector consumes frames at their native resolution. Labeled frames extracted at more than one native resolution
+    therefore cannot share a batch, so this returns one whenever the frames differ in size and the requested size only
+    when they are uniform. Comparing native resolutions is a safe over-approximation: frames of one native resolution
+    always stack to one size, while distinct resolutions can produce distinct sizes. A top-down pose stage that crops
+    each detection to a fixed size would in fact batch regardless, so treating its frames as unbatchable only costs
+    speed, never correctness. The frame dimensions are read from the loader's already-parsed annotations (populated from
+    image headers), so no pixels are decoded.
 
     Args:
         loader: The loader for the evaluated shuffle, holding the labeled train and test frames.

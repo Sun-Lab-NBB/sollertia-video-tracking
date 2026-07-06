@@ -184,13 +184,6 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     help="Declares that every video is analyzed at a single fixed resolution, which makes the cuDNN autotuner safe.",
 )
 @click.option(
-    "--heartbeat",
-    default=30.0,
-    show_default=True,
-    metavar="SECONDS",
-    help="The minimum interval, in seconds, between progress lines when the output is not a TTY.",
-)
-@click.option(
     "--progress/--no-progress",
     "display_progress",
     default=True,
@@ -219,7 +212,6 @@ def infer_command(
     channels_last: Toggle,
     torch_compile: Toggle,
     pin_memory: Toggle,
-    heartbeat: float,
     *,
     project_videos: bool,
     to_polars: bool,
@@ -294,7 +286,6 @@ def infer_command(
             likelihood_threshold=likelihood_threshold,
             save_as_csv=save_as_csv,
             keep_dlc_outputs=keep_dlc_outputs,
-            heartbeat=heartbeat,
             display_progress=display_progress,
         )
     except (ValueError, FileNotFoundError) as error:

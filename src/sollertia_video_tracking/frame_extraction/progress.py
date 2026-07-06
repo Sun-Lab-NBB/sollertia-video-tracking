@@ -74,7 +74,6 @@ class AggregateBar(LiveBar):
         progress_queue: Any,
         total_video_count: int,
         frame_totals: dict[int, int],
-        minimum_progress_interval: float,
         preparing_label: str = "preparing...",
         stream: TextIO | None = None,
     ) -> None:
@@ -84,14 +83,11 @@ class AggregateBar(LiveBar):
             progress_queue: The shared queue the workers stream progress and completion messages to.
             total_video_count: The total number of videos in the run.
             frame_totals: The mapping of video index to the number of frames that video contributes to the bar.
-            minimum_progress_interval: The minimum interval, in seconds, between rendered lines when the output
-                is not a TTY; the effective interval is clamped to at least 1.0 second.
             preparing_label: The warm-up text shown before the first worker begins decoding.
             stream: The output stream to render to, defaulting to the standard error stream.
         """
         super().__init__(
             progress_queue=progress_queue,
-            heartbeat=minimum_progress_interval,
             preparing_label=preparing_label,
             stream=stream,
         )

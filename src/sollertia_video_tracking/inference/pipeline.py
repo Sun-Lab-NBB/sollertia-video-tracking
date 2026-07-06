@@ -189,7 +189,6 @@ def run_inference(
     likelihood_threshold: float = 0.0,
     save_as_csv: bool = False,
     keep_dlc_outputs: bool = True,
-    heartbeat: float = 30.0,
     display_progress: bool = True,
 ) -> InferenceSummary:
     """Runs DeepLabCut inference over many videos, distributing whole videos across GPU or CPU worker slots.
@@ -219,7 +218,6 @@ def run_inference(
         keep_dlc_outputs: Whether to keep DeepLabCut's own prediction artifacts (the HDF5 table, the full/meta/
             assemblies pickles, and any tracker files) after conversion. Kept by default so all DeepLabCut data
             survives; only relevant when ``to_polars`` is set, since conversion is what would otherwise remove them.
-        heartbeat: The minimum interval, in seconds, between progress lines when the output is not a TTY.
         display_progress: Whether to render the live aggregate progress bar.
 
     Returns:
@@ -259,7 +257,6 @@ def run_inference(
             progress_queue=progress_queue,
             total_video_count=len(video_paths),
             frame_totals=totals,
-            minimum_progress_interval=heartbeat,
             preparing_label="compiling model...",
         )
         bar.start()

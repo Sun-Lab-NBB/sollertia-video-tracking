@@ -120,7 +120,6 @@ def train_model(
     evaluate: bool = True,
     evaluation_batch_size: int = 16,
     evaluation_pcutoff: float | None = None,
-    heartbeat: float = 30.0,
     display_progress: bool = True,
 ) -> TrainingSummary:
     """Trains a DeepLabCut shuffle with the resolved hardware optimizations and a clean progress monitor.
@@ -128,8 +127,8 @@ def train_model(
     The training-dataset options (model architecture, split) are fixed when the shuffle is created; this function
     fits the already-created shuffle. It applies the requested overrides and the optimization profile to the
     configuration once, then launches training as either a DistributedDataParallel process group or a single process.
-    The single-process path covers one GPU, the CPU, and DataParallel across multiple GPUs. For top-down shuffles the
-    detector is trained before the pose model.
+    The single-process path covers one GPU, the CPU, MPS, and DataParallel across multiple GPUs. For top-down
+    shuffles the detector is trained before the pose model.
 
     Args:
         config: The path of the DeepLabCut project configuration file.
@@ -151,9 +150,8 @@ def train_model(
         evaluate: Whether to score the trained snapshot against the labeled frames as a final step and write the
             evaluation feather and provenance sidecar.
         evaluation_batch_size: The number of frames scored per forward pass during the post-training evaluation.
-        evaluation_pcutoff: The confidence cutoff for the evaluation's cutoff-filtered metrics, or None for the
-            default of 0.6.
-        heartbeat: The minimum interval, in seconds, between progress lines when the output is not a TTY.
+        evaluation_pcutoff: The confidence cutoff for the evaluation's cutoff-filtered metrics, or None to fall back to
+            the project configuration's ``pcutoff`` (0.6 when unset).
         display_progress: Whether to render the live progress monitor and route DeepLabCut's logs off the console.
 
     Returns:
@@ -215,7 +213,7 @@ def train_model(
         # Render the monitor to a preserved duplicate of stderr so it keeps reaching the terminal even when the
         # single-process training path later redirects this process's stdout and stderr to the training log.
         monitor_stream = _duplicate_stderr()
-        monitor = TrainingMonitor(progress_queue=progress_queue, heartbeat=heartbeat, stream=monitor_stream)
+        monitor = TrainingMonitor(progress_queue=progress_queue, stream=monitor_stream)
         monitor.start()
 
     world_size = profile.world_size
@@ -298,8 +296,8 @@ def _evaluate_after_training(
     """Scores the freshly trained snapshot on one device, never failing a completed training run.
 
     Evaluation runs in the main process after the training workers have exited, on the first configured GPU (or the
-    CPU), so it never re-scores redundantly across the DistributedDataParallel ranks. Any failure is logged and
-    swallowed, since a completed training run must not be lost to an evaluation error.
+    base non-CUDA device, the CPU or MPS), so it never re-scores redundantly across the DistributedDataParallel ranks.
+    Any failure is logged and swallowed, since a completed training run must not be lost to an evaluation error.
 
     Args:
         config: The path of the DeepLabCut project configuration file.

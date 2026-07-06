@@ -109,8 +109,10 @@ class _OptimizedTrainingRunnerMixin(TrainingRunner):
         """Resolves the underlying DeepLabCut model, peeling DataParallel, DDP, and ``torch.compile`` wrappers.
 
         Returns:
-            The original DeepLabCut model exposing ``get_target``/``get_loss``/``get_predictions`` and clean
-            ``state_dict`` keys. Typed ``Any`` because DeepLabCut's model classes ship no type stubs.
+            The original DeepLabCut model with clean ``state_dict`` keys: a ``PoseModel`` exposing
+            ``get_target``/``get_loss``/``get_predictions``, or a ``BaseDetector`` exposing ``get_target`` (its
+            ``forward`` returns the losses and detections directly). Typed ``Any`` because DeepLabCut's model classes
+            ship no type stubs.
         """
         model = self.model
         if isinstance(model, (DataParallel, DistributedDataParallel)):

@@ -16,7 +16,7 @@ _RENDERED_METRIC_PREFIXES: tuple[str, ...] = ("mAP", "mAR", "rmse")
 
 
 class QueueTrainingLogger(BaseLogger):
-    """Streams per-epoch training metrics to a monitor process over a shared queue.
+    """Streams per-epoch training metrics to a monitor thread over a shared queue.
 
     Notes:
         This is a DeepLabCut ``BaseLogger`` built directly on the rank-0 training process and attached to the runner.
@@ -96,17 +96,15 @@ class TrainingMonitor(LiveBar):
         _metrics: The most recent evaluation metrics keyed by their full metric name.
     """
 
-    def __init__(self, progress_queue: Any, heartbeat: float, stream: TextIO | None = None) -> None:
+    def __init__(self, progress_queue: Any, stream: TextIO | None = None) -> None:
         """Initializes the monitor thread over the shared progress queue.
 
         Args:
             progress_queue: The shared queue the training process streams progress messages to.
-            heartbeat: The minimum interval, in seconds, between rendered lines when the output is not a TTY.
             stream: The output stream to render to, defaulting to the standard error stream.
         """
         super().__init__(
             progress_queue=progress_queue,
-            heartbeat=heartbeat,
             preparing_label="preparing model...",
             stream=stream,
         )

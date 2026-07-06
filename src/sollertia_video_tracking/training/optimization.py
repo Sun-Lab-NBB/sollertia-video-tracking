@@ -156,8 +156,9 @@ def resolve_optimization_profile(
 
     Every optimization is exposed as an explicit request so an operator who knows their silicon can override the
     automatic defaults. ``"auto"`` selects a capability-detected default suited to the chosen device. An explicit
-    ``"on"``/``"off"`` (or a forced AMP dtype) is always honored, with a warning when it contradicts the detected
-    hardware rather than a silent refusal.
+    request is honored where it applies to the chosen device: a forced AMP dtype the device cannot support (bfloat16 on
+    MPS, float16 off CUDA) is disabled with a warning, while the CUDA-only toggles (``tf32``, ``cudnn_benchmark``,
+    ``pin_memory``) are forced off on non-CUDA devices.
 
     Args:
         device: The requested device (``"auto"``, ``"cpu"``, ``"mps"``, ``"cuda"``, or ``"cuda:N"``), or None to
@@ -342,7 +343,8 @@ def _resolve_multi_gpu(multi_gpu: Literal["auto", "ddp", "dp", "single"], gpus: 
         gpus: The resolved CUDA device indices.
 
     Returns:
-        The strategy to use, downgraded to ``"single"`` with a warning when fewer than two GPUs are selected.
+        The strategy to use, downgraded to ``"single"`` (with a warning only when ``"ddp"`` or ``"dp"`` was explicitly
+        requested) when fewer than two GPUs are selected.
     """
     if len(gpus) < _MIN_MULTI_GPU_COUNT:
         if multi_gpu in ("ddp", "dp"):
