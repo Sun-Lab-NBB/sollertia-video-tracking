@@ -148,6 +148,74 @@ def prune_empty_labeled_data_directories(project_directory: Path, *, display_pro
     return removed_count
 
 
+def extracted_frame_paths(directory: Path) -> list[Path]:
+    """Lists a labeled-data directory's extracted frames, excluding any predicted-label overlays.
+
+    The outlier-refinement pipeline may leave ``imgNNNNlabeled.png`` prediction overlays beside the extracted
+    ``imgNNNN.png`` frames when it saves labeled frames. Those overlays are not training frames, so counting them
+    would inflate both the budgeted-sampling accounting and the per-video totals; they are filtered out here. Both
+    frame-extraction pipelines share this so a video's frame count means the same thing everywhere.
+
+    Args:
+        directory: The ``labeled-data/<video>`` directory whose extracted frames are listed.
+
+    Returns:
+        The sorted paths of the ``img*.png`` frames that are not ``*labeled.png`` prediction overlays, or an empty
+        list when the directory does not exist.
+    """
+    if not directory.exists():
+        return []
+    return sorted(frame for frame in directory.glob("img*.png") if not frame.stem.endswith("labeled"))
+
+
+def has_outlier_frames(directory: Path) -> bool:
+    """Reports whether a labeled-data directory holds frames written by a previous outlier-extraction pass.
+
+    DeepLabCut's outlier extraction saves the model's predictions for the extracted frames as machine pre-labels, a
+    ``machinelabels-iter<N>.h5`` (and ``.csv``) file, alongside the ``imgNNNN.png`` frames. Raw k-means extraction
+    writes no such file, so its presence distinguishes a video that already carries outlier frames from one that only
+    holds raw frames. This drives the tiered outlier sampling, which de-prioritizes videos that already have outlier
+    frames.
+
+    Args:
+        directory: The ``labeled-data/<video>`` directory to inspect.
+
+    Returns:
+        True when the directory holds a ``machinelabels`` file, indicating a prior outlier-extraction pass.
+    """
+    if not directory.exists():
+        return False
+    return any(directory.glob("machinelabels*.h5")) or any(directory.glob("machinelabels*.csv"))
+
+
+def resolve_video_overrides(
+    always_include_videos: tuple[str, ...], videos: list[str]
+) -> tuple[tuple[str, ...], list[str]]:
+    """Resolves the video-override path substrings to the candidate videos they match, keyed in candidate order.
+
+    Shared by both pipelines so the ``--always-include`` pins behave identically whether frames are clustered from raw
+    video or selected from flagged outliers.
+
+    Args:
+        always_include_videos: The path substrings naming videos to always include in the budgeted sample.
+        videos: The candidate video paths for the run.
+
+    Returns:
+        A tuple of the matched video paths, deduplicated and in candidate order, and the list of override substrings
+        that matched no candidate video.
+    """
+    matched_videos: set[str] = set()
+    unmatched_substrings: list[str] = []
+    for substring in dict.fromkeys(always_include_videos):
+        matching_videos = [video for video in videos if substring in video]
+        if matching_videos:
+            matched_videos.update(matching_videos)
+        else:
+            unmatched_substrings.append(substring)
+    ordered_matches = tuple(video for video in videos if video in matched_videos)
+    return ordered_matches, unmatched_substrings
+
+
 def ensure_unique_video_stems(videos: list[str], *, error_context: str) -> None:
     """Raises when two selected videos share a file-name stem and would collide in the labeled-data tree.
 

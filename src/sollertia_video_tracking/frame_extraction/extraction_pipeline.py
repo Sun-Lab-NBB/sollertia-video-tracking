@@ -17,7 +17,9 @@ import deeplabcut.utils.frameselectiontools as frame_selection_tools
 
 from .progress import make_progress_reporter
 from .utilities import (
+    extracted_frame_paths,
     iter_pinned_extraction,
+    resolve_video_overrides,
     normalize_project_config,
     ensure_unique_video_stems,
     prune_empty_labeled_data_directories,
@@ -251,7 +253,7 @@ def extract_frames_kmeans(
             if (balance_groups or group_by_pattern is not None)
             else None
         )
-        pinned_videos, unmatched = _resolve_video_overrides(always_include_videos=always_include_videos, videos=videos)
+        pinned_videos, unmatched = resolve_video_overrides(always_include_videos=always_include_videos, videos=videos)
         for token in unmatched:
             sys.stderr.write(f"WARNING: the --always-include value {token!r} matched no video in the selection.\n")
         plan = plan_video_sampling(
@@ -458,50 +460,6 @@ def _report_sampling_plan(plan: VideoSamplingPlan) -> None:
     sys.stderr.flush()
 
 
-def _resolve_video_overrides(
-    always_include_videos: tuple[str, ...], videos: list[str]
-) -> tuple[tuple[str, ...], list[str]]:
-    """Resolves the video-override path substrings to the candidate videos they match, keyed in candidate order.
-
-    Args:
-        always_include_videos: The path substrings naming videos to always include in the budgeted sample.
-        videos: The candidate video paths for the run.
-
-    Returns:
-        A tuple of the matched video paths, deduplicated and in candidate order, and the list of override substrings
-        that matched no candidate video.
-    """
-    matched_videos: set[str] = set()
-    unmatched_substrings: list[str] = []
-    for substring in dict.fromkeys(always_include_videos):
-        matching_videos = [video for video in videos if substring in video]
-        if matching_videos:
-            matched_videos.update(matching_videos)
-        else:
-            unmatched_substrings.append(substring)
-    ordered_matches = tuple(video for video in videos if video in matched_videos)
-    return ordered_matches, unmatched_substrings
-
-
-def _extracted_frame_paths(directory: Path) -> list[Path]:
-    """Lists a labeled-data directory's extracted frames, excluding any predicted-label overlays.
-
-    The outlier-refinement pipeline may leave ``imgNNNNlabeled.png`` prediction overlays beside the extracted
-    ``imgNNNN.png`` frames when it saves labeled frames. Those overlays are not training frames, so counting them
-    would inflate both the budgeted-sampling accounting and the per-video totals; they are filtered out here.
-
-    Args:
-        directory: The ``labeled-data/<video>`` directory whose extracted frames are listed.
-
-    Returns:
-        The sorted paths of the ``img*.png`` frames that are not ``*labeled.png`` prediction overlays, or an empty
-        list when the directory does not exist.
-    """
-    if not directory.exists():
-        return []
-    return sorted(frame for frame in directory.glob("img*.png") if not frame.stem.endswith("labeled"))
-
-
 def _count_extracted_frames(videos: list[str], project_directory: Path) -> dict[str, int]:
     """Counts the frames already extracted for each video, keyed by the video's path.
 
@@ -516,7 +474,7 @@ def _count_extracted_frames(videos: list[str], project_directory: Path) -> dict[
     counts: dict[str, int] = {}
     for video in videos:
         directory = project_directory / "labeled-data" / Path(video).stem
-        counts[video] = len(_extracted_frame_paths(directory))
+        counts[video] = len(extracted_frame_paths(directory))
     return counts
 
 
@@ -617,7 +575,7 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
         stem = Path(video_path).stem
         output_directory = config_path.parent / "labeled-data" / stem
 
-        existing_frame_paths = _extracted_frame_paths(output_directory)
+        existing_frame_paths = extracted_frame_paths(output_directory)
         if existing_frame_paths and not overwrite:
             return video_path, len(existing_frame_paths), "skipped"
         # On overwrite, drop the stale frames and the labels they would orphan before re-extracting.
@@ -655,5 +613,5 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
     except Exception:  # noqa: BLE001 -- one bad video must not kill the pool; the traceback is returned as status.
         return video_path, 0, "error:\n" + traceback.format_exc()
     else:
-        written = len(_extracted_frame_paths(output_directory))
+        written = len(extracted_frame_paths(output_directory))
         return video_path, written, "ok" if written else "empty"

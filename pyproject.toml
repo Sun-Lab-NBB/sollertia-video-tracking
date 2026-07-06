@@ -171,6 +171,12 @@ ignore-variadic-names = true
     "F401", # Imported but unused
     "F403", # Wildcard imports
 ]
+"tests/**" = [
+    "S101",    # Allows the `assert` statements pytest is built around.
+    "SLF001",  # Allows tests to reach into private members of the code under test.
+    "PLR2004", # Allows literal expected values in assertions without extracting named constants.
+    "INP001",  # Tests are collected by pytest, not imported as a package, so no __init__.py is required.
+]
 
 [tool.ruff.lint.isort]
 case-sensitive = true              # Takes case into account when sorting imports

@@ -42,11 +42,33 @@ class SharedExtractionParameters:
     frames_per_video: int
     """How many frames to keep from each processed video; -1 uses the project's configured amount."""
 
+    clustering_stride: int
+    """How far apart, in frames, to sample before clustering; 1 uses every frame. For ``frames`` this strides the whole
+    video, and for ``outliers`` it strides the flagged candidate frames."""
+
     clustering_resize_width: int
     """The width, in pixels, frames are shrunk to before they are compared for similarity."""
 
     cluster_in_color: bool
     """Whether frames are compared in color instead of grayscale when selecting them."""
+
+    total_frame_budget: int
+    """The total frames to sample the project toward; -1 processes every selected video instead of sampling."""
+
+    random_seed: int | None
+    """The seed for the random video sampling; None draws a different subset each run."""
+
+    balance_groups: bool
+    """Whether budgeted sampling spreads frames across groups of related videos instead of drawing at random."""
+
+    group_by_pattern: str | None
+    """A regex whose first capturing group names each video's group, or None to infer it; implies balance_groups."""
+
+    always_include_videos: tuple[str, ...]
+    """The path substrings naming videos to always include in the budgeted sample."""
+
+    path_filters: tuple[str, ...]
+    """The path substrings restricting the run to matching videos; an empty tuple selects every candidate video."""
 
     minimum_progress_interval: float
     """The shortest time, in seconds, between progress updates when the output is not a live terminal."""
@@ -105,9 +127,20 @@ pass_shared_parameters = click.make_pass_decorator(SharedExtractionParameters)
     help="How many frames to keep from each processed video. Set to -1 to use the project's configured amount.",
 )
 @click.option(
+    "-cs",
+    "--clustering-stride",
+    type=int,
+    default=1,
+    show_default=True,
+    metavar="N",
+    help="How far apart, in frames, to sample before clustering. The default of 1 uses every frame, matching "
+    "DeepLabCut. For 'frames' this strides the whole video; for 'outliers' it strides the flagged candidate frames. "
+    "Raise it to cluster fewer frames and lower memory use, trading coverage for speed.",
+)
+@click.option(
     "-crw",
     "--clustering-resize-width",
-    default=50,
+    default=30,
     show_default=True,
     help="The width, in pixels, that frames are shrunk to before they are compared for similarity. Smaller values are "
     "faster but compare more coarsely.",
@@ -120,71 +153,15 @@ pass_shared_parameters = click.make_pass_decorator(SharedExtractionParameters)
     help="Compare frames in color instead of grayscale when selecting them.",
 )
 @click.option(
-    "-mpi",
-    "--minimum-progress-interval",
-    default=30.0,
-    show_default=True,
-    metavar="SECONDS",
-    help="The shortest time, in seconds, between progress updates when the output is not a live terminal.",
-)
-@click.option(
-    "-pg",
-    "--progress/--no-progress",
-    default=True,
-    show_default=True,
-    help="Show the aggregate progress bar during extraction.",
-)
-@click.pass_context
-def extract_group(
-    ctx: click.Context,
-    config_path: Path,
-    workers: int,
-    cores: int,
-    frames_per_video: int,
-    clustering_resize_width: int,
-    minimum_progress_interval: float,
-    *,
-    color: bool,
-    progress: bool,
-) -> None:
-    """Selects frames from a project's videos, either to bootstrap a model or to refine a trained one.
-
-    ``--config-path`` names the DeepLabCut project's config.yaml both subcommands operate on, alongside the
-    parallelism and frame-selection options common to k-means and outlier extraction. Use the ``frames`` subcommand
-    to bootstrap a project's training frames by clustering raw video, or the ``outliers`` subcommand to extract a
-    trained model's likely-wrong frames for refinement. These shared options must be given before the subcommand name.
-    """
-    ctx.obj = SharedExtractionParameters(
-        config_path=config_path,
-        worker_count=workers,
-        cores_per_worker=cores,
-        frames_per_video=frames_per_video,
-        clustering_resize_width=clustering_resize_width,
-        cluster_in_color=color,
-        minimum_progress_interval=minimum_progress_interval,
-        display_progress=progress,
-    )
-
-
-@extract_group.command("frames", context_settings=_CONTEXT_SETTINGS)
-@click.option(
-    "-cs",
-    "--clustering-stride",
-    default=1,
-    show_default=True,
-    help="How far apart, in frames, to sample the video when selecting training frames. The default of 1 clusters "
-    "every frame, matching DeepLabCut; the reader streams the video in one pass, so dense sampling is cheap to decode. "
-    "Raise it on long videos to cluster fewer frames and lower memory use.",
-)
-@click.option(
     "-tf",
     "--total-frames",
     type=int,
     default=200,
     show_default=True,
-    help="The total number of frames you want across the whole project. When set, not-yet-processed videos are "
-    "sampled at random until this many frames are reached, so coverage grows over repeated runs (each video "
-    "contributes --frames-per-video frames). Set to -1 to process every selected video instead.",
+    help="The total number of frames you want across the whole project. When set, videos are sampled until this many "
+    "frames are reached, so coverage grows over repeated runs (each sampled video contributes --frames-per-video "
+    "frames). 'frames' samples not-yet-processed videos; 'outliers' samples analyzed videos, preferring those with no "
+    "frames, then those with no outlier frames. Set to -1 to process every selected video instead.",
 )
 @click.option(
     "-s",
@@ -220,6 +197,78 @@ def extract_group(
     "--total-frames.",
 )
 @click.option(
+    "-pf",
+    "--path-filter",
+    multiple=True,
+    metavar="SUBSTRING",
+    help="Restrict the run to videos whose path contains this substring. Provide the option several times to allow "
+    "multiple substrings.",
+)
+@click.option(
+    "-mpi",
+    "--minimum-progress-interval",
+    default=30.0,
+    show_default=True,
+    metavar="SECONDS",
+    help="The shortest time, in seconds, between progress updates when the output is not a live terminal.",
+)
+@click.option(
+    "-pg",
+    "--progress/--no-progress",
+    default=True,
+    show_default=True,
+    help="Show the aggregate progress bar during extraction.",
+)
+@click.pass_context
+def extract_group(
+    ctx: click.Context,
+    config_path: Path,
+    workers: int,
+    cores: int,
+    frames_per_video: int,
+    clustering_stride: int,
+    clustering_resize_width: int,
+    total_frames: int,
+    seed: int | None,
+    group_by: str | None,
+    always_include: tuple[str, ...],
+    path_filter: tuple[str, ...],
+    minimum_progress_interval: float,
+    *,
+    color: bool,
+    balance_groups: bool,
+    progress: bool,
+) -> None:
+    """Selects frames from a project's videos, either to bootstrap a model or to refine a trained one.
+
+    ``--config-path`` names the DeepLabCut project's config.yaml both subcommands operate on, alongside the
+    parallelism, frame-selection, and frame-budget sampling options common to k-means and outlier extraction (both
+    grow the project toward ``--total-frames``, balanced across groups with ``--balance-groups``). Use the ``frames``
+    subcommand to bootstrap a project's training frames by clustering raw video, or the ``outliers`` subcommand to
+    extract a trained model's likely-wrong frames for refinement. These shared options must be given before the
+    subcommand name.
+    """
+    ctx.obj = SharedExtractionParameters(
+        config_path=config_path,
+        worker_count=workers,
+        cores_per_worker=cores,
+        frames_per_video=frames_per_video,
+        clustering_stride=clustering_stride,
+        clustering_resize_width=clustering_resize_width,
+        cluster_in_color=color,
+        total_frame_budget=total_frames,
+        random_seed=seed,
+        balance_groups=balance_groups,
+        group_by_pattern=group_by,
+        always_include_videos=always_include,
+        path_filters=path_filter,
+        minimum_progress_interval=minimum_progress_interval,
+        display_progress=progress,
+    )
+
+
+@extract_group.command("frames", context_settings=_CONTEXT_SETTINGS)
+@click.option(
     "-o",
     "--overwrite",
     is_flag=True,
@@ -235,25 +284,10 @@ def extract_group(
     "permanently removes each selected video's entire labeled-data folder, including its frames and labels, leaving "
     "no empty folder behind. Mutually exclusive with --overwrite.",
 )
-@click.option(
-    "-pf",
-    "--path-filter",
-    multiple=True,
-    metavar="SUBSTRING",
-    help="Restrict the run to videos whose path contains this substring. Provide the option several times to allow "
-    "multiple substrings.",
-)
 @pass_shared_parameters
 def frames_command(
     shared: SharedExtractionParameters,
-    clustering_stride: int,
-    total_frames: int,
-    seed: int | None,
-    group_by: str | None,
-    always_include: tuple[str, ...],
-    path_filter: tuple[str, ...],
     *,
-    balance_groups: bool,
     overwrite: bool,
     reset: bool,
 ) -> None:
@@ -267,20 +301,20 @@ def frames_command(
     try:
         summary = extract_frames_kmeans(
             config_path=shared.require_config_path(),
-            clustering_stride=clustering_stride,
+            clustering_stride=shared.clustering_stride,
             worker_count=shared.worker_count,
             cores_per_worker=shared.cores_per_worker,
             frames_per_video=shared.frames_per_video,
-            total_frame_budget=total_frames,
-            random_seed=seed,
-            balance_groups=balance_groups,
-            group_by_pattern=group_by,
-            always_include_videos=always_include,
+            total_frame_budget=shared.total_frame_budget,
+            random_seed=shared.random_seed,
+            balance_groups=shared.balance_groups,
+            group_by_pattern=shared.group_by_pattern,
+            always_include_videos=shared.always_include_videos,
             clustering_resize_width=shared.clustering_resize_width,
             cluster_in_color=shared.cluster_in_color,
             overwrite=overwrite,
             reset=reset,
-            path_filters=path_filter,
+            path_filters=shared.path_filters,
             minimum_progress_interval=shared.minimum_progress_interval,
             display_progress=shared.display_progress,
         )
@@ -305,11 +339,10 @@ def frames_command(
     "--video",
     "videos",
     multiple=True,
-    required=True,
     type=click.Path(exists=True, path_type=Path),
     metavar="PATH",
     help="An analyzed video file, or a directory of videos, to refine on. Provide the option several times to "
-    "process multiple videos or directories.",
+    "process multiple videos or directories. Omit to refine every analyzed video the project's config.yaml registers.",
 )
 @click.option(
     "-oa",
@@ -330,17 +363,7 @@ def frames_command(
     help="How the frames to keep are chosen from the flagged candidates.",
 )
 @click.option(
-    "-cst",
-    "--candidate-step",
-    default=1,
-    show_default=True,
-    metavar="N",
-    help="Keep only every Nth flagged candidate before selecting frames from them. Larger values read and cluster "
-    "fewer frames, trading coverage for speed, and when they thin the candidates enough they let the reader seek to "
-    "each frame instead of decoding the whole range.",
-)
-@click.option(
-    "-s",
+    "-sh",
     "--shuffle",
     default=1,
     show_default=True,
@@ -476,7 +499,6 @@ def outliers_command(
     videos: tuple[Path, ...],
     outlier_algorithm: str,
     extraction_algorithm: str,
-    candidate_step: int,
     shuffle: int,
     training_set_index: int,
     pixel_distance_threshold: float,
@@ -499,11 +521,15 @@ def outliers_command(
 ) -> None:
     """Extracts a trained model's likely-wrong frames from analyzed videos to refine the model.
 
-    VIDEOS are the analyzed video files (or directories of videos) to refine on. Each video must already have been
-    analyzed, since the detectors read the model's predictions rather than re-running the model. The flagged outlier
-    frames are clustered in parallel, one video per worker pinned to a disjoint block of CPU cores, and added to each
-    video's labeled-data directory alongside the model's predictions as machine pre-labels. Outlier extraction is
-    additive, so repeated passes grow the refinement set.
+    Refines on the videos given with ``--video``, or, when none are given, on every analyzed video the project's
+    config.yaml registers. Each video must already have been analyzed, since the detectors read the model's predictions
+    rather than re-running the model. The flagged outlier frames are clustered in parallel, one video per worker pinned
+    to a disjoint block of CPU cores, and added to each video's labeled-data directory alongside the model's predictions
+    as machine pre-labels. Outlier extraction is additive, so repeated passes grow the refinement set.
+
+    By default ``--total-frames`` samples the analyzed videos toward a project-wide frame budget, preferring videos
+    with no frames, then videos with only raw frames, then videos that already have outlier frames, and balancing
+    across groups with ``--balance-groups``. Pass ``--total-frames -1`` to refine every analyzed video instead.
     """
     try:
         summary = extract_outlier_frames_parallel(
@@ -520,8 +546,14 @@ def outliers_command(
             moving_average_degree=moving_average_degree,
             significance_level=significance_level,
             extraction_algorithm=ExtractionAlgorithm(extraction_algorithm),
-            candidate_step=candidate_step,
+            candidate_step=shared.clustering_stride,
             frames_per_video=shared.frames_per_video,
+            total_frame_budget=shared.total_frame_budget,
+            random_seed=shared.random_seed,
+            balance_groups=shared.balance_groups,
+            group_by_pattern=shared.group_by_pattern,
+            always_include_videos=shared.always_include_videos,
+            path_filters=shared.path_filters,
             clustering_resize_width=shared.clustering_resize_width,
             cluster_in_color=shared.cluster_in_color,
             save_labeled_frames=save_labeled,

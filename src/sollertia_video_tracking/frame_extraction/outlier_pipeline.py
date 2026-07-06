@@ -21,13 +21,18 @@ from deeplabcut.refine_training_dataset import outlier_frames as dlc_outlier_fra
 
 from .progress import make_progress_reporter
 from .utilities import (
+    has_outlier_frames,
+    extracted_frame_paths,
     iter_pinned_extraction,
+    resolve_video_overrides,
     normalize_project_config,
     ensure_unique_video_stems,
     prune_empty_labeled_data_directories,
 )
 from .frame_reading import make_fast_kmeans_selector
 from .cpu_allocation import DEFAULT_RESERVED_CORE_COUNT, plan_core_allocation
+from .video_grouping import group_videos
+from .video_sampling import TieredVideoSamplingPlan, plan_tiered_video_sampling
 from .outlier_detection import (
     KeypointSeries,
     OutlierAlgorithm,
@@ -97,6 +102,11 @@ class OutlierExtractionSummary:
     submitted for extraction."""
     extracted_frame_count: int
     """The total number of frames freshly written into the project's labeled-data tree across all videos."""
+    existing_frame_count: int = 0
+    """The number of frames already extracted across the analyzed candidate videos before this run, reported in
+    budgeted-sampling mode."""
+    target_frame_count: int = -1
+    """The requested total-frame budget when sampling videos, or -1 when budgeted sampling was disabled."""
     unanalyzed_videos: tuple[str, ...] = ()
     """The videos skipped because no matching predictions were found; they must be analyzed before refinement."""
     errors: tuple[tuple[str, str], ...] = ()
@@ -119,6 +129,11 @@ class OutlierExtractionSummary:
             A compact description of how many videos yielded outlier frames and how many frames were written.
         """
         tail = ""
+        if self.target_frame_count != -1:
+            tail += (
+                f", budget {self.existing_frame_count}->{self.existing_frame_count + self.extracted_frame_count}"
+                f"/{self.target_frame_count}"
+            )
         if self.unanalyzed_videos:
             tail += f", {len(self.unanalyzed_videos)} not analyzed"
         if self.errors:
@@ -132,7 +147,7 @@ class OutlierExtractionSummary:
 
 def extract_outlier_frames_parallel(
     config_path: Path,
-    videos: list[str | Path],
+    videos: list[str | Path] | None = None,
     *,
     shuffle_index: int = 1,
     training_set_index: int = 0,
@@ -147,6 +162,12 @@ def extract_outlier_frames_parallel(
     extraction_algorithm: ExtractionAlgorithm = ExtractionAlgorithm.KMEANS,
     candidate_step: int = 1,
     frames_per_video: int = -1,
+    total_frame_budget: int = -1,
+    random_seed: int | None = None,
+    balance_groups: bool = False,
+    group_by_pattern: str | None = None,
+    always_include_videos: tuple[str, ...] = (),
+    path_filters: tuple[str, ...] = (),
     clustering_resize_width: int = 30,
     cluster_in_color: bool = False,
     save_labeled_frames: bool = False,
@@ -175,18 +196,29 @@ def extract_outlier_frames_parallel(
     concurrent workers never race on the configuration file. A single bad video is recorded in the returned summary
     rather than aborting the run.
 
+    When ``total_frame_budget`` is set, the run samples a subset of the analyzed candidate videos sized to reach that
+    project-wide frame budget, so the whole project can be refined over repeated passes without listing videos by hand.
+    The candidates are drawn in priority order: videos with no frames first, then videos with only raw frames, then
+    videos that already carry outlier frames (a further additive pass). This de-prioritizes videos that already have
+    raw or outlier frames and, with ``balance_groups``, spreads the sampled frames across groups of related videos.
+
     Notes:
         The pipeline uses the spawn multiprocessing start method on every platform, so a programmatic caller must guard
         the call with ``if __name__ == "__main__":``. The installed console-script entry point is already guarded.
         Outlier extraction is additive: re-running a video appends further frames rather than replacing the existing
         ones, so coverage grows across repeated passes.
 
+        A video already carries outlier frames when its labeled-data folder holds a ``machinelabels`` file, which
+        DeepLabCut writes for outlier frames but not for raw k-means frames; the tiered sampling uses this to tell the
+        two apart.
+
         Empty ``labeled-data`` folders left by videos that were registered but never extracted are removed after every
         run, so the labeling GUI shows only the videos that have frames.
 
     Args:
         config_path: The path to the DeepLabCut project's config.yaml.
-        videos: The video files (or directories of videos) to refine on; every video must already be analyzed.
+        videos: The video files (or directories of videos) to refine on; every video must already be analyzed. Set to
+            None (or an empty list) to refine every analyzed video the project's config.yaml registers.
         shuffle_index: The shuffle index whose trained model wrote the predictions.
         training_set_index: The training-set fraction index.
         outlier_algorithm: The detection algorithm: ``"jump"``, ``"uncertain"``, ``"fitting"``, or ``"list"``.
@@ -204,6 +236,21 @@ def extract_outlier_frames_parallel(
             the candidates enough, a switch to seeking that avoids decoding the whole frame range.
         frames_per_video: The number of frames to extract per video, overriding ``numframes2pick`` in config.yaml. Set
             to -1 to use the value already stored in the configuration file.
+        total_frame_budget: The total number of frames the project should hold, reached by sampling analyzed videos in
+            frame-existence priority order. Set to -1 to extract from every analyzed candidate video instead of sampling
+            toward a budget.
+        random_seed: The seed for the budgeted video sampling. Set to None to draw a different subset each run, or to an
+            integer to make the selection reproducible. Only affects the run when ``total_frame_budget`` is set.
+        balance_groups: Determines whether the budgeted sampling is balanced across groups rather than drawn within each
+            tier uniformly, so every group is represented and coverage evens out across repeated passes. The group of
+            each video is inferred from its file name. Only affects the run when ``total_frame_budget`` is set.
+        group_by_pattern: A regular expression whose first capturing group names the group for each video's file-name
+            stem, overriding the built-in inference. Setting it implies ``balance_groups``. Only affects the run when
+            ``total_frame_budget`` is set.
+        always_include_videos: The path substrings naming videos to always include in the budgeted sample, selected
+            before the tiered draw fills the remaining budget. Only affects the run when ``total_frame_budget`` is set.
+        path_filters: The substrings used to restrict the candidate videos to those whose path contains any of them. An
+            empty tuple keeps every candidate video. Applies whether or not a frame budget is set.
         clustering_resize_width: The downsample width applied before clustering when selecting with ``"kmeans"``.
         cluster_in_color: Determines whether to cluster on color channels instead of grayscale.
         save_labeled_frames: Determines whether to also save each extracted frame with the model's predictions drawn on
@@ -289,14 +336,69 @@ def extract_outlier_frames_parallel(
         detector_snapshot_index=detector_snapshot_index,
     )
 
-    video_paths = collect_video_paths(
-        [str(video) for video in videos], extensions=list(video_extensions) if video_extensions else None
-    )
+    # Resolve the candidate pool: the explicit selection when videos are given, otherwise every analyzed video the
+    # project registers, so a budgeted pass can grow refinement coverage across the whole project without re-listing.
+    if videos:
+        video_paths = collect_video_paths(
+            [str(video) for video in videos], extensions=list(video_extensions) if video_extensions else None
+        )
+        videos_explicitly_selected = True
+    else:
+        video_paths = _discover_project_videos(configuration)
+        videos_explicitly_selected = False
+    if path_filters:
+        video_paths = [video for video in video_paths if any(token in video for token in path_filters)]
     if not video_paths:
         message = "Unable to extract outlier frames. No videos matched the requested selection."
         raise ValueError(message)
     # Two videos that share a stem would write into one labeled-data folder, racing in the parallel extraction pool.
     ensure_unique_video_stems(video_paths, error_context="Unable to extract outlier frames.")
+
+    if total_frame_budget == -1 and (balance_groups or group_by_pattern is not None or always_include_videos):
+        sys.stderr.write(
+            "WARNING: --balance-groups, --group-by, and --always-include only apply when sampling toward a frame "
+            "budget. Pass --total-frames to enable budgeted outlier sampling.\n"
+        )
+        sys.stderr.flush()
+
+    existing_frame_count = 0
+    target_frame_count = -1
+    budget_unanalyzed_videos: list[str] = []
+    if total_frame_budget != -1:
+        video_paths, plan, budget_unanalyzed_videos = _plan_outlier_budget(
+            video_paths=video_paths,
+            configuration=configuration,
+            project_directory=config_path.parent,
+            predictions_directory=predictions_directory,
+            scorer=scorer,
+            tracking_method=resolved_tracking_method,
+            total_frame_budget=total_frame_budget,
+            random_seed=random_seed,
+            balance_groups=balance_groups,
+            group_by_pattern=group_by_pattern,
+            always_include_videos=always_include_videos,
+            report_unanalyzed=videos_explicitly_selected,
+            display_progress=display_progress,
+        )
+        existing_frame_count = plan.existing_frame_count
+        target_frame_count = plan.target_frame_count
+        if not video_paths:
+            prune_empty_labeled_data_directories(config_path.parent, display_progress=display_progress)
+            return OutlierExtractionSummary(
+                config_path=config_path,
+                outlier_algorithm=outlier_algorithm,
+                extraction_algorithm=extraction_algorithm,
+                total_video_count=0,
+                extracted_video_count=0,
+                worker_count=0,
+                used_core_count=0,
+                total_core_count=os.cpu_count() or 1,
+                candidate_frame_count=0,
+                extracted_frame_count=0,
+                unanalyzed_videos=tuple(budget_unanalyzed_videos),
+                existing_frame_count=existing_frame_count,
+                target_frame_count=target_frame_count,
+            )
 
     candidates, unanalyzed_videos, errors = _detect_all_videos(
         video_paths=video_paths,
@@ -316,6 +418,9 @@ def extract_outlier_frames_parallel(
         reserved_core_count=reserved_core_count,
         display_progress=display_progress,
     )
+    # The budget phase already set aside any explicitly requested videos that were not analyzed; report them alongside
+    # any the detection phase found so a single run surfaces every video that still needs analysis.
+    unanalyzed_videos = budget_unanalyzed_videos + unanalyzed_videos
 
     # Sub-sampling the flagged candidates thins the pool the frames are selected from. When it thins a dense pool
     # enough that seeking beats streaming, it avoids decoding the whole frame range, at the cost of coverage.
@@ -336,6 +441,8 @@ def extract_outlier_frames_parallel(
             candidate_frame_count=0,
             extracted_frame_count=0,
             unanalyzed_videos=tuple(unanalyzed_videos),
+            existing_frame_count=existing_frame_count,
+            target_frame_count=target_frame_count,
             errors=tuple(errors),
         )
     else:
@@ -369,10 +476,228 @@ def extract_outlier_frames_parallel(
             total_video_count=len(video_paths),
             unanalyzed_videos=tuple(unanalyzed_videos),
             detection_errors=errors,
+            existing_frame_count=existing_frame_count,
+            target_frame_count=target_frame_count,
         )
 
     prune_empty_labeled_data_directories(config_path.parent, display_progress=display_progress)
     return summary
+
+
+def _discover_project_videos(configuration: dict[str, Any]) -> list[str]:
+    """Returns the registered project videos that still exist on disk, for whole-project outlier refinement.
+
+    Reads the paths the project configuration registers in ``video_sets`` and keeps the ones present on disk, so a
+    budgeted run can refine the whole project without the videos being listed on the command line. Unanalyzed videos
+    are kept here and filtered out later, once the scorer is known.
+
+    Args:
+        configuration: The loaded project configuration holding the ``video_sets`` registration.
+
+    Returns:
+        The registered video paths that currently exist on disk, in the order the configuration lists them.
+    """
+    registered = configuration.get("video_sets") or {}
+    return [str(entry) for entry in registered if Path(entry).exists()]
+
+
+def _is_analyzed(
+    *, video: str, predictions_directory: Path | None, scorer: str, tracking_method: str
+) -> bool:
+    """Reports whether a video already has predictions for the given scorer, so outliers can be flagged from them.
+
+    Probes the prediction folder for a matching data file without loading it, so the budgeted pass can exclude
+    not-yet-analyzed videos cheaply before the expensive detection phase runs.
+
+    Args:
+        video: The candidate video path.
+        predictions_directory: The directory holding the predictions, or None to look beside the video.
+        scorer: The DeepLabCut scorer string naming the prediction files.
+        tracking_method: The resolved multi-animal tracker method.
+
+    Returns:
+        True when a matching prediction file exists for the video and scorer.
+    """
+    folder = predictions_directory if predictions_directory is not None else Path(video).parent
+    try:
+        with Path(os.devnull).open("w") as null_stream, contextlib.redirect_stdout(null_stream):
+            auxiliaryfunctions.find_analyzed_data(
+                folder=str(folder), videoname=Path(video).stem, scorer=scorer, track_method=tracking_method
+            )
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _plan_outlier_budget(
+    *,
+    video_paths: list[str],
+    configuration: dict[str, Any],
+    project_directory: Path,
+    predictions_directory: Path | None,
+    scorer: str,
+    tracking_method: str,
+    total_frame_budget: int,
+    random_seed: int | None,
+    balance_groups: bool,
+    group_by_pattern: str | None,
+    always_include_videos: tuple[str, ...],
+    report_unanalyzed: bool,
+    display_progress: bool,
+) -> tuple[list[str], TieredVideoSamplingPlan, list[str]]:
+    """Selects the outlier videos for a budgeted pass, prioritizing videos with the fewest existing frames.
+
+    Filters the candidate pool to the analyzed videos, scans each one's labeled-data folder for its frame count and
+    whether it already carries outlier frames, then draws a tiered, optionally group-balanced sample toward the frame
+    budget. Only analyzed videos can be refined, so the unanalyzed candidates are set aside; they are returned for
+    reporting only when the caller listed videos explicitly (an auto-discovered project video that is not analyzed is
+    simply not yet available to refine).
+
+    Args:
+        video_paths: The candidate video paths resolved from the explicit selection or project discovery.
+        configuration: The loaded project configuration, read for ``numframes2pick``.
+        project_directory: The project directory holding the ``labeled-data`` tree.
+        predictions_directory: The directory holding the predictions, or None to look beside each video.
+        scorer: The DeepLabCut scorer string naming the prediction files.
+        tracking_method: The resolved multi-animal tracker method.
+        total_frame_budget: The total number of frames the project should hold after extraction.
+        random_seed: The seed for the budgeted sampling, or None for a nondeterministic draw.
+        balance_groups: Determines whether the sampling is balanced across groups.
+        group_by_pattern: A regular expression naming each video's group, overriding the built-in inference.
+        always_include_videos: The path substrings naming videos to always include in the sample.
+        report_unanalyzed: Determines whether unanalyzed candidates are returned for reporting.
+        display_progress: Determines whether the sampling plan is reported to the standard error stream.
+
+    Returns:
+        A tuple of the selected video paths, the sampling plan, and the unanalyzed candidate paths to report.
+
+    Raises:
+        ValueError: If the project's ``numframes2pick`` is not a positive integer.
+    """
+    frames_per_video_count = configuration.get("numframes2pick")
+    if not isinstance(frames_per_video_count, int) or frames_per_video_count < 1:
+        message = (
+            "Unable to sample outlier videos for a frame budget. The project's numframes2pick must be a positive "
+            f"integer, but got {frames_per_video_count!r}. Pass frames_per_video to set it."
+        )
+        raise ValueError(message)
+
+    analyzed_videos: list[str] = []
+    unanalyzed_videos: list[str] = []
+    for video in video_paths:
+        if _is_analyzed(
+            video=video, predictions_directory=predictions_directory, scorer=scorer, tracking_method=tracking_method
+        ):
+            analyzed_videos.append(video)
+        else:
+            unanalyzed_videos.append(video)
+    reported_unanalyzed = unanalyzed_videos if report_unanalyzed else []
+
+    if not analyzed_videos:
+        if display_progress:
+            sys.stderr.write("WARNING: no analyzed videos are available to sample outlier frames from.\n")
+            sys.stderr.flush()
+        empty_plan = TieredVideoSamplingPlan(
+            selected_videos=(),
+            existing_frame_count=0,
+            target_frame_count=total_frame_budget,
+            projected_frame_count=0,
+            budget_already_met=False,
+            target_unreachable=True,
+        )
+        return [], empty_plan, reported_unanalyzed
+
+    extracted_frame_counts: dict[str, int] = {}
+    outlier_extracted_videos: set[str] = set()
+    for video in analyzed_videos:
+        directory = project_directory / "labeled-data" / Path(video).stem
+        extracted_frame_counts[video] = len(extracted_frame_paths(directory))
+        if has_outlier_frames(directory):
+            outlier_extracted_videos.add(video)
+
+    groups = (
+        group_videos(analyzed_videos, group_by_pattern=group_by_pattern)
+        if (balance_groups or group_by_pattern is not None)
+        else None
+    )
+    pinned_videos, unmatched = resolve_video_overrides(
+        always_include_videos=always_include_videos, videos=analyzed_videos
+    )
+    for token in unmatched:
+        sys.stderr.write(f"WARNING: the --always-include value {token!r} matched no analyzed video in the selection.\n")
+
+    plan = plan_tiered_video_sampling(
+        videos=analyzed_videos,
+        extracted_frame_counts=extracted_frame_counts,
+        outlier_extracted_videos=outlier_extracted_videos,
+        frames_per_video_count=frames_per_video_count,
+        total_frame_budget=total_frame_budget,
+        random_seed=random_seed,
+        groups=groups,
+        pinned_videos=pinned_videos,
+    )
+    if display_progress:
+        _report_tiered_sampling_plan(plan=plan)
+    return list(plan.selected_videos), plan, reported_unanalyzed
+
+
+def _report_tiered_sampling_plan(plan: TieredVideoSamplingPlan) -> None:
+    """Writes the budgeted outlier-sampling outcome, including the tier and group breakdown, to standard error.
+
+    Args:
+        plan: The tiered sampling plan whose selection, tier priority, and group balancing are reported.
+    """
+    if plan.budget_already_met:
+        sys.stderr.write(
+            f"WARNING: the analyzed videos already hold {plan.existing_frame_count:,} frames, which meets the "
+            f"requested total of {plan.target_frame_count:,}. Nothing will be extracted. Raise the total frame budget "
+            f"to grow the set.\n"
+        )
+    elif not plan.selected_videos:
+        sys.stderr.write("WARNING: no analyzed videos remain to sample outlier frames from.\n")
+    elif plan.target_unreachable:
+        sys.stderr.write(
+            f"WARNING: too few analyzed videos remain to reach {plan.target_frame_count:,} frames in one pass. "
+            f"Sampling all {len(plan.selected_videos)} available video(s) for a projected "
+            f"{plan.projected_frame_count:,} frames; re-run to add more.\n"
+        )
+    else:
+        sys.stderr.write(
+            f"sampling {len(plan.selected_videos)} video(s) | {plan.existing_frame_count:,} existing -> "
+            f"{plan.projected_frame_count:,} projected frames (target {plan.target_frame_count:,})\n"
+        )
+
+    tier_distribution = ", ".join(
+        f"{tier_name}+{selected_count}" for tier_name, _available, selected_count in plan.per_tier if selected_count > 0
+    )
+    if tier_distribution:
+        sys.stderr.write(f"tier priority: {tier_distribution}\n")
+
+    if plan.per_group:
+        sampled = sum(1 for (_group, _existing, added, _projected, _available) in plan.per_group if added > 0)
+        group_count = len(plan.per_group)
+        distribution = ", ".join(
+            f"{group}+{added}"
+            for (group, _existing, added, _projected, _available) in sorted(
+                plan.per_group, key=lambda item: (-item[2], item[0])
+            )
+            if added > 0
+        )
+        sys.stderr.write(f"group balancing: {sampled}/{group_count} groups sampled this pass | {distribution}\n")
+        starved = sum(
+            1 for (_group, _existing, added, _projected, available) in plan.per_group if added == 0 and available > 0
+        )
+        if starved:
+            sys.stderr.write(
+                f"WARNING: {starved} group(s) had videos but received none this pass because the budget is too small. "
+                f"Raise the total frame budget to include them.\n"
+            )
+    if plan.always_included_overshoot:
+        sys.stderr.write(
+            "WARNING: the always-included videos alone exceeded the frame budget, so the projected total overshoots "
+            "the target by the surplus always-included videos.\n"
+        )
+    sys.stderr.flush()
 
 
 def _detect_all_videos(
@@ -602,6 +927,8 @@ def _extract_all_videos(
     total_video_count: int,
     unanalyzed_videos: tuple[str, ...],
     detection_errors: list[tuple[str, str]],
+    existing_frame_count: int = 0,
+    target_frame_count: int = -1,
 ) -> OutlierExtractionSummary:
     """Decodes and writes the flagged frames one video per pinned worker, then assembles the run summary.
 
@@ -626,6 +953,9 @@ def _extract_all_videos(
         total_video_count: The total number of videos considered, for the summary.
         unanalyzed_videos: The unanalyzed videos, for the summary.
         detection_errors: The detection-phase failures, extended with any extraction failures.
+        existing_frame_count: The frames already present across the analyzed candidates, for the summary in budgeted
+            mode.
+        target_frame_count: The requested total-frame budget, or -1 when budgeted sampling was disabled.
 
     Returns:
         The completed OutlierExtractionSummary.
@@ -709,6 +1039,8 @@ def _extract_all_videos(
         candidate_frame_count=candidate_frame_count,
         extracted_frame_count=extracted_frame_count,
         unanalyzed_videos=tuple(unanalyzed_video_list),
+        existing_frame_count=existing_frame_count,
+        target_frame_count=target_frame_count,
         errors=tuple(errors),
     )
 

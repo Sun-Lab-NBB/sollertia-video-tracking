@@ -104,17 +104,23 @@ This library provides the `slvt` CLI that exposes the following commands:
 | `train`                   | Trains a shuffle with mixed precision and multi-GPU DistributedDataParallel               |
 | `infer`                   | Analyzes videos across multiple GPUs, a single GPU, or the CPU, with in-flight polars output |
 
-The `extract` group owns the parameters shared by both subcommands (the project config.yaml, parallelism, and
-frame-selection options); these must be given before the `frames` or `outliers` subcommand name, which then carries
-its own parameters. Use `slvt --help`, `slvt extract --help`, or `slvt COMMAND --help` for detailed usage information.
+The `extract` group owns the parameters shared by both subcommands (the project config.yaml, parallelism, and the
+frame-selection and frame-budget sampling options); these must be given before the `frames` or `outliers` subcommand
+name, which then carries its own parameters. Both subcommands grow the project toward a shared `--total-frames` budget,
+optionally balanced across groups of related videos with `--balance-groups`. Use `slvt --help`, `slvt extract --help`,
+or `slvt COMMAND --help` for detailed usage information.
 
 For example, the following command extracts training frames from every video referenced by a project's config.yaml,
 sampling every 500th frame for clustering:
-`slvt extract --config-path /path/to/project/config.yaml frames --clustering-stride 500`
+`slvt extract --config-path /path/to/project/config.yaml --clustering-stride 500 frames`
 
 The following command grows the project toward a two-thousand-frame training set while ensuring every group is
 represented, balancing the sampled videos across the groups inferred from the components their file names share:
-`slvt extract --config-path /path/to/project/config.yaml frames --total-frames 2000 --balance-groups`
+`slvt extract --config-path /path/to/project/config.yaml --total-frames 2000 --balance-groups frames`
+
+The following command grows the project's outlier-refinement set toward a five-hundred-frame budget across every
+analyzed video the project registers, adding frames to videos that have none first, then those without outlier frames:
+`slvt extract --config-path /path/to/project/config.yaml --total-frames 500 outliers`
 
 The following command analyzes two videos with a project's trained model, writing a polars feather of predictions per
 video into an output directory: `slvt infer /path/to/project/config.yaml video1.mp4 video2.mp4 --dest /path/to/output`
@@ -131,9 +137,12 @@ from sollertia_video_tracking import extract_frames_kmeans
 
 # Clusters every video referenced by the DeepLabCut project's config.yaml, writing the selected frames into each
 # video's labeled-data directory. Re-runs skip videos that already have frames unless overwrite=True is passed.
-summary = extract_frames_kmeans(config_path=Path("/path/to/project/config.yaml"), step=500)
+summary = extract_frames_kmeans(config_path=Path("/path/to/project/config.yaml"), clustering_stride=500)
 
-print(f"{summary.extracted} extracted, {summary.skipped} skipped, {summary.failed} failed of {summary.total}")
+print(
+    f"{summary.extracted_video_count} extracted, {summary.skipped_video_count} skipped, "
+    f"{summary.failed_video_count} failed of {summary.total_video_count}"
+)
 ```
 
 Inference is likewise available as a function. It resolves the optimizations for the detected hardware, distributes
