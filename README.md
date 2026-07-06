@@ -105,10 +105,11 @@ This library provides the `slvt` CLI that exposes the following commands:
 | `infer`                   | Analyzes videos across multiple GPUs, a single GPU, or the CPU, with in-flight polars output |
 
 The `extract` group owns the parameters shared by both subcommands (the project config.yaml, parallelism, and the
-frame-selection and frame-budget sampling options); these must be given before the `frames` or `outliers` subcommand
-name, which then carries its own parameters. Both subcommands grow the project toward a shared `--total-frames` budget,
-optionally balanced across groups of related videos with `--balance-groups`. Use `slvt --help`, `slvt extract --help`,
-or `slvt COMMAND --help` for detailed usage information.
+frame-selection options); these must be given before the `frames` or `outliers` subcommand name, which then carries its
+own parameters. The `frames` subcommand grows the project toward a `--total-frames` budget, optionally balanced across
+groups of related videos with `--balance-groups`; the `outliers` subcommand extracts `--frames-per-video` outlier frames
+from each target video given with `--video`. Use `slvt --help`, `slvt extract --help`, or `slvt COMMAND --help` for
+detailed usage information.
 
 For example, the following command extracts training frames from every video referenced by a project's config.yaml,
 sampling every 500th frame for clustering:
@@ -116,11 +117,11 @@ sampling every 500th frame for clustering:
 
 The following command grows the project toward a two-thousand-frame training set while ensuring every group is
 represented, balancing the sampled videos across the groups inferred from the components their file names share:
-`slvt extract --config-path /path/to/project/config.yaml --total-frames 2000 --balance-groups frames`
+`slvt extract --config-path /path/to/project/config.yaml frames --total-frames 2000 --balance-groups`
 
-The following command grows the project's outlier-refinement set toward a five-hundred-frame budget across every
-analyzed video the project registers, adding frames to videos that have none first, then those without outlier frames:
-`slvt extract --config-path /path/to/project/config.yaml --total-frames 500 outliers`
+The following command extracts outlier frames from two analyzed videos to refine a trained model, adding
+`--frames-per-video` corrected frames to each:
+`slvt extract --config-path /path/to/project/config.yaml outliers --video video1.mp4 --video video2.mp4`
 
 The following command analyzes two videos with a project's trained model, writing a polars feather of predictions per
 video into an output directory: `slvt infer /path/to/project/config.yaml video1.mp4 video2.mp4 --dest /path/to/output`

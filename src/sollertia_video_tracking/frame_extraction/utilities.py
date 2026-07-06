@@ -153,8 +153,7 @@ def extracted_frame_paths(directory: Path) -> list[Path]:
 
     The outlier-refinement pipeline may leave ``imgNNNNlabeled.png`` prediction overlays beside the extracted
     ``imgNNNN.png`` frames when it saves labeled frames. Those overlays are not training frames, so counting them
-    would inflate both the budgeted-sampling accounting and the per-video totals; they are filtered out here. Both
-    frame-extraction pipelines share this so a video's frame count means the same thing everywhere.
+    would inflate the k-means budgeted-sampling accounting and the per-video totals; they are filtered out here.
 
     Args:
         directory: The ``labeled-data/<video>`` directory whose extracted frames are listed.
@@ -166,26 +165,6 @@ def extracted_frame_paths(directory: Path) -> list[Path]:
     if not directory.exists():
         return []
     return sorted(frame for frame in directory.glob("img*.png") if not frame.stem.endswith("labeled"))
-
-
-def has_outlier_frames(directory: Path) -> bool:
-    """Reports whether a labeled-data directory holds frames written by a previous outlier-extraction pass.
-
-    DeepLabCut's outlier extraction saves the model's predictions for the extracted frames as machine pre-labels, a
-    ``machinelabels-iter<N>.h5`` (and ``.csv``) file, alongside the ``imgNNNN.png`` frames. Raw k-means extraction
-    writes no such file, so its presence distinguishes a video that already carries outlier frames from one that only
-    holds raw frames. This drives the tiered outlier sampling, which de-prioritizes videos that already have outlier
-    frames.
-
-    Args:
-        directory: The ``labeled-data/<video>`` directory to inspect.
-
-    Returns:
-        True when the directory holds a ``machinelabels`` file, indicating a prior outlier-extraction pass.
-    """
-    if not directory.exists():
-        return False
-    return any(directory.glob("machinelabels*.h5")) or any(directory.glob("machinelabels*.csv"))
 
 
 def resolve_video_overrides(
