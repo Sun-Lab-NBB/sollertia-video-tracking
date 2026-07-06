@@ -16,6 +16,12 @@ if TYPE_CHECKING:
 type KeypointSeries = tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]
 """One keypoint's per-frame horizontal positions, vertical positions, and confidences, as three float arrays."""
 
+_DISCARDED_INTERVAL_ALPHA: float = 0.01
+"""The significance level passed to DeepLabCut's ``FitSARIMAXModel``. Only the fitted mean trajectory is used to measure
+each frame's deviation; the confidence interval, the sole output this value influences, is discarded. It is a fixed
+constant rather than a parameter because it cannot change which frames are flagged, matching DeepLabCut's own
+``fitting`` selection, which thresholds the mean deviation and ignores the interval."""
+
 
 class OutlierAlgorithm(StrEnum):
     """The supported frame-selection modes.
@@ -114,7 +120,6 @@ def fit_keypoint_distance(
     vertical_positions: NDArray[np.float64],
     confidences: NDArray[np.float64],
     minimum_confidence: float,
-    significance_level: float,
     autoregressive_degree: int,
     moving_average_degree: int,
 ) -> NDArray[np.float64]:
@@ -131,7 +136,6 @@ def fit_keypoint_distance(
         vertical_positions: The keypoint's per-frame vertical positions.
         confidences: The keypoint's per-frame prediction confidences.
         minimum_confidence: The likelihood below which a position is treated as missing while fitting.
-        significance_level: The significance level for the fitted model's confidence interval.
         autoregressive_degree: The autoregressive degree of the SARIMAX model.
         moving_average_degree: The moving-average degree of the SARIMAX model.
 
@@ -147,7 +151,7 @@ def fit_keypoint_distance(
                 x=horizontal_positions,
                 p=confidences,
                 pcutoff=minimum_confidence,
-                alpha=significance_level,
+                alpha=_DISCARDED_INTERVAL_ALPHA,
                 ARdegree=autoregressive_degree,
                 MAdegree=moving_average_degree,
             )
@@ -155,7 +159,7 @@ def fit_keypoint_distance(
                 x=vertical_positions,
                 p=confidences,
                 pcutoff=minimum_confidence,
-                alpha=significance_level,
+                alpha=_DISCARDED_INTERVAL_ALPHA,
                 ARdegree=autoregressive_degree,
                 MAdegree=moving_average_degree,
             )

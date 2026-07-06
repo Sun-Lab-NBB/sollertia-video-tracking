@@ -303,10 +303,11 @@ def frames_command(
     "--videos",
     multiple=True,
     required=True,
-    type=click.Path(exists=True, path_type=Path),
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
     metavar="PATH",
-    help="An analyzed video file, or a directory of videos, from which to extract outlier frames for model refinement. "
-    "Provide the option several times to process multiple videos or directories.",
+    help="A project video file, already registered in the project's config.yaml, from which to extract outlier frames "
+    "for model refinement. Matched against the videos registered in the project; paths that are not registered are "
+    "skipped. Provide the option several times to refine several videos.",
 )
 @click.option(
     "-oa",
@@ -331,14 +332,9 @@ def frames_command(
     "--shuffle",
     default=1,
     show_default=True,
-    help="The shuffle index identifying which trained model produced the predictions.",
-)
-@click.option(
-    "-tsi",
-    "--training-set-index",
-    default=0,
-    show_default=True,
-    help="The training-set fraction index identifying which trained model produced the predictions.",
+    help="The shuffle index identifying which trained model produced the predictions. As in the DeepLabCut GUI, this "
+    "is the only model-selection option: the training fraction, model prefix, and snapshots are read from the "
+    "project's config.yaml.",
 )
 @click.option(
     "-pdt",
@@ -388,37 +384,10 @@ def frames_command(
     help="How many past prediction errors the 'fitting' detector's motion model smooths over.",
 )
 @click.option(
-    "-sl",
-    "--significance-level",
-    default=0.01,
-    show_default=True,
-    help="The significance level (p-value) for the 'fitting' detector's confidence interval; smaller values are "
-    "stricter, flagging only clearer departures from the expected motion.",
-)
-@click.option(
     "-sv",
     "--save-labeled",
     is_flag=True,
     help="Also save a copy of each extracted frame with the model's predictions drawn on it.",
-)
-@click.option(
-    "-cv",
-    "--copy-videos",
-    is_flag=True,
-    help="Copy newly added videos into the project instead of linking to them in place.",
-)
-@click.option(
-    "-pd",
-    "--predictions-directory",
-    type=click.Path(file_okay=False, path_type=Path),
-    default=None,
-    help="The directory holding the analyzed predictions. Omit to look for predictions beside each video.",
-)
-@click.option(
-    "-mp",
-    "--model-prefix",
-    default="",
-    help="The model subdirectory prefix identifying which trained model produced the predictions.",
 )
 @click.option(
     "-tm",
@@ -426,27 +395,6 @@ def frames_command(
     type=click.Choice([method.value for method in TrackingMethod]),
     default=None,
     help="The multi-animal tracker that produced the data. Omit to use the project's setting.",
-)
-@click.option(
-    "-si",
-    "--snapshot-index",
-    type=int,
-    default=None,
-    help="The pose snapshot identifying which saved model produced the predictions. Omit to use the default.",
-)
-@click.option(
-    "-dsi",
-    "--detector-snapshot-index",
-    type=int,
-    default=None,
-    help="The detector snapshot, for top-down models. Omit to use the default.",
-)
-@click.option(
-    "-ve",
-    "--video-extensions",
-    multiple=True,
-    metavar="EXTENSION",
-    help="A file extension used to filter videos found inside a supplied directory. Provide the option several times.",
 )
 @click.option(
     "-fw",
@@ -464,39 +412,31 @@ def outliers_command(
     outlier_algorithm: str,
     extraction_algorithm: str,
     shuffle: int,
-    training_set_index: int,
     pixel_distance_threshold: float,
     minimum_confidence: float,
     comparison_bodyparts: tuple[str, ...],
     frame_index: tuple[int, ...],
     autoregressive_degree: int,
     moving_average_degree: int,
-    significance_level: float,
-    predictions_directory: Path | None,
-    model_prefix: str,
     tracking_method: str | None,
-    snapshot_index: int | None,
-    detector_snapshot_index: int | None,
-    video_extensions: tuple[str, ...],
     fit_workers: int,
     *,
     save_labeled: bool,
-    copy_videos: bool,
 ) -> None:
-    """Extracts a trained model's likely-wrong frames from analyzed videos to refine the model.
+    """Extracts a trained model's likely-wrong frames from the project's analyzed videos to refine the model.
 
-    Refines on the videos given with ``--videos``, extracting ``--frames-per-video`` outlier frames from each. Every
-    video must already have been analyzed, since the detectors read the model's predictions rather than re-running the
-    model. The flagged outlier frames are clustered in parallel, one video per worker pinned to a disjoint block of CPU
-    cores, and added to each video's labeled-data directory alongside the model's predictions as machine pre-labels.
-    Outlier extraction is additive, so repeated passes grow the refinement set.
+    Refines on the project videos given with ``--videos``, extracting ``--frames-per-video`` outlier frames from each.
+    Each video must already be registered in the project's config.yaml and analyzed, since the detectors read the
+    model's predictions rather than re-running the model; requested paths that are not registered project videos are
+    skipped with a warning. The flagged outlier frames are clustered in parallel, one video per worker pinned to a
+    disjoint block of CPU cores, and added to each video's labeled-data directory alongside the model's predictions as
+    machine pre-labels. Outlier extraction is additive, so repeated passes grow the refinement set.
     """
     try:
         summary = extract_outlier_frames_parallel(
             config_path=shared.require_config_path(),
             videos=list(videos),
             shuffle_index=shuffle,
-            training_set_index=training_set_index,
             outlier_algorithm=OutlierAlgorithm(outlier_algorithm),
             explicit_frame_indices=frame_index,
             comparison_bodyparts=comparison_bodyparts,
@@ -504,20 +444,13 @@ def outliers_command(
             minimum_confidence=minimum_confidence,
             autoregressive_degree=autoregressive_degree,
             moving_average_degree=moving_average_degree,
-            significance_level=significance_level,
             extraction_algorithm=ExtractionAlgorithm(extraction_algorithm),
             candidate_step=shared.clustering_stride,
             frames_per_video=shared.frames_per_video,
             clustering_resize_width=shared.clustering_resize_width,
             cluster_in_color=shared.cluster_in_color,
             save_labeled_frames=save_labeled,
-            copy_videos=copy_videos,
-            predictions_directory=predictions_directory,
-            model_prefix=model_prefix,
             tracking_method=TrackingMethod(tracking_method) if tracking_method is not None else None,
-            pose_snapshot_index=snapshot_index,
-            detector_snapshot_index=detector_snapshot_index,
-            video_extensions=video_extensions,
             worker_count=shared.worker_count,
             cores_per_worker=shared.cores_per_worker,
             fitting_worker_count=fit_workers,
