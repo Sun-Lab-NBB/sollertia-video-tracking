@@ -85,18 +85,31 @@ class _TrainingLaunch:
     """Bundles the picklable per-run parameters shared by every training worker process."""
 
     config: Path
+    """The path of the DeepLabCut project configuration file to train for."""
     shuffle: int
+    """The shuffle index to train."""
     training_set_index: int
-    modelprefix: str
+    """The training-set fraction index the shuffle was created with."""
+    model_prefix: str
+    """The model subdirectory prefix."""
     profile: OptimizationProfile
+    """The resolved optimization profile describing the device, precision, and parallelism to use."""
     snapshot_path: str | Path | None
+    """The pose snapshot to resume from, or None to start from scratch."""
     detector_path: str | Path | None
+    """The detector snapshot to resume from, or None to start from scratch."""
     load_head_weights: bool
+    """Whether to load head weights when resuming a pose model from a snapshot."""
     maximum_snapshots_to_keep: int | None
+    """The maximum number of snapshots to retain, or None to use the configured value."""
     progress_queue: Any
+    """The shared monitor queue workers report progress to, or None when progress reporting is disabled."""
     preserve_console: bool
+    """Whether the parent holds a preserved stderr duplicate, letting the single-process worker redirect its console."""
     port: int
+    """The free TCP port reserved for the DistributedDataParallel rendezvous."""
     world_size: int
+    """The number of training processes to launch."""
 
 
 def train_model(
@@ -105,7 +118,7 @@ def train_model(
     *,
     shuffle: int = 1,
     training_set_index: int = 0,
-    modelprefix: str = "",
+    model_prefix: str = "",
     epochs: int | None = None,
     batch_size: int | None = None,
     save_epochs: int | None = None,
@@ -119,7 +132,7 @@ def train_model(
     load_head_weights: bool = True,
     evaluate: bool = True,
     evaluation_batch_size: int = 16,
-    evaluation_pcutoff: float | None = None,
+    evaluation_confidence_cutoff: float | None = None,
     display_progress: bool = True,
 ) -> TrainingSummary:
     """Trains a DeepLabCut shuffle with the resolved hardware optimizations and a clean progress monitor.
@@ -135,7 +148,7 @@ def train_model(
         profile: The resolved optimization profile describing the device, precision, and parallelism to use.
         shuffle: The shuffle index to train.
         training_set_index: The training-set fraction index.
-        modelprefix: The model subdirectory prefix.
+        model_prefix: The model subdirectory prefix.
         epochs: The maximum number of pose-model epochs, or None to use the configured value.
         batch_size: The pose-model batch size, or None to use the configured value.
         save_epochs: The number of epochs between pose-model snapshots, or None to use the configured value.
@@ -150,8 +163,8 @@ def train_model(
         evaluate: Whether to score the trained snapshot against the labeled frames as a final step and write the
             evaluation feather and provenance sidecar.
         evaluation_batch_size: The number of frames scored per forward pass during the post-training evaluation.
-        evaluation_pcutoff: The confidence cutoff for the evaluation's cutoff-filtered metrics, or None to fall back to
-            the project configuration's ``pcutoff`` (0.6 when unset).
+        evaluation_confidence_cutoff: The confidence cutoff for the evaluation's cutoff-filtered metrics, or None to
+            fall back to the project configuration's ``pcutoff`` (0.6 when unset).
         display_progress: Whether to render the live progress monitor and route DeepLabCut's logs off the console.
 
     Returns:
@@ -162,7 +175,7 @@ def train_model(
             support.
     """
     config = Path(config)
-    loader = DLCLoader(config=config, shuffle=shuffle, trainset_index=training_set_index, modelprefix=modelprefix)
+    loader = DLCLoader(config=config, shuffle=shuffle, trainset_index=training_set_index, modelprefix=model_prefix)
 
     weight_init_config = loader.model_cfg["train_settings"].get("weight_init")
     if weight_init_config and WeightInitialization.from_dict(weight_init_config).memory_replay:
@@ -224,7 +237,7 @@ def train_model(
         config=config,
         shuffle=shuffle,
         training_set_index=training_set_index,
-        modelprefix=modelprefix,
+        model_prefix=model_prefix,
         profile=profile,
         snapshot_path=snapshot_path,
         detector_path=detector_path,
@@ -240,7 +253,7 @@ def train_model(
         if profile.use_ddp:
             mp.spawn(_run_training_worker, args=(launch,), nprocs=world_size, join=True)
         else:
-            _run_training_worker(0, launch)
+            _run_training_worker(rank=0, launch=launch)
         succeeded = True
     finally:
         if monitor is not None:
@@ -263,9 +276,9 @@ def train_model(
             profile,
             shuffle=shuffle,
             training_set_index=training_set_index,
-            modelprefix=modelprefix,
+            model_prefix=model_prefix,
             batch_size=evaluation_batch_size,
-            pcutoff=evaluation_pcutoff,
+            confidence_cutoff=evaluation_confidence_cutoff,
         )
 
     precision = str(profile.amp_dtype).removeprefix("torch.") if profile.amp_dtype is not None else "fp32"
@@ -289,9 +302,9 @@ def _evaluate_after_training(
     *,
     shuffle: int,
     training_set_index: int,
-    modelprefix: str,
+    model_prefix: str,
     batch_size: int,
-    pcutoff: float | None,
+    confidence_cutoff: float | None,
 ) -> EvaluationSummary | None:
     """Scores the freshly trained snapshot on one device, never failing a completed training run.
 
@@ -304,9 +317,9 @@ def _evaluate_after_training(
         profile: The resolved optimization profile, used only to choose the evaluation device.
         shuffle: The shuffle index that was trained.
         training_set_index: The training-set fraction index.
-        modelprefix: The model subdirectory prefix.
+        model_prefix: The model subdirectory prefix.
         batch_size: The number of frames scored per forward pass.
-        pcutoff: The confidence cutoff for the cutoff-filtered metrics, or None for the default.
+        confidence_cutoff: The confidence cutoff for the cutoff-filtered metrics, or None for the default.
 
     Returns:
         The evaluation summary, or None when evaluation failed.
@@ -319,9 +332,9 @@ def _evaluate_after_training(
             config,
             shuffle=shuffle,
             training_set_index=training_set_index,
-            modelprefix=modelprefix,
+            model_prefix=model_prefix,
             batch_size=batch_size,
-            pcutoff=pcutoff,
+            confidence_cutoff=confidence_cutoff,
             device=device,
         )
     except Exception:  # noqa: BLE001 - evaluation is best-effort; a completed training run must not be lost.
@@ -379,9 +392,9 @@ def _redirect_worker_console(log_path: Path, *, active: bool) -> Iterator[None]:
     """Routes this process's stdout and stderr into the training log at the descriptor level while active.
 
     A descriptor-level redirection, rather than reassigning ``sys.stdout`` and ``sys.stderr``, is required to capture
-    the output the progress monitor must not compete with: DeepLabCut's ``print`` calls, the Hugging Face download bar,
-    and the C++ ``c10d`` and NCCL messages that write straight to descriptor 2. The original descriptors are restored
-    on exit, so a re-raised worker traceback still reaches the console.
+    the output the progress monitor must not compete with. That output is DeepLabCut's ``print`` calls, the Hugging
+    Face download bar, and the C++ ``c10d`` and NCCL messages that write straight to descriptor 2. The original
+    descriptors are restored on exit, so a re-raised worker traceback still reaches the console.
 
     Args:
         log_path: The training-log file the diverted output is appended to.
@@ -472,7 +485,7 @@ def _resolve_process_placement(
     return "cuda", [profile.gpus[0]], False, 0
 
 
-def _build_pose_or_detector_model(run_config: dict, task: Task, snapshot_path: str | Path | None) -> Any:
+def _build_pose_or_detector_model(run_config: dict, task: Task, snapshot_path: str | Path | None) -> torch.nn.Module:
     """Builds the pose or detector model, honoring transfer-learning weights and pretrained-backbone rules.
 
     Args:
@@ -589,7 +602,7 @@ def _train_single_model(
         maximum_snapshots_to_keep: The maximum number of snapshots to retain, or None to use the configured value.
         progress_queue: The shared monitor queue, or None when progress reporting is disabled.
     """
-    device, gpus, ddp, local_rank = _resolve_process_placement(profile, rank, task)
+    device, gpus, ddp, local_rank = _resolve_process_placement(profile=profile, rank=rank, task=task)
     if maximum_snapshots_to_keep is not None:
         run_config["runner"]["snapshots"]["max_snapshots"] = maximum_snapshots_to_keep
 
@@ -597,7 +610,7 @@ def _train_single_model(
     if snapshot_path is None:
         snapshot_path = run_config.get("resume_training_from")
 
-    model = _build_pose_or_detector_model(run_config, task, snapshot_path)
+    model = _build_pose_or_detector_model(run_config=run_config, task=task, snapshot_path=snapshot_path)
     # Moves the model to its device before the optimizer is built and the snapshot loads, so a resumed optimizer
     # state lands on the parameters' device (DeepLabCut moves the model before building its runner).
     model.to(f"cuda:{gpus[0]}" if gpus else device)
@@ -607,11 +620,11 @@ def _train_single_model(
         logger = QueueTrainingLogger(progress_queue, task_name=("detector" if task == Task.DETECT else "pose"))
 
     runner = build_optimized_training_runner(
-        run_config["runner"],
-        loader.model_folder,
-        task,
-        model,
-        device,
+        runner_config=run_config["runner"],
+        model_folder=loader.model_folder,
+        task=task,
+        model=model,
+        device=device,
         gpus=gpus,
         snapshot_path=snapshot_path,
         logger=logger,
@@ -631,11 +644,11 @@ def _train_single_model(
         logger.log_config({**run_config, "train_settings": {**run_config["train_settings"], "epochs": total_epochs}})
 
     train_dataloader, valid_dataloader = _build_dataloaders(
-        loader, run_config, task, ddp=ddp, rank=rank, world_size=world_size
+        loader=loader, run_config=run_config, task=task, ddp=ddp, rank=rank, world_size=world_size
     )
     runner.fit(
-        train_dataloader,
-        valid_dataloader,
+        train_loader=train_dataloader,
+        valid_loader=valid_dataloader,
         epochs=run_config["train_settings"]["epochs"],
         display_iters=run_config["train_settings"]["display_iters"],
     )
@@ -656,14 +669,14 @@ def _run_training_worker(rank: int, launch: _TrainingLaunch) -> None:
     load_head_weights = launch.load_head_weights
     maximum_snapshots_to_keep = launch.maximum_snapshots_to_keep
 
-    _device, _gpus, ddp, local_rank = _resolve_process_placement(profile, rank)
+    _device, _gpus, ddp, local_rank = _resolve_process_placement(profile=profile, rank=rank)
     # The loader is built before the process group so the training-log path is known in time to divert this worker's
     # console output around distributed initialization, where the c10d and NCCL C++ layers write their first messages.
     loader = DLCLoader(
         config=launch.config,
         shuffle=launch.shuffle,
         trainset_index=launch.training_set_index,
-        modelprefix=launch.modelprefix,
+        modelprefix=launch.model_prefix,
     )
     # A spawned DDP worker is its own process, so redirecting its descriptors never touches the monitor in the parent.
     # The single-process path shares this process with the monitor, so it may only redirect once the monitor holds a
@@ -691,10 +704,10 @@ def _run_training_worker(rank: int, launch: _TrainingLaunch) -> None:
                 detector_config["device"] = loader.model_cfg["device"]
                 detector_config["train_settings"]["weight_init"] = loader.model_cfg["train_settings"].get("weight_init")
                 _train_single_model(
-                    loader,
-                    detector_config,
-                    Task.DETECT,
-                    profile,
+                    loader=loader,
+                    run_config=detector_config,
+                    task=Task.DETECT,
+                    profile=profile,
                     rank=rank,
                     world_size=world_size,
                     snapshot_path=detector_path,
@@ -707,10 +720,10 @@ def _run_training_worker(rank: int, launch: _TrainingLaunch) -> None:
 
             if loader.model_cfg["train_settings"]["epochs"] > 0:
                 _train_single_model(
-                    loader,
-                    loader.model_cfg,
-                    loader.pose_task,
-                    profile,
+                    loader=loader,
+                    run_config=loader.model_cfg,
+                    task=loader.pose_task,
+                    profile=profile,
                     rank=rank,
                     world_size=world_size,
                     snapshot_path=snapshot_path,

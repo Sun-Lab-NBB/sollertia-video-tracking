@@ -7,13 +7,13 @@ from dataclasses import dataclass
 
 import torch
 
-Toggle = Literal["auto", "on", "off"]
+type Toggle = Literal["auto", "on", "off"]
 """The tri-state control for one optimization: use the capability-detected default, force it on, or force it off."""
 
-AmpMode = Literal["auto", "off", "bf16", "fp16"]
+type AmpMode = Literal["auto", "off", "bf16", "fp16"]
 """The automatic-mixed-precision selection: capability-detected default, disabled, or a forced compute dtype."""
 
-MultiGpuStrategy = Literal["ddp", "dp", "single"]
+type MultiGpuStrategy = Literal["ddp", "dp", "single"]
 """The resolved multi-GPU execution strategy: DistributedDataParallel, DataParallel, or a single device."""
 
 _AMPERE_CAPABILITY: tuple[int, int] = (8, 0)
@@ -106,39 +106,6 @@ class OptimizationProfile:
         return f"{where} | {precision} | workers={self.dataloader_workers} pin={self.pin_memory}{suffix}"
 
 
-def _get_cuda_device_count() -> int:
-    """Returns the number of visible CUDA devices, or zero when CUDA is unavailable.
-
-    Returns:
-        The count of CUDA devices reported by the active PyTorch build.
-    """
-    return torch.cuda.device_count() if torch.cuda.is_available() else 0
-
-
-def _resolve_bfloat16_support(gpus: tuple[int, ...]) -> bool:
-    """Determines whether every listed CUDA device natively accelerates bfloat16 (Ampere or newer).
-
-    Args:
-        gpus: The CUDA device indices to check.
-
-    Returns:
-        True when all listed devices report at least Ampere compute capability, False otherwise.
-    """
-    return len(gpus) > 0 and all(torch.cuda.get_device_capability(device=index) >= _AMPERE_CAPABILITY for index in gpus)
-
-
-def _resolve_tf32_support(gpus: tuple[int, ...]) -> bool:
-    """Determines whether every listed CUDA device supports TF32 matmul and convolution acceleration (Ampere+).
-
-    Args:
-        gpus: The CUDA device indices to check.
-
-    Returns:
-        True when all listed devices report at least Ampere compute capability, False otherwise.
-    """
-    return len(gpus) > 0 and all(torch.cuda.get_device_capability(device=index) >= _AMPERE_CAPABILITY for index in gpus)
-
-
 def resolve_optimization_profile(
     *,
     device: str | None = None,
@@ -156,7 +123,7 @@ def resolve_optimization_profile(
 
     Every optimization is exposed as an explicit request so an operator who knows their silicon can override the
     automatic defaults. ``"auto"`` selects a capability-detected default suited to the chosen device. An explicit
-    request is honored where it applies to the chosen device: a forced AMP dtype the device cannot support (bfloat16 on
+    request is honored where it applies to the chosen device. A forced AMP dtype the device cannot support (bfloat16 on
     MPS, float16 off CUDA) is disabled with a warning, while the CUDA-only toggles (``tf32``, ``cudnn_benchmark``,
     ``pin_memory``) are forced off on non-CUDA devices.
 
@@ -312,7 +279,7 @@ def _resolve_target_device(device: str | None, gpus: tuple[int, ...] | None) -> 
             for index in gpus:
                 if index < 0 or index >= available:
                     message = (
-                        f"Unable to select GPUs using the requested indices. Expected each index below the visible "
+                        f"Unable to select GPUs using the requested indices. The GPU index must be below the visible "
                         f"device count {available}, but got {index}."
                     )
                     raise ValueError(message)
@@ -321,7 +288,7 @@ def _resolve_target_device(device: str | None, gpus: tuple[int, ...] | None) -> 
             index = int(request.split(":", 1)[1])
             if index < 0 or index >= available:
                 message = (
-                    f"Unable to select a GPU using device '{request}'. Expected an index below the visible device "
+                    f"Unable to select a GPU using device '{request}'. The GPU index must be below the visible device "
                     f"count {available}, but got {index}."
                 )
                 raise ValueError(message)
@@ -329,7 +296,7 @@ def _resolve_target_device(device: str | None, gpus: tuple[int, ...] | None) -> 
         return "cuda", tuple(range(available))
 
     message = (
-        f"Unable to resolve the training device. Expected 'auto', 'cpu', 'mps', 'cuda', or 'cuda:N', "
+        f"Unable to resolve the training device. The device must be 'auto', 'cpu', 'mps', 'cuda', or 'cuda:N', "
         f"but got '{request}'."
     )
     raise ValueError(message)
@@ -410,3 +377,36 @@ def _resolve_toggle(value: Toggle, *, auto: bool) -> bool:
     if value == "off":
         return False
     return auto
+
+
+def _get_cuda_device_count() -> int:
+    """Returns the number of visible CUDA devices, or zero when CUDA is unavailable.
+
+    Returns:
+        The count of CUDA devices reported by the active PyTorch build.
+    """
+    return torch.cuda.device_count() if torch.cuda.is_available() else 0
+
+
+def _resolve_bfloat16_support(gpus: tuple[int, ...]) -> bool:
+    """Determines whether every listed CUDA device natively accelerates bfloat16 (Ampere or newer).
+
+    Args:
+        gpus: The CUDA device indices to check.
+
+    Returns:
+        True when all listed devices report at least Ampere compute capability, False otherwise.
+    """
+    return len(gpus) > 0 and all(torch.cuda.get_device_capability(device=index) >= _AMPERE_CAPABILITY for index in gpus)
+
+
+def _resolve_tf32_support(gpus: tuple[int, ...]) -> bool:
+    """Determines whether every listed CUDA device supports TF32 matmul and convolution acceleration (Ampere+).
+
+    Args:
+        gpus: The CUDA device indices to check.
+
+    Returns:
+        True when all listed devices report at least Ampere compute capability, False otherwise.
+    """
+    return len(gpus) > 0 and all(torch.cuda.get_device_capability(device=index) >= _AMPERE_CAPABILITY for index in gpus)
