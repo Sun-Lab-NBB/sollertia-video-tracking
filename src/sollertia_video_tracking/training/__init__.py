@@ -10,7 +10,7 @@ from .dataset import (
     get_available_object_detectors,
     build_conditional_top_down_conditions,
 )
-from .pipeline import TrainingSummary, train_model
+from .pipeline import TrainingSummary, train_model, detect_fixed_input_size
 from .evaluation import SplitMetrics, EvaluationSummary, evaluate_trained_model
 from .optimization import (
     Toggle,
@@ -34,6 +34,7 @@ __all__ = [
     "build_conditional_top_down_conditions",
     "build_superanimal_weight_init",
     "create_training_dataset",
+    "detect_fixed_input_size",
     "evaluate_trained_model",
     "get_available_augmenters",
     "get_available_object_detectors",

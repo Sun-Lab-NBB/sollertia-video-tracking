@@ -50,18 +50,19 @@ class OptimizationProfile:
     amp_dtype: torch.dtype | None
     """The autocast compute dtype for mixed precision, or None to train in full float32 precision."""
     use_gradient_scaler: bool
-    """Whether a gradient scaler is required, which is the case only for float16 mixed precision."""
+    """Determines whether a gradient scaler is required, which is the case only for float16 mixed precision."""
     tf32: bool
-    """Whether TF32 acceleration is enabled for float32 matmuls and convolutions (CUDA only)."""
+    """Determines whether TF32 acceleration is enabled for float32 matmuls and convolutions (CUDA only)."""
     cudnn_benchmark: bool
-    """Whether the cuDNN convolution autotuner is enabled, which trades reproducibility for speed on fixed input
-    sizes (CUDA only)."""
+    """Determines whether the cuDNN convolution autotuner is enabled, which trades reproducibility for speed on
+    fixed input sizes (CUDA only)."""
     torch_compile: bool
-    """Whether the model is wrapped with ``torch.compile`` before training."""
+    """Determines whether the model is wrapped with ``torch.compile`` before training."""
     dataloader_workers: int
     """The number of worker processes each training process uses to load and augment data."""
     pin_memory: bool
-    """Whether dataloaders pin host memory to speed up host-to-device transfers (meaningful for CUDA only)."""
+    """Determines whether dataloaders pin host memory to speed up host-to-device transfers (meaningful for CUDA
+    only)."""
     cpu_threads: int | None
     """The intra-op thread count to restore for CPU training, or None to leave the process default untouched."""
 
@@ -134,12 +135,15 @@ def resolve_optimization_profile(
         multi_gpu: The requested multi-GPU strategy, downgraded to a single device when fewer than two GPUs are used.
         amp: The requested mixed-precision mode.
         tf32: The requested TF32 setting (CUDA only; a no-op on other devices).
-        cudnn_benchmark: The requested cuDNN autotuner setting; only safe when input spatial sizes are fixed.
+        cudnn_benchmark: The requested cuDNN autotuner setting; its ``"auto"`` default follows ``fixed_input_size``,
+            since the autotuner only pays off, and only stays deterministic-safe, when the input spatial size is fixed.
         torch_compile: The requested ``torch.compile`` setting; disabled by default because of its warm-up cost.
         dataloader_workers: The number of dataloader workers per process, or -1 to choose automatically.
         pin_memory: The requested host-memory pinning setting (meaningful for CUDA only).
-        fixed_input_size: Whether the training transform produces a single fixed input resolution, which is required
-            for the cuDNN autotuner to be beneficial rather than harmful.
+        fixed_input_size: Determines whether the training transform produces one fixed input resolution, normally
+            supplied by ``detect_fixed_input_size`` rather than the operator. The cuDNN autotuner's ``"auto"`` default
+            enables it only when this holds, since a varying input size makes the autotuner harmful and
+            non-deterministic.
 
     Returns:
         The resolved ``OptimizationProfile`` describing exactly what to apply to the run.
@@ -161,11 +165,12 @@ def resolve_optimization_profile(
     on_cuda = base_device == "cuda"
     resolved_tf32 = _resolve_toggle(value=tf32, auto=_resolve_tf32_support(resolved_gpus)) if on_cuda else False
 
-    resolved_benchmark = _resolve_toggle(value=cudnn_benchmark, auto=False) if on_cuda else False
+    resolved_benchmark = _resolve_toggle(value=cudnn_benchmark, auto=fixed_input_size) if on_cuda else False
     if resolved_benchmark and not fixed_input_size:
         _warn(
-            "cuDNN benchmark is enabled without a fixed input size. DeepLabCut's dynamic-resize augmentation can "
-            "make this slower, and it disables deterministic training."
+            "cuDNN benchmark was forced on, but the shuffle's training transform was not detected to use a single "
+            "fixed input size. DeepLabCut's dynamic-resize augmentation can make this slower, and it disables "
+            "deterministic training."
         )
 
     resolved_pin_memory = _resolve_toggle(value=pin_memory, auto=on_cuda) if on_cuda else False

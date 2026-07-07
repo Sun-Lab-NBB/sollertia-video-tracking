@@ -4,8 +4,9 @@ DeepLabCut builds and configures its inference runners through ``get_pose_infere
 ``get_detector_inference_runner`` (preprocessors, postprocessors, the optional detector, and snapshot loading), then
 drives them from ``analyze_videos`` (which also handles snapshot selection, output naming, and multi-animal assembly).
 Rather than reimplement any of that, this module patches those two builder functions for the duration of an
-``analyze_videos`` call so every runner DeepLabCut builds is enhanced in place: its forward pass is swapped onto our own
-autocast context and, optionally, the channels-last memory format and ``torch.compile``. Two DeepLabCut behaviors make
+``analyze_videos`` call so every runner DeepLabCut builds is enhanced in place. Its forward pass is swapped onto our
+own autocast context and, optionally, the channels-last memory format and ``torch.compile``. Conditional-top-down
+runners are the exception, left at stock precision. Two DeepLabCut behaviors make
 this worthwhile: its built-in autocast is float16-only (our models train in bfloat16), and it calls
 ``torch.autocast(device_type=str(self.device))`` with a device string like ``"cuda:0"``, which is not a valid autocast
 device type. We disable the stock autocast and apply our own with the correct device type and dtype.
@@ -66,7 +67,7 @@ def patch_dlc_runner_builders(profile: InferenceProfile) -> Iterator[None]:
                 runner = builder(*args, **kwargs)
             finally:
                 building["active"] = False
-            return _optimize_inference_runner(runner, profile)
+            return _optimize_inference_runner(runner=runner, profile=profile)
 
         return build_and_optimize
 
@@ -109,9 +110,10 @@ def _optimize_inference_runner(runner: InferenceRunner, profile: InferenceProfil
     if profile.channels_last:
         runner.model = runner.model.to(memory_format=torch.channels_last)
     if profile.torch_compile:
+        # torch.compile can raise a range of backend errors; fall back to eager execution when it does.
         try:
             runner.model = torch.compile(runner.model)
-        except Exception as error:  # noqa: BLE001 - torch.compile can raise a range of backend errors; fall back to eager.
+        except Exception as error:  # noqa: BLE001
             warnings.warn(f"torch.compile failed; falling back to eager execution. Error: {error}", stacklevel=2)
 
     device_type = "cuda" if str(runner.device).startswith("cuda") else str(runner.device)
@@ -133,9 +135,11 @@ def _optimize_inference_runner(runner: InferenceRunner, profile: InferenceProfil
         return moved
 
     if isinstance(runner, DetectorInferenceRunner):
-        runner.predict = _build_detector_predict(runner, autocast_context, move_inputs)
+        runner.predict = _build_detector_predict(
+            runner=runner, autocast_context=autocast_context, move_inputs=move_inputs
+        )
     else:
-        runner.predict = _build_pose_predict(runner, autocast_context, move_inputs)
+        runner.predict = _build_pose_predict(runner=runner, autocast_context=autocast_context, move_inputs=move_inputs)
     return runner
 
 

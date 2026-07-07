@@ -4,7 +4,14 @@ from pathlib import Path
 
 import click
 
-from ..inference import Toggle, AmpMode, run_inference, resolve_project_videos, resolve_inference_profile
+from ..inference import (
+    Toggle,
+    AmpMode,
+    run_inference,
+    resolve_project_videos,
+    detect_fixed_input_size,
+    resolve_inference_profile,
+)
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the lab standard."""
@@ -150,8 +157,9 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     type=click.Choice(["auto", "on", "off"]),
     default="auto",
     show_default=True,
-    help="The convolution autotuner (CUDA only). Best with --fixed-input-size, since videos of differing resolutions "
-    "re-tune it.",
+    help="The convolution autotuner (CUDA only). 'auto' enables it when the run is detected to use a single fixed "
+    "input size (a shared project crop, or one shared video resolution), where it pays off rather than re-tuning per "
+    "size.",
 )
 @click.option(
     "-cl",
@@ -176,13 +184,6 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     default="auto",
     show_default=True,
     help="Whether to use a non-blocking host-to-device transfer (CUDA only). 'auto' enables it on CUDA.",
-)
-@click.option(
-    "-fis",
-    "--fixed-input-size",
-    is_flag=True,
-    help="Declares that every video is analyzed at a single fixed resolution, which makes the convolution autotuner "
-    "safe.",
 )
 @click.option(
     "-p",
@@ -217,7 +218,6 @@ def infer_command(
     to_polars: bool,
     save_csv: bool,
     keep_dlc_outputs: bool,
-    fixed_input_size: bool,
     progress: bool,
 ) -> None:
     """Analyzes videos with a trained DeepLabCut model, distributing whole videos across GPU or CPU worker slots.
@@ -256,6 +256,10 @@ def infer_command(
         raise click.UsageError(message=message)
     if project_videos:
         click.echo(message=f"analyzing {len(unique_videos)} videos from the project configuration")
+
+    # Detect whether the run feeds the network one fixed input size so the cuDNN autotuner's 'auto' default can enable
+    # itself only when it pays off, replacing the operator-declared flag this used to require.
+    fixed_input_size = detect_fixed_input_size(config, unique_videos)
 
     try:
         profile = resolve_inference_profile(

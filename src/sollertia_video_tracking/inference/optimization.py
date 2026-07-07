@@ -8,10 +8,10 @@ from dataclasses import dataclass
 import torch
 import psutil
 
-Toggle = Literal["auto", "on", "off"]
+type Toggle = Literal["auto", "on", "off"]
 """The tri-state control for one optimization: use the capability-detected default, force it on, or force it off."""
 
-AmpMode = Literal["auto", "off", "bf16", "fp16"]
+type AmpMode = Literal["auto", "off", "bf16", "fp16"]
 """The automatic-mixed-precision selection: capability-detected default, disabled, or a forced compute dtype."""
 
 _AMPERE_CAPABILITY: tuple[int, int] = (8, 0)
@@ -63,17 +63,18 @@ class InferenceProfile:
     amp_dtype: torch.dtype | None
     """The autocast compute dtype for mixed precision, or None to run in full float32 precision."""
     tf32: bool
-    """Whether TF32 acceleration is enabled for float32 matmuls and convolutions (CUDA only)."""
+    """Determines whether TF32 acceleration is enabled for float32 matmuls and convolutions (CUDA only)."""
     cudnn_benchmark: bool
-    """Whether the cuDNN convolution autotuner is enabled, which trades a warm-up for speed on fixed input sizes
-    (CUDA only)."""
+    """Determines whether the cuDNN convolution autotuner is enabled, which trades a warm-up for speed on fixed
+    input sizes (CUDA only)."""
     channels_last: bool
-    """Whether the model and its inputs use the channels-last memory format, which accelerates convolutions on
-    tensor-core GPUs and oneDNN CPU backends."""
+    """Determines whether the model and its inputs use the channels-last memory format, which accelerates
+    convolutions on tensor-core GPUs and oneDNN CPU backends."""
     torch_compile: bool
-    """Whether the model is wrapped with ``torch.compile`` before inference."""
+    """Determines whether the model is wrapped with ``torch.compile`` before inference."""
     pin_memory: bool
-    """Whether host frames are staged in pinned memory for non-blocking host-to-device transfer (CUDA only)."""
+    """Determines whether host frames are staged in pinned memory for non-blocking host-to-device transfer
+    (CUDA only)."""
 
     @property
     def use_amp(self) -> bool:
@@ -87,7 +88,7 @@ class InferenceProfile:
 
     @property
     def amp_device_type(self) -> str:
-        """Returns the device type string passed to ``torch.autocast`` for this run."""
+        """Returns the device type string to pass to ``torch.autocast`` for this run."""
         return "cuda" if self.device == "cuda" else self.device
 
     @property
@@ -127,39 +128,6 @@ class InferenceProfile:
         return f"{where} | {precision} | workers={self.total_workers}{suffix}"
 
 
-def _get_cuda_device_count() -> int:
-    """Returns the number of visible CUDA devices, or zero when CUDA is unavailable.
-
-    Returns:
-        The count of CUDA devices reported by the active PyTorch build.
-    """
-    return torch.cuda.device_count() if torch.cuda.is_available() else 0
-
-
-def _resolve_bfloat16_support(gpus: tuple[int, ...]) -> bool:
-    """Determines whether every listed CUDA device natively accelerates bfloat16 (Ampere or newer).
-
-    Args:
-        gpus: The CUDA device indices to check.
-
-    Returns:
-        True when all listed devices report at least Ampere compute capability, False otherwise.
-    """
-    return len(gpus) > 0 and all(torch.cuda.get_device_capability(device=index) >= _AMPERE_CAPABILITY for index in gpus)
-
-
-def _resolve_tf32_support(gpus: tuple[int, ...]) -> bool:
-    """Determines whether every listed CUDA device supports TF32 matmul and convolution acceleration (Ampere+).
-
-    Args:
-        gpus: The CUDA device indices to check.
-
-    Returns:
-        True when all listed devices report at least Ampere compute capability, False otherwise.
-    """
-    return len(gpus) > 0 and all(torch.cuda.get_device_capability(device=index) >= _AMPERE_CAPABILITY for index in gpus)
-
-
 def resolve_inference_profile(
     *,
     device: str | None = None,
@@ -179,9 +147,10 @@ def resolve_inference_profile(
 
     Every optimization is exposed as an explicit request so an operator who knows their silicon can override the
     automatic defaults. ``"auto"`` selects a capability-detected default suited to the chosen device. An explicit
-    ``"on"``/``"off"`` (or a forced AMP dtype) is always honored, with a warning when it contradicts the detected
-    hardware rather than a silent refusal. The device selection cascades ``cuda`` -> ``cpu`` when no CUDA device is
-    visible so the same call works unchanged on a GPU server or a CPU-only server.
+    ``"on"``/``"off"`` toggle is always honored; a forced AMP dtype is honored wherever the device can run it and is
+    otherwise disabled with a warning rather than a silent refusal (bfloat16 on MPS and float16 on any non-CUDA device
+    fall back to float32). The device selection cascades ``cuda`` -> ``cpu`` when no CUDA device is visible so the same
+    call works unchanged on a GPU server or a CPU-only server.
 
     Args:
         device: The requested device (``"auto"``, ``"cpu"``, ``"mps"``, ``"cuda"``, or ``"cuda:N"``), or None to
@@ -189,7 +158,8 @@ def resolve_inference_profile(
         gpus: The explicitly requested CUDA device indices, or None to use every visible device.
         amp: The requested mixed-precision mode; ``"auto"`` enables bfloat16 only where it is natively fast.
         tf32: The requested TF32 setting (CUDA only; a no-op on other devices).
-        cudnn_benchmark: The requested cuDNN autotuner setting; only safe when input spatial sizes are fixed.
+        cudnn_benchmark: The requested cuDNN autotuner setting; its ``"auto"`` default follows ``fixed_input_size``,
+            since the autotuner only pays off when the input spatial size is fixed.
         channels_last: The requested channels-last memory-format setting.
         torch_compile: The requested ``torch.compile`` setting; disabled by default because of its warm-up cost, which
             may not amortize over short videos.
@@ -197,8 +167,10 @@ def resolve_inference_profile(
         cpu_workers: The number of CPU worker processes, or -1 to choose automatically from the physical core count.
         cpu_threads_per_worker: The intra-op thread count per CPU worker, or -1 to choose automatically.
         pin_memory: The requested host-memory pinning setting (meaningful for CUDA only).
-        fixed_input_size: Whether the inference transform produces a single fixed input resolution, which is required
-            for the cuDNN autotuner to be beneficial rather than harmful.
+        fixed_input_size: Determines whether every video feeds the network one fixed input resolution, normally
+            supplied by ``detect_fixed_input_size`` rather than the operator. The cuDNN autotuner's ``"auto"`` default
+            enables it only when this holds, since a varying input size makes the autotuner harmful rather than
+            beneficial.
 
     Returns:
         The resolved ``InferenceProfile`` describing exactly what to apply to the run.
@@ -210,11 +182,11 @@ def resolve_inference_profile(
 
     resolved_tf32 = _resolve_toggle(value=tf32, auto=_resolve_tf32_support(resolved_gpus)) if on_cuda else False
 
-    resolved_benchmark = _resolve_toggle(value=cudnn_benchmark, auto=False) if on_cuda else False
+    resolved_benchmark = _resolve_toggle(value=cudnn_benchmark, auto=fixed_input_size) if on_cuda else False
     if resolved_benchmark and not fixed_input_size:
         _warn(
-            "cuDNN benchmark is enabled without a fixed input size. Videos of differing resolutions re-tune the "
-            "autotuner per size, which can be slower than leaving it off."
+            "cuDNN benchmark was forced on, but the run was not detected to use a single fixed input size. Videos of "
+            "differing resolutions re-tune the autotuner per size, which can be slower than leaving it off."
         )
 
     # channels-last helps convolutions on tensor-core GPUs (and oneDNN on CPU) but is only turned on automatically on
@@ -268,6 +240,39 @@ def apply_runtime_optimizations(profile: InferenceProfile) -> None:
         torch.set_num_threads(profile.cpu_threads_per_worker)
 
 
+def _get_cuda_device_count() -> int:
+    """Returns the number of visible CUDA devices, or zero when CUDA is unavailable.
+
+    Returns:
+        The count of CUDA devices reported by the active PyTorch build.
+    """
+    return torch.cuda.device_count() if torch.cuda.is_available() else 0
+
+
+def _resolve_bfloat16_support(gpus: tuple[int, ...]) -> bool:
+    """Determines whether every listed CUDA device natively accelerates bfloat16 (Ampere or newer).
+
+    Args:
+        gpus: The CUDA device indices to check.
+
+    Returns:
+        True when all listed devices report at least Ampere compute capability, False otherwise.
+    """
+    return bool(gpus) and all(torch.cuda.get_device_capability(device=index) >= _AMPERE_CAPABILITY for index in gpus)
+
+
+def _resolve_tf32_support(gpus: tuple[int, ...]) -> bool:
+    """Determines whether every listed CUDA device supports TF32 matmul and convolution acceleration (Ampere+).
+
+    Args:
+        gpus: The CUDA device indices to check.
+
+    Returns:
+        True when all listed devices report at least Ampere compute capability, False otherwise.
+    """
+    return bool(gpus) and all(torch.cuda.get_device_capability(device=index) >= _AMPERE_CAPABILITY for index in gpus)
+
+
 def _warn(message: str) -> None:
     """Writes a non-fatal warning to the standard error stream.
 
@@ -290,7 +295,8 @@ def _resolve_target_device(device: str | None, gpus: tuple[int, ...] | None) -> 
         A tuple of the resolved base device type and the tuple of CUDA indices to use.
 
     Raises:
-        ValueError: When an explicitly requested CUDA index is not present on the machine.
+        ValueError: When an explicitly requested CUDA index is not present on the machine, or when the requested
+            device is not one of ``"auto"``, ``"cpu"``, ``"mps"``, ``"cuda"``, or ``"cuda:N"``.
     """
     request = (device or "auto").lower()
     available = _get_cuda_device_count()

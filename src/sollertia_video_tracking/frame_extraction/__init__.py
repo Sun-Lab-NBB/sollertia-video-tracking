@@ -1,6 +1,7 @@
 """Provides the parallel DeepLabCut k-means and model-outlier frame-extraction pipelines."""
 
-from .cpu_allocation import DEFAULT_RESERVED_CORE_COUNT
+from .progress import AggregateBar, make_progress_reporter
+from .cpu_allocation import DEFAULT_RESERVED_CORE_COUNT, plan_core_allocation
 from .video_grouping import group_videos
 from .outlier_pipeline import (
     TrackingMethod,
@@ -13,6 +14,7 @@ from .extraction_pipeline import FrameExtractionSummary, extract_frames_kmeans
 
 __all__ = [
     "DEFAULT_RESERVED_CORE_COUNT",
+    "AggregateBar",
     "ExtractionAlgorithm",
     "FrameExtractionSummary",
     "OutlierAlgorithm",
@@ -21,4 +23,6 @@ __all__ = [
     "extract_frames_kmeans",
     "extract_outlier_frames_parallel",
     "group_videos",
+    "make_progress_reporter",
+    "plan_core_allocation",
 ]

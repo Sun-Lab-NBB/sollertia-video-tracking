@@ -5,7 +5,7 @@ from pathlib import Path
 
 import click
 
-from ..training import Toggle, AmpMode, train_model, resolve_optimization_profile
+from ..training import Toggle, AmpMode, train_model, detect_fixed_input_size, resolve_optimization_profile
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the lab standard."""
@@ -144,8 +144,9 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     type=click.Choice(["auto", "on", "off"]),
     default="auto",
     show_default=True,
-    help="The cuDNN convolution autotuner. Only enable it with --fixed-input-size, since it disables deterministic "
-    "training and can slow variable-size augmentation.",
+    help="The cuDNN convolution autotuner. 'auto' enables it when the shuffle's training transform is detected to use "
+    "a single fixed input size, where it speeds up convolutions; it disables deterministic training and can slow "
+    "variable-size augmentation, so it stays off otherwise.",
 )
 @click.option(
     "-cm",
@@ -170,13 +171,6 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     default="auto",
     show_default=True,
     help="Whether dataloaders pin host memory for faster transfers (CUDA only). 'auto' enables it on CUDA.",
-)
-@click.option(
-    "-fis",
-    "--fixed-input-size",
-    is_flag=True,
-    help="Declares that every training image is resized to one fixed resolution, which makes the cuDNN autotuner "
-    "safe to enable.",
 )
 @click.option(
     "-ev",
@@ -238,7 +232,6 @@ def train_command(
     *,
     load_head_weights: bool,
     evaluate: bool,
-    fixed_input_size: bool,
     progress: bool,
 ) -> None:
     """Trains a DeepLabCut shuffle with hardware optimizations and a clean progress monitor.
@@ -257,6 +250,12 @@ def train_command(
             f"Unable to parse the --gpus value. Expected comma-separated GPU indices such as '0,1', but got '{gpus}'."
         )
         raise click.ClickException(message=message) from error
+
+    # Detect whether the shuffle's training transform feeds the network one fixed input size so the cuDNN autotuner's
+    # 'auto' default can enable itself only when it pays off, replacing the operator-declared flag this used to require.
+    fixed_input_size = detect_fixed_input_size(
+        config, shuffle=shuffle, training_set_index=training_set_index, model_prefix=model_prefix
+    )
 
     try:
         profile = resolve_optimization_profile(

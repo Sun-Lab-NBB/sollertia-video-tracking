@@ -99,13 +99,14 @@ class _TrainingLaunch:
     detector_path: str | Path | None
     """The detector snapshot to resume from, or None to start from scratch."""
     load_head_weights: bool
-    """Whether to load head weights when resuming a pose model from a snapshot."""
+    """Determines whether to load head weights when resuming a pose model from a snapshot."""
     maximum_snapshots_to_keep: int | None
     """The maximum number of snapshots to retain, or None to use the configured value."""
     progress_queue: Any
     """The shared monitor queue workers report progress to, or None when progress reporting is disabled."""
     preserve_console: bool
-    """Whether the parent holds a preserved stderr duplicate, letting the single-process worker redirect its console."""
+    """Determines whether the parent holds a preserved stderr duplicate, letting the single-process worker redirect
+    its console."""
     port: int
     """The free TCP port reserved for the DistributedDataParallel rendezvous."""
     world_size: int
@@ -159,13 +160,14 @@ def train_model(
         detector_epochs: The maximum number of detector epochs (top-down only); zero skips detector training.
         detector_save_epochs: The epochs between detector snapshots (top-down only), or None for the configured value.
         maximum_snapshots_to_keep: The maximum number of snapshots to retain, or None to use the configured value.
-        load_head_weights: Whether to load head weights when resuming a pose model from a snapshot.
-        evaluate: Whether to score the trained snapshot against the labeled frames as a final step and write the
-            evaluation feather and provenance sidecar.
+        load_head_weights: Determines whether to load head weights when resuming a pose model from a snapshot.
+        evaluate: Determines whether to score the trained snapshot against the labeled frames as a final step and
+            write the evaluation feather and provenance sidecar.
         evaluation_batch_size: The number of frames scored per forward pass during the post-training evaluation.
         evaluation_confidence_cutoff: The confidence cutoff for the evaluation's cutoff-filtered metrics, or None to
             fall back to the project configuration's ``pcutoff`` (0.6 when unset).
-        display_progress: Whether to render the live progress monitor and route DeepLabCut's logs off the console.
+        display_progress: Determines whether to render the live progress monitor and route DeepLabCut's logs off the
+            console.
 
     Returns:
         A summary of what was trained and the hardware configuration used.
@@ -296,6 +298,95 @@ def train_model(
     )
 
 
+def detect_fixed_input_size(
+    config: str | Path,
+    *,
+    shuffle: int = 1,
+    training_set_index: int = 0,
+    model_prefix: str = "",
+) -> bool:
+    """Determines whether a shuffle's training transform feeds the network a single fixed input resolution.
+
+    The cuDNN autotuner only pays off, and only preserves deterministic training safely, when the convolution input
+    shapes stay constant across steps, so this reports whether that precondition holds instead of asking the operator
+    to assert it. A run is fixed-size when its pose data pipeline crops or resizes every image to one resolution and no
+    variable-size detector is trained alongside it. Any inability to read the shuffle's configuration is treated
+    conservatively as not fixed, since a wrong assertion of fixed size makes the autotuner harmful.
+
+    Args:
+        config: The path of the DeepLabCut project configuration file.
+        shuffle: The shuffle index that will be trained.
+        training_set_index: The training-set fraction index the shuffle was created with.
+        model_prefix: The model subdirectory prefix.
+
+    Returns:
+        True when the training transform's spatial input size is constant across the whole run, False otherwise.
+    """
+    try:
+        loader = DLCLoader(
+            config=Path(config),
+            shuffle=shuffle,
+            trainset_index=training_set_index,
+            modelprefix=model_prefix,
+        )
+        model_cfg = loader.model_cfg
+        detector = model_cfg.get("detector")
+        trains_detector = (
+            loader.pose_task == Task.TOP_DOWN and detector is not None and detector["train_settings"]["epochs"] > 0
+        )
+        # A trained object detector consumes variable-size full frames, so the whole run's shared cuDNN autotuner
+        # setting must stay off unless the detector's own transform is fixed-size too.
+        if trains_detector and not _augmentation_is_fixed_size(detector.get("data", {}).get("train", {})):
+            return False
+        return _augmentation_is_fixed_size(model_cfg["data"]["train"])
+    except Exception:  # noqa: BLE001 - detection is best-effort; any failure conservatively reports not-fixed.
+        return False
+
+
+def _augmentation_is_fixed_size(train_augmentation: dict[str, Any]) -> bool:
+    """Returns whether a DeepLabCut training augmentation pipeline emits one constant spatial size.
+
+    Fixed-size training comes from either sampling every image to a set crop (``crop_sampling``) or resizing every
+    image to a set resolution (``resize`` without aspect-ratio preservation). A pipeline that does neither leaves the
+    per-image size free to vary, which the padding step then rounds to differing sizes.
+
+    Args:
+        train_augmentation: The ``data.train`` augmentation block from the resolved model configuration.
+
+    Returns:
+        True when the augmentation forces a single spatial size, False otherwise.
+    """
+    crop = train_augmentation.get("crop_sampling")
+    if isinstance(crop, dict) and _has_fixed_dimensions(crop):
+        return True
+    resize = train_augmentation.get("resize")
+    return isinstance(resize, dict) and _has_fixed_dimensions(resize) and not resize.get("keep_ratio", False)
+
+
+def _has_fixed_dimensions(block: dict[str, Any]) -> bool:
+    """Returns whether an augmentation block sets a positive integer width and height.
+
+    Args:
+        block: The ``crop_sampling`` or ``resize`` augmentation block from the resolved model configuration.
+
+    Returns:
+        True when both the width and height are positive integers, False otherwise.
+    """
+    return _is_positive_dimension(block.get("width")) and _is_positive_dimension(block.get("height"))
+
+
+def _is_positive_dimension(value: Any) -> bool:
+    """Returns whether a configuration value is a positive integer image dimension.
+
+    Args:
+        value: The candidate width or height value from the augmentation configuration.
+
+    Returns:
+        True when the value is an integer greater than zero, False otherwise (booleans are rejected).
+    """
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
 def _evaluate_after_training(
     config: Path,
     profile: OptimizationProfile,
@@ -358,7 +449,7 @@ def _route_logging_to_file(model_folder: Path, *, quiet_console: bool) -> None:
 
     Args:
         model_folder: The folder in which the ``train.txt`` log is written.
-        quiet_console: Whether to detach the console handler so the progress monitor owns the terminal.
+        quiet_console: Determines whether to detach the console handler so the progress monitor owns the terminal.
     """
     setup_file_logging(model_folder / "train.txt")
     if not quiet_console:
@@ -398,7 +489,7 @@ def _redirect_worker_console(log_path: Path, *, active: bool) -> Iterator[None]:
 
     Args:
         log_path: The training-log file the diverted output is appended to.
-        active: Whether to redirect; when False the context does nothing, leaving raw output on the console.
+        active: Determines whether to redirect; when False the context does nothing, leaving raw output on the console.
 
     Yields:
         None, for the duration of the redirection.
@@ -525,7 +616,7 @@ def _build_dataloaders(
         loader: The loader that creates the datasets.
         run_config: The run configuration providing the batch size, worker count, and collate function.
         task: The task the datasets are built for.
-        ddp: Whether the training dataloader must shard data across processes with a DistributedSampler.
+        ddp: Determines whether the training dataloader must shard data across processes with a DistributedSampler.
         rank: The global rank of this process, used by the DistributedSampler.
         world_size: The number of processes, used by the DistributedSampler.
 
@@ -598,7 +689,7 @@ def _train_single_model(
         rank: The global rank of this process.
         world_size: The number of training processes.
         snapshot_path: The snapshot to resume this model from, if any.
-        load_head_weights: Whether to load head weights when resuming a pose model.
+        load_head_weights: Determines whether to load head weights when resuming a pose model.
         maximum_snapshots_to_keep: The maximum number of snapshots to retain, or None to use the configured value.
         progress_queue: The shared monitor queue, or None when progress reporting is disabled.
     """

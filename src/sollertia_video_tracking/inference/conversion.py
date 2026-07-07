@@ -2,14 +2,16 @@
 
 DeepLabCut writes predictions as a pandas HDF5 file whose columns are a ``scorer / [individuals] / bodyparts / coords``
 MultiIndex and whose row index is the frame number. The rest of the Sollertia stack runs on numpy 2 / Python 3.14 and
-consumes uncompressed Apache Arrow "feather" files written by polars, so this module renders that prediction table into
+consumes uncompressed Apache Arrow "feather" files written by polars. This module renders that prediction table into
 a wide, snake-cased feather: one row per frame (``frame``) and, per keypoint, ``[<individual>_]<bodypart>_x``, ``_y``,
 and ``_likelihood`` columns. It is a direct, project-agnostic transcription of DeepLabCut's own output ("DeepLabCut, but
 in polars"); domain-specific derived quantities are left to downstream consumers. A YAML provenance sidecar records the
 source file and the conversion parameters.
 """
 
-from typing import Any
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -17,6 +19,9 @@ import numpy as np
 import pandas as pd
 import polars as pl
 from ruamel.yaml import YAML
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
 
 _COORDINATES: tuple[str, ...] = ("x", "y", "likelihood")
 """The per-keypoint coordinate channels DeepLabCut stores, rendered as column suffixes in this fixed order."""
@@ -71,7 +76,7 @@ def convert_predictions_to_feather(
         feather_path: The path of the feather file to write.
         likelihood_threshold: The likelihood below which a keypoint's ``x`` and ``y`` are masked to NaN; 0.0 keeps
             every prediction.
-        write_provenance: Whether to write a ``<feather-stem>_provenance.yaml`` sidecar next to the feather.
+        write_provenance: Determines whether to write a ``<feather-stem>_provenance.yaml`` sidecar next to the feather.
 
     Returns:
         A summary describing the converted file.
@@ -149,7 +154,7 @@ def _flatten_predictions(
     predictions: pd.DataFrame,
     *,
     likelihood_threshold: float,
-) -> tuple[tuple[str, ...], dict[str, np.ndarray]]:
+) -> tuple[tuple[str, ...], dict[str, NDArray[np.float32]]]:
     """Flattens the prediction MultiIndex columns into snake-cased per-keypoint float columns.
 
     The leading ``scorer`` column level is dropped and the remaining levels above the coordinate are joined with
@@ -164,7 +169,7 @@ def _flatten_predictions(
     Returns:
         A tuple of the ordered keypoint prefixes and a mapping of flat column name to float32 values.
     """
-    groups: dict[str, dict[str, np.ndarray]] = {}
+    groups: dict[str, dict[str, NDArray[np.float32]]] = {}
     keypoint_order: list[str] = []
     for column in predictions.columns:
         # Iterating a MultiIndex yields per-column tuples, but pandas-stubs types the elements as str; the unpack is
@@ -176,7 +181,7 @@ def _flatten_predictions(
             keypoint_order.append(keypoint)
         groups[keypoint][coordinate] = predictions[column].to_numpy(dtype=np.float32)
 
-    columns: dict[str, np.ndarray] = {}
+    columns: dict[str, NDArray[np.float32]] = {}
     for keypoint in keypoint_order:
         channels = groups[keypoint]
         likelihood = channels.get("likelihood")
@@ -212,7 +217,7 @@ def _write_provenance(
         keypoints: The flattened per-keypoint prefixes.
         likelihood_threshold: The likelihood threshold applied during conversion.
     """
-    record: dict[str, Any] = {
+    record: dict[str, str | int | float | list[str]] = {
         "source_h5": str(h5_path),
         "feather": str(feather_path.name),
         "frame_count": int(frame_count),
@@ -223,4 +228,4 @@ def _write_provenance(
     yaml = YAML()
     yaml.default_flow_style = False
     with provenance_path.open("w", encoding="utf-8") as stream:
-        yaml.dump(record, stream)
+        yaml.dump(data=record, stream=stream)
