@@ -50,11 +50,13 @@ from .inference import (  # noqa: E402 - after thread-limit setup
     convert_predictions_to_feather,
 )
 from .frame_extraction import (  # noqa: E402 - after thread-limit setup
+    PurgeSummary,
     TrackingMethod,
     OutlierAlgorithm,
     ExtractionAlgorithm,
     FrameExtractionSummary,
     OutlierExtractionSummary,
+    purge_labeled_data,
     extract_frames_kmeans,
     extract_outlier_frames_parallel,
 )
@@ -68,6 +70,7 @@ __all__ = [
     "OptimizationProfile",
     "OutlierAlgorithm",
     "OutlierExtractionSummary",
+    "PurgeSummary",
     "TrackingMethod",
     "TrainingDatasetSummary",
     "TrainingSummary",
@@ -81,6 +84,7 @@ __all__ = [
     "get_available_object_detectors",
     "get_available_pose_models",
     "get_available_super_animals",
+    "purge_labeled_data",
     "resolve_inference_profile",
     "resolve_optimization_profile",
     "run_inference",

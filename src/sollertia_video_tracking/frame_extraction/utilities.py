@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import sys
-from typing import TYPE_CHECKING, Any
+import shutil
+from typing import TYPE_CHECKING, Any, cast
 from pathlib import Path
+from dataclasses import dataclass
 import multiprocessing
 
+import pandas as pd
 from ruamel.yaml import YAML
 
 from .progress import AggregateBar
@@ -168,6 +171,73 @@ def extracted_frame_paths(directory: Path) -> list[Path]:
     return sorted(frame for frame in directory.glob("img*.png") if not frame.stem.endswith("labeled"))
 
 
+def frame_names_from_index(frame_index: Any) -> set[str]:
+    """Extracts the ``imgNNNN.png`` file names from a labeled-data table's row index.
+
+    DeepLabCut indexes its label tables by a ``("labeled-data", video, image)`` row MultiIndex, though older tables may
+    store a flat path string; the trailing image name is taken from either form.
+
+    Args:
+        frame_index: The pandas row index of a CollectedData or machine-label table.
+
+    Returns:
+        The set of frame image file names the index references.
+    """
+    names: set[str] = set()
+    for entry in frame_index:
+        names.add(str(entry[-1]) if isinstance(entry, tuple) else Path(str(entry)).name)
+    return names
+
+
+def finite_labeled_frame_names(collected_data_path: Path) -> set[str]:
+    """Returns the frames a video's human labels annotate with at least one finite coordinate.
+
+    The DeepLabCut labeling GUI reindexes ``CollectedData`` to every image in the folder on each save, writing all-NaN
+    rows for frames that were opened but never annotated. Those placeholder rows are not real labels, so a frame counts
+    as human-labeled here only when it carries a finite coordinate, letting callers treat the all-NaN placeholders as
+    still-unlabeled.
+
+    Args:
+        collected_data_path: The ``CollectedData_<scorer>.h5`` file holding one video's human labels.
+
+    Returns:
+        The set of ``imgNNNN.png`` frame names with at least one finite coordinate, or an empty set when the file does
+        not exist.
+
+    Raises:
+        Exception: Propagates any error reading the label table, so callers can fail safe rather than under-protect.
+    """
+    if not collected_data_path.is_file():
+        return set()
+    labels = cast("pd.DataFrame", pd.read_hdf(collected_data_path, "df_with_missing"))
+    annotated_labels = labels[labels.notna().any(axis=1)]
+    return frame_names_from_index(annotated_labels.index)
+
+
+def machine_label_frame_names(directory: Path) -> set[str]:
+    """Returns every frame a video folder's machine-label or refinement tables reference.
+
+    Outlier extraction records its machine pre-labels in ``machinelabels-iter<N>.h5`` (one table per refinement
+    iteration) and the labeling GUI writes human refinements of them to ``MachineLabelsRefine.h5``. Both name frames
+    that belong to the outlier-refinement workflow rather than the k-means bootstrap set, so callers protect them when
+    clearing bootstrap frames.
+
+    Args:
+        directory: The ``labeled-data/<stem>`` directory whose machine-label tables are scanned.
+
+    Returns:
+        The set of ``imgNNNN.png`` frame names referenced by any machine-label or refinement table in the directory.
+
+    Raises:
+        Exception: Propagates any error reading a table, so callers can fail safe rather than under-protect.
+    """
+    names: set[str] = set()
+    table_paths = [*sorted(directory.glob("machinelabels-iter*.h5")), *sorted(directory.glob("MachineLabelsRefine.h5"))]
+    for table_path in table_paths:
+        names |= frame_names_from_index(pd.read_hdf(table_path, "df_with_missing").index)
+    return names
+
+
 def select_registered_videos(
     registered_videos: list[str], requested_videos: tuple[str | Path, ...]
 ) -> tuple[list[str], list[str]]:
@@ -227,3 +297,123 @@ def ensure_unique_video_stems(videos: list[str], *, error_context: str) -> None:
             )
             raise ValueError(message)
         stems[stem] = video
+
+
+@dataclass(frozen=True, slots=True)
+class PurgeSummary:
+    """Summarizes a wholesale labeled-data purge, whether previewed as a dry run or actually executed.
+
+    Notes:
+        A purge is deliberately destructive: unlike the frame and outlier re-extraction options, which preserve every
+        human-labeled and machine-labeled frame, it removes each targeted video's entire ``labeled-data`` folder,
+        including its labels. The ``executed`` flag distinguishes a dry-run preview from a completed deletion, and
+        ``labeled_directories`` names the folders that held human labels so callers can warn before deleting them.
+    """
+
+    config_path: Path
+    """The path to the DeepLabCut project's config.yaml the purge targeted."""
+    executed: bool
+    """Whether the folders were actually deleted (True) or only previewed as a dry run (False)."""
+    removed_directories: tuple[Path, ...]
+    """The ``labeled-data/<stem>`` folders that were removed, or that a dry run would remove."""
+    labeled_directories: tuple[Path, ...]
+    """The targeted folders that held a human ``CollectedData`` label file, whose labels the purge discards."""
+    frame_count: int
+    """The total number of extracted frames across the targeted folders, reported to convey the purge's scope."""
+    unmatched_videos: tuple[str, ...] = ()
+    """The requested videos that matched no registered project video and were skipped."""
+
+    @property
+    def removed_directory_count(self) -> int:
+        """Returns the number of labeled-data folders removed, or that a dry run would remove."""
+        return len(self.removed_directories)
+
+    @property
+    def labeled_directory_count(self) -> int:
+        """Returns the number of targeted folders that held human labels."""
+        return len(self.labeled_directories)
+
+
+def purge_labeled_data(
+    config_path: Path, *, videos: tuple[str | Path, ...] = (), all_videos: bool = False, execute: bool = False
+) -> PurgeSummary:
+    """Removes targeted videos' entire ``labeled-data`` folders, previewing the deletion unless ``execute`` is set.
+
+    This is the wholesale counterpart to the frame and outlier re-extraction options: where those clear only a video's
+    unlabeled bootstrap frames or a single iteration's outlier frames and always keep the human labels, a purge deletes
+    each targeted folder outright, labels included. It exists for the rare start-completely-over case, such as changing
+    the project crop, that the label-preserving options cannot serve. It defaults to a dry run so the caller sees the
+    scope before committing.
+
+    Args:
+        config_path: The path to the DeepLabCut project's config.yaml, whose parent holds the ``labeled-data`` tree.
+        videos: The specific project video files whose folders to purge, matched to the project's registered videos by
+            resolved path. Mutually exclusive with ``all_videos``.
+        all_videos: Determines whether to purge every video folder in the project's ``labeled-data`` tree. Mutually
+            exclusive with ``videos``.
+        execute: Determines whether to actually delete the folders. When False, the folders are only reported for a
+            dry-run preview and nothing is removed.
+
+    Returns:
+        A PurgeSummary naming the folders removed (or that a dry run would remove), which of them held human labels,
+        the total frame count, and any requested videos that matched no registered project video.
+
+    Raises:
+        FileNotFoundError: If ``config_path`` does not point to an existing file.
+        ValueError: If neither or both of ``videos`` and ``all_videos`` are given.
+    """
+    config_path = config_path.resolve()
+    if not config_path.is_file():
+        message = f"Unable to purge labeled data. The config path '{config_path}' does not point to a file."
+        raise FileNotFoundError(message)
+    if all_videos == bool(videos):
+        message = "Unable to purge labeled data. Provide either specific videos or all videos, but not both or neither."
+        raise ValueError(message)
+
+    configuration = YAML().load(config_path.read_text())
+    scorer = str(configuration.get("scorer", ""))
+    labeled_data_directory = config_path.parent / "labeled-data"
+
+    unmatched_videos: tuple[str, ...] = ()
+    if all_videos:
+        # Iterate the folders actually present on disk so the purge covers every video's labeled data, including any
+        # folders for videos no longer registered in config.yaml. The '_labeled' folders hold DeepLabCut's rendered
+        # label overlays rather than a video's frames, and dot-prefixed entries are temporary, so both are left alone.
+        target_directories = (
+            sorted(
+                path
+                for path in labeled_data_directory.iterdir()
+                if path.is_dir()
+                and not path.is_symlink()
+                and not path.name.startswith(".")
+                and not path.name.endswith("_labeled")
+            )
+            if labeled_data_directory.exists()
+            else []
+        )
+    else:
+        registered_videos = list(configuration.get("video_sets") or {})
+        matched_videos, unmatched = select_registered_videos(
+            registered_videos=registered_videos, requested_videos=tuple(videos)
+        )
+        unmatched_videos = tuple(unmatched)
+        target_directories = [labeled_data_directory / Path(video).stem for video in matched_videos]
+
+    existing_directories = [directory for directory in target_directories if directory.exists()]
+    labeled_directories = tuple(
+        directory for directory in existing_directories if (directory / f"CollectedData_{scorer}.h5").is_file()
+    )
+    frame_count = sum(len(extracted_frame_paths(directory)) for directory in existing_directories)
+
+    if execute:
+        for directory in existing_directories:
+            shutil.rmtree(directory)
+
+    return PurgeSummary(
+        config_path=config_path,
+        executed=execute,
+        removed_directories=tuple(existing_directories),
+        labeled_directories=labeled_directories,
+        frame_count=frame_count,
+        unmatched_videos=unmatched_videos,
+    )

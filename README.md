@@ -101,17 +101,20 @@ This library provides the `slvt` CLI that exposes the following commands:
 |---------------------------|------------------------------------------------------------------------------------------|
 | `extract frames`          | Selects DeepLabCut training frames by clustering every video in a project in parallel    |
 | `extract outliers`        | Extracts a trained model's likely-wrong frames from analyzed videos to refine the model  |
+| `extract purge`           | Deletes targeted videos' entire labeled-data folders, labels included, after a dry-run preview |
 | `create-training-dataset` | Creates a training-dataset shuffle with a chosen network architecture and train/test split |
 | `train`                   | Trains a shuffle with mixed precision and multi-GPU DistributedDataParallel               |
 | `infer`                   | Analyzes videos across multiple GPUs, a single GPU, or the CPU, with in-flight polars output |
 
-The `extract` group owns the parameters shared by both subcommands (the project config.yaml, parallelism, and the
-frame-selection options); these must be given before the `frames` or `outliers` subcommand name, which then carries its
-own parameters. The `frames` subcommand grows the project toward a `--total-frames` budget, always including any videos
-named with `--videos` and filling the remaining budget from the project's other videos, optionally balanced across
-groups of related videos with `--balance-groups`; the `outliers` subcommand extracts `--frames-per-video` outlier
-frames from each target video given with `--videos`. Use `slvt --help`, `slvt extract --help`, or
-`slvt COMMAND --help` for detailed usage information.
+The `extract` group owns the project config.yaml every subcommand operates on, alongside the parallelism and
+frame-selection options the `frames` and `outliers` subcommands share; these must be given before the subcommand name,
+which then carries its own parameters. The `frames` subcommand grows the project toward a `--total-frames` budget,
+always including any videos named with `--videos` and filling the remaining budget from the project's other videos,
+optionally balanced across groups of related videos with `--balance-groups`; the `outliers` subcommand extracts
+`--frames-per-video` outlier frames from each target video given with `--videos`. Both extract additively and re-roll
+their unlabeled frames on `--overwrite` or `--reset` while preserving labeled frames; the `purge` subcommand instead
+deletes a video's whole labeled-data folder, labels included, when a clean start is needed. Use `slvt --help`,
+`slvt extract --help`, or `slvt COMMAND --help` for detailed usage information.
 
 For example, the following command extracts training frames from every video referenced by a project's config.yaml,
 sampling every 500th frame for clustering:
@@ -143,11 +146,11 @@ from pathlib import Path
 from sollertia_video_tracking import extract_frames_kmeans
 
 # Clusters every video referenced by the DeepLabCut project's config.yaml, writing the selected frames into each
-# video's labeled-data directory. Re-runs skip videos that already have frames unless overwrite=True is passed.
+# video's labeled-data directory. Extraction is additive; pass overwrite=True or reset=True to re-roll unlabeled frames.
 summary = extract_frames_kmeans(config_path=Path("/path/to/project/config.yaml"), clustering_stride=500)
 
 print(
-    f"{summary.extracted_video_count} extracted, {summary.skipped_video_count} skipped, "
+    f"{summary.extracted_video_count} extracted, {summary.cleared_frame_count} frames cleared, "
     f"{summary.failed_video_count} failed of {summary.total_video_count}"
 )
 ```

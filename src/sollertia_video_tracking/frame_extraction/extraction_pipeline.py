@@ -3,7 +3,6 @@
 import os
 import sys
 import math
-import shutil
 from typing import Any
 from pathlib import Path
 import traceback
@@ -12,6 +11,7 @@ from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
 
 import cv2
+import pandas as pd
 import deeplabcut
 import deeplabcut.utils.frameselectiontools as frame_selection_tools
 
@@ -22,20 +22,14 @@ from .utilities import (
     normalize_project_config,
     select_registered_videos,
     ensure_unique_video_stems,
+    machine_label_frame_names,
+    finite_labeled_frame_names,
     prune_empty_labeled_data_directories,
 )
 from .frame_reading import make_fast_kmeans_selector
 from .cpu_allocation import DEFAULT_RESERVED_CORE_COUNT, plan_core_allocation
 from .video_grouping import group_videos
 from .video_sampling import VideoSamplingPlan, plan_video_sampling
-
-_REEXTRACTION_ARTIFACT_PATTERNS: tuple[str, ...] = (
-    "img*.png",
-    "CollectedData_*.h5",
-    "CollectedData_*.csv",
-    "MachineLabelsRefine.*",
-)
-"""The labeled-data file patterns removed before a video is re-extracted, covering both frames and their labels."""
 
 _MAXIMUM_HEADER_READ_THREADS: int = 8
 """The largest thread pool used to read video container headers concurrently while sizing the aggregate bar."""
@@ -54,8 +48,9 @@ class FrameExtractionSummary:
 
     extracted_video_count: int
     """The number of videos for which frames were freshly extracted."""
-    skipped_video_count: int
-    """The number of videos skipped because their labeled-data directory already contained frames."""
+    cleared_frame_count: int
+    """The number of unlabeled bootstrap frames removed across the selection by ``overwrite`` or ``reset`` before
+    re-extraction; zero when neither option was set."""
     total_video_count: int
     """The total number of videos considered in the run."""
     worker_count: int
@@ -110,9 +105,11 @@ def extract_frames_kmeans(
     """Runs DeepLabCut k-means frame extraction across a project's videos in parallel and reports the outcome.
 
     Reads the run parameters from the project's config.yaml, plans the CPU-core allocation, and clusters every
-    selected video in its own pinned worker process. Re-runs are resumable: videos whose ``labeled-data/<stem>/``
-    directory already contains frames are skipped unless ``overwrite`` is set. A single bad video is recorded in the
-    returned summary rather than aborting the run.
+    selected video in its own pinned worker process. Extraction is additive: each run adds freshly clustered frames to
+    whatever a video's ``labeled-data/<stem>/`` directory already holds. ``overwrite`` and ``reset`` first clear a
+    video's unlabeled bootstrap frames so the run re-rolls them instead of adding to them, always preserving every
+    human-labeled and outlier-extracted frame. A single bad video is recorded in the returned summary rather than
+    aborting the run.
 
     When ``total_frame_budget`` is set, the run samples a random subset of not-yet-extracted videos sized to reach that
     project-wide frame budget. This means that the full project's video set can be added once and extraction grows
@@ -125,10 +122,13 @@ def extract_frames_kmeans(
         entry point is already guarded. CPU-affinity pinning is applied on Linux and Windows; macOS exposes no
         affinity API, so its workers run unpinned but still in parallel.
 
-        Because k-means selects different frame indices on each run, re-extraction writes different image filenames
-        and orphans the existing labels, so ``overwrite`` and ``reset`` both delete a video's ``CollectedData`` labels
-        alongside its frames. The ``random_seed`` controls only the random choice of videos, not the frames within a
-        video.
+        ``overwrite`` and ``reset`` remove only a video's bare bootstrap frames: the extracted images that carry no
+        human label and belong to no outlier-refinement iteration. Frames the human has annotated (a finite
+        ``CollectedData`` coordinate) and machine-labeled outlier frames are always kept, so re-rolling the diverse
+        bootstrap set never disturbs labeling or outlier work. ``overwrite`` clears the videos being extracted, while
+        ``reset`` clears every registered project video. The ``random_seed`` controls only the random choice of videos,
+        not the frames within a video, so the re-rolled selection differs each run. To instead discard a video's labels
+        and start its ``labeled-data`` folder over from scratch, use ``purge_labeled_data``.
 
         Empty ``labeled-data`` folders left by videos that were registered but never extracted are removed after every
         run, so the labeling GUI shows only the videos that have frames.
@@ -162,18 +162,19 @@ def extract_frames_kmeans(
         clustering_resize_width: The downsample width applied before clustering, passed to DeepLabCut as
             ``cluster_resizewidth``.
         cluster_in_color: Determines whether to cluster on color channels instead of grayscale.
-        overwrite: Determines whether to re-extract videos whose labeled-data directory already contains frames.
-            Re-extraction deletes the existing ``img*.png`` frames in each affected directory and the matching
-            ``CollectedData`` labels, which the new frames would otherwise orphan. Mutually exclusive with ``reset``.
-        reset: Determines whether to discard every selected video's extracted frames and re-extract from scratch. This
-            permanently deletes each selected video's entire ``labeled-data`` folder, including its extracted frames
-            and labels, leaving no empty folder behind. Mutually exclusive with ``overwrite``.
+        overwrite: Determines whether to clear the videos being extracted of their unlabeled bootstrap frames before
+            re-extracting, so the run re-rolls the diverse selection for those videos rather than adding to it. Human
+            labels and outlier-extracted frames are preserved. Mutually exclusive with ``reset``.
+        reset: Determines whether to clear every registered project video of its unlabeled bootstrap frames before
+            re-extracting, re-rolling the diverse selection project-wide. Human labels and outlier-extracted frames are
+            preserved. Mutually exclusive with ``overwrite``.
         display_progress: Determines whether to render the run header and the aggregate progress bar to the standard
             error stream.
 
     Returns:
-        A FrameExtractionSummary describing how many videos were extracted, skipped, and failed, alongside the
-        resolved core-allocation plan and, in sampling mode, the existing and target frame counts.
+        A FrameExtractionSummary describing how many videos were extracted and failed and how many bootstrap frames
+        were cleared, alongside the resolved core-allocation plan and, in sampling mode, the existing and target frame
+        counts.
 
     Raises:
         FileNotFoundError: If ``config_path`` does not point to an existing file.
@@ -210,6 +211,7 @@ def extract_frames_kmeans(
     start_fraction = float(configuration.get("start", 0))
     stop_fraction = float(configuration.get("stop", 1))
     configured_frames_per_video = configuration.get("numframes2pick", "?")
+    scorer = str(configuration.get("scorer", ""))
 
     if "video_sets" not in configuration:
         message = "Unable to extract frames. The project's config.yaml does not define any video_sets."
@@ -245,16 +247,17 @@ def extract_frames_kmeans(
     ensure_unique_video_stems(videos=videos, error_context="Unable to extract frames.")
 
     project_directory_path = config_path.parent
+    cleared_frame_count = 0
     if reset:
-        reset_directories = [project_directory_path / "labeled-data" / Path(video).stem for video in videos]
-        cleared = sum(1 for directory in reset_directories if directory.exists())
-        sys.stderr.write(
-            f"WARNING: --reset is removing {cleared} labeled-data video folder(s), including all their extracted "
-            f"frames and labels.\n"
+        # Reset re-rolls the diverse bootstrap set project-wide: it clears every registered video's unlabeled frames,
+        # not just the ones this run re-extracts, and runs before sampling so the cleared frames do not count toward
+        # the frame budget.
+        cleared_frame_count += _clear_bare_frames(
+            project_directory=project_directory_path,
+            video_stems=[Path(video).stem for video in configuration["video_sets"]],
+            scorer=scorer,
+            scope_label="--reset",
         )
-        sys.stderr.flush()
-        for directory in reset_directories:
-            _remove_labeled_data_directory(directory=directory)
 
     if exclusive:
         if balance_groups or group_by_pattern is not None:
@@ -300,7 +303,7 @@ def extract_frames_kmeans(
             prune_empty_labeled_data_directories(project_directory_path, display_progress=display_progress)
             return FrameExtractionSummary(
                 extracted_video_count=0,
-                skipped_video_count=0,
+                cleared_frame_count=cleared_frame_count,
                 total_video_count=0,
                 worker_count=0,
                 used_core_count=0,
@@ -312,6 +315,16 @@ def extract_frames_kmeans(
         videos = list(plan.selected_videos)
         existing_frame_count = plan.existing_frame_count
         target_frame_count = plan.target_frame_count
+
+    if overwrite:
+        # Overwrite re-rolls only the videos this run extracts, clearing their unlabeled frames after sampling has
+        # resolved the final selection.
+        cleared_frame_count += _clear_bare_frames(
+            project_directory=project_directory_path,
+            video_stems=[Path(video).stem for video in videos],
+            scorer=scorer,
+            scope_label="--overwrite",
+        )
 
     total_core_count = os.cpu_count() or 1
     worker_count, core_sets = plan_core_allocation(
@@ -356,7 +369,6 @@ def extract_frames_kmeans(
                 clustering_stride,
                 clustering_resize_width,
                 cluster_in_color,
-                overwrite,
                 video_index,
                 frame_totals[video_index],
                 reporting_queue,
@@ -365,7 +377,7 @@ def extract_frames_kmeans(
             for video_index, video in enumerate(videos)
         ]
 
-    extracted_count = skipped_count = 0
+    extracted_count = 0
     errors: list[tuple[str, str]] = []
     for video, _written, status in iter_pinned_extraction(
         videos=videos,
@@ -378,15 +390,13 @@ def extract_frames_kmeans(
     ):
         if status == "ok":
             extracted_count += 1
-        elif status == "skipped":
-            skipped_count += 1
         else:
             errors.append((video, status))
 
     prune_empty_labeled_data_directories(project_directory_path, display_progress=display_progress)
     return FrameExtractionSummary(
         extracted_video_count=extracted_count,
-        skipped_video_count=skipped_count,
+        cleared_frame_count=cleared_frame_count,
         total_video_count=len(videos),
         worker_count=worker_count,
         used_core_count=used_core_count,
@@ -512,32 +522,100 @@ def _count_extracted_frames(videos: list[str], project_directory: Path) -> dict[
     return counts
 
 
-def _clear_extracted_data(output_directory: Path) -> None:
-    """Deletes a video's extracted frames and the labels they would orphan from its labeled-data directory.
+def _clear_bare_frames(*, project_directory: Path, video_stems: list[str], scorer: str, scope_label: str) -> int:
+    """Clears each named video's unlabeled bootstrap frames before re-extraction, reporting the total removed.
 
-    Re-extraction selects different frame indices and therefore writes different image filenames, so the existing
-    ``CollectedData`` label rows would reference deleted images. The label and refinement files are removed alongside
-    the frames to avoid leaving a dataset that mixes valid, dangling, and unlabeled entries.
-
-    Args:
-        output_directory: The ``labeled-data/<video>`` directory whose extracted frames and labels are removed.
-    """
-    for pattern in _REEXTRACTION_ARTIFACT_PATTERNS:
-        for target in output_directory.glob(pattern):
-            target.unlink()
-
-
-def _remove_labeled_data_directory(directory: Path) -> None:
-    """Deletes a video's entire labeled-data directory, including its extracted frames, labels, and the folder itself.
-
-    The reset workflow starts a video's extraction over from scratch, so the whole folder is removed rather than only
-    its known artifacts, leaving no empty directory behind for the labeler to sift through.
+    Runs single-threaded before the workers start, so re-reading and rewriting the per-video label tables never races
+    against the concurrent extraction. A video folder that cannot be read is warned about and left untouched rather
+    than aborting the run or risking an under-protective deletion.
 
     Args:
-        directory: The ``labeled-data/<video>`` directory to remove.
+        project_directory: The DeepLabCut project directory that holds the ``labeled-data`` tree.
+        video_stems: The file-name stems of the videos whose bare frames are cleared.
+        scorer: The human scorer naming the ``CollectedData`` labels whose finite-labeled frames are preserved.
+        scope_label: The option name (``--overwrite`` or ``--reset``) reported in the clearing summary and any warning.
+
+    Returns:
+        The total number of bare frames removed across the named videos.
     """
-    if directory.exists():
-        shutil.rmtree(directory)
+    labeled_data_directory = project_directory / "labeled-data"
+    removed_frame_count = 0
+    cleared_directory_count = 0
+    for stem in video_stems:
+        directory = labeled_data_directory / stem
+        try:
+            removed_count = _clear_bare_frames_in_directory(directory=directory, scorer=scorer)
+        except Exception:  # noqa: BLE001 -- a folder that cannot be read is warned about, not fatal to the run.
+            sys.stderr.write(f"WARNING: {scope_label} could not clear the unlabeled frames in '{directory}'.\n")
+            continue
+        if removed_count:
+            cleared_directory_count += 1
+        removed_frame_count += removed_count
+
+    sys.stderr.write(
+        f"{scope_label} cleared {removed_frame_count} unlabeled bootstrap frame(s) from {cleared_directory_count} "
+        f"video folder(s) before re-extraction.\n"
+    )
+    sys.stderr.flush()
+    return removed_frame_count
+
+
+def _clear_bare_frames_in_directory(*, directory: Path, scorer: str) -> int:
+    """Removes a video's extracted frames that carry no label of any kind, keeping labeled and outlier frames.
+
+    A bare frame is an extracted ``imgNNNN.png`` that neither carries a finite human ``CollectedData`` coordinate nor
+    belongs to any outlier-refinement machine-label table. Its image and any prediction overlay are deleted, and its
+    all-NaN placeholder row, if the labeling GUI created one, is dropped from ``CollectedData`` so no label dangles.
+
+    Args:
+        directory: The ``labeled-data/<stem>`` directory to clear of unlabeled bootstrap frames.
+        scorer: The human scorer naming the ``CollectedData`` labels whose finite-labeled frames are preserved.
+
+    Returns:
+        The number of bare frames removed.
+    """
+    disk_frame_names = {frame_path.name for frame_path in extracted_frame_paths(directory)}
+    if not disk_frame_names:
+        return 0
+    collected_data_path = directory / f"CollectedData_{scorer}.h5"
+    protected_frame_names = finite_labeled_frame_names(collected_data_path) | machine_label_frame_names(directory)
+    bare_frame_names = disk_frame_names - protected_frame_names
+    for frame_name in bare_frame_names:
+        (directory / frame_name).unlink(missing_ok=True)
+        # A bare frame never has an overlay, but --save-labeled overlays from any earlier run are dropped defensively.
+        (directory / f"{Path(frame_name).stem}labeled.png").unlink(missing_ok=True)
+    if bare_frame_names:
+        _drop_collected_data_rows(collected_data_path=collected_data_path, removed_frame_names=bare_frame_names)
+    return len(bare_frame_names)
+
+
+def _drop_collected_data_rows(*, collected_data_path: Path, removed_frame_names: set[str]) -> None:
+    """Drops any placeholder label rows for cleared bare frames from a video's ``CollectedData`` tables.
+
+    The labeling GUI reindexes ``CollectedData`` to every image in the folder, so a cleared bare frame may leave behind
+    an all-NaN row referencing the deleted image. Those rows are removed here so no label dangles; when that empties the
+    table, its ``.h5`` and ``.csv`` files are deleted outright. Only bare (unlabeled) frames are ever passed in, so no
+    finite human label is dropped.
+
+    Args:
+        collected_data_path: The ``CollectedData_<scorer>.h5`` file to prune, alongside its ``.csv`` sibling.
+        removed_frame_names: The frame image names that were cleared and must not remain in the label tables.
+    """
+    if not collected_data_path.is_file():
+        return
+    labels = pd.read_hdf(collected_data_path, "df_with_missing")
+    row_frame_names = [entry[-1] if isinstance(entry, tuple) else Path(str(entry)).name for entry in labels.index]
+    keep_row_mask = [frame_name not in removed_frame_names for frame_name in row_frame_names]
+    if all(keep_row_mask):
+        return
+    remaining_labels = labels[keep_row_mask]
+    collected_data_csv_path = collected_data_path.with_suffix(".csv")
+    if remaining_labels.empty:
+        collected_data_path.unlink(missing_ok=True)
+        collected_data_csv_path.unlink(missing_ok=True)
+        return
+    remaining_labels.to_hdf(collected_data_path, key="df_with_missing", mode="w")
+    remaining_labels.to_csv(collected_data_csv_path)
 
 
 def _count_clustering_frames(
@@ -585,12 +663,12 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
     before the heavy backends import), so each worker stays within its assigned CPU budget.
 
     Args:
-        task: The packed work item carrying the video path, the config path, the clustering parameters, the resume
-            flag, the video index, the per-video frame total, and the progress queue (or None when progress is off).
+        task: The packed work item carrying the video path, the config path, the clustering parameters, the video
+            index, the per-video frame total, and the progress queue (or None when progress is off).
 
     Returns:
-        A tuple of the video path, the number of frames written, and a status string (``"ok"``, ``"skipped"``,
-        ``"empty"``, or an ``"error:"`` traceback).
+        A tuple of the video path, the number of frames freshly written, and a status string (``"ok"``, ``"empty"``,
+        or an ``"error:"`` traceback).
     """
     (
         video_path,
@@ -598,7 +676,6 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
         clustering_stride,
         clustering_resize_width,
         cluster_in_color,
-        overwrite,
         video_index,
         frame_total,
         progress_queue,
@@ -609,12 +686,9 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
 
         stem = Path(video_path).stem
         output_directory = config_path.parent / "labeled-data" / stem
-
-        existing_frame_paths = extracted_frame_paths(output_directory)
-        if existing_frame_paths and not overwrite:
-            return video_path, len(existing_frame_paths), "skipped"
-        # On overwrite, drop the stale frames and the labels they would orphan before re-extracting.
-        _clear_extracted_data(output_directory=output_directory)
+        # Extraction is additive: the pipeline clears any unlabeled frames up front when re-rolling, so the worker
+        # always clusters and appends. The pre-existing frame count is captured to report only the freshly written ones.
+        frame_count_before = len(extracted_frame_paths(output_directory))
 
         # Swaps DeepLabCut's random-seek k-means reader for the decode-aware one, routing its per-candidate progress to
         # the parent's aggregate bar. The reader streams the video when the clustering stride is dense enough to favor
@@ -648,5 +722,5 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
     except Exception:  # noqa: BLE001 -- one bad video must not kill the pool; the traceback is returned as status.
         return video_path, 0, "error:\n" + traceback.format_exc()
     else:
-        written = len(extracted_frame_paths(output_directory))
-        return video_path, written, "ok" if written else "empty"
+        written = len(extracted_frame_paths(output_directory)) - frame_count_before
+        return video_path, max(0, written), "ok" if written > 0 else "empty"

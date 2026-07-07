@@ -1,4 +1,4 @@
-"""Provides the ``slvt extract`` command group with its ``frames`` and ``outliers`` frame-extraction subcommands."""
+"""Provides the ``slvt extract`` command group with its ``frames``, ``outliers``, and ``purge`` subcommands."""
 
 from pathlib import Path
 from dataclasses import dataclass
@@ -9,6 +9,7 @@ from ..frame_extraction import (
     TrackingMethod,
     OutlierAlgorithm,
     ExtractionAlgorithm,
+    purge_labeled_data,
     extract_frames_kmeans,
     extract_outlier_frames_parallel,
 )
@@ -151,12 +152,13 @@ def extract_group(
     color: bool,
     progress: bool,
 ) -> None:
-    """Selects frames from a project's videos, either to bootstrap a model or to refine a trained one.
+    """Selects or clears frames in a project's videos to bootstrap a model, refine a trained one, or start over.
 
-    ``--config-path`` names the DeepLabCut project's config.yaml both subcommands operate on, alongside the
-    parallelism and frame-selection options common to k-means and outlier extraction. Use the ``frames`` subcommand
-    to bootstrap a project's training frames by clustering raw video, or the ``outliers`` subcommand to extract a
-    trained model's likely-wrong frames for refinement. These shared options must be given before the subcommand name.
+    ``--config-path`` names the DeepLabCut project's config.yaml every subcommand operates on; the parallelism and
+    frame-selection options apply to the ``frames`` and ``outliers`` extraction subcommands. Use ``frames`` to
+    bootstrap a project's training frames by clustering raw video, ``outliers`` to extract a trained model's
+    likely-wrong frames for refinement, or ``purge`` to delete a video's entire labeled-data folder for a clean start.
+    These shared options must be given before the subcommand name.
     """
     ctx.obj = SharedExtractionParameters(
         config_path=config_path,
@@ -226,17 +228,16 @@ def extract_group(
     "-o",
     "--overwrite",
     is_flag=True,
-    help="Re-process videos that already have extracted frames. WARNING: this deletes the existing extracted frames "
-    "AND their labels in each affected folder, which the new frames would otherwise orphan. Mutually exclusive with "
-    "--reset.",
+    help="Re-roll the diverse frame selection for the videos being extracted: clear their unlabeled frames first, then "
+    "re-extract. Already-labeled frames and any outlier frames are kept. Mutually exclusive with --reset.",
 )
 @click.option(
     "-r",
     "--reset",
     is_flag=True,
-    help="Discard ALL extracted frames and their labels across the selection and start over. WARNING: this "
-    "permanently removes each selected video's entire labeled-data folder, including its frames and labels, leaving "
-    "no empty folder behind. Mutually exclusive with --overwrite.",
+    help="Re-roll the diverse frame selection across ALL of the project's videos: clear every video's unlabeled frames "
+    "first, then re-extract. Already-labeled frames and any outlier frames are kept. To instead wipe a video's labels "
+    "and start over, use the 'purge' subcommand. Mutually exclusive with --overwrite.",
 )
 @pass_shared_parameters
 def frames_command(
@@ -253,12 +254,14 @@ def frames_command(
 ) -> None:
     """Selects initial training frames from a subset of the project's videos by clustering them in parallel.
 
-    Each video is clustered in its own worker process pinned to a disjoint block of CPU cores, and videos that already
-    contain extracted frames are skipped unless ``--overwrite`` is given. Passing ``--total-frames`` samples a random
-    subset of not-yet-processed videos sized to reach that project-wide frame budget, growing coverage across repeated
-    runs; any videos named with ``--videos`` are always included first, and the remaining budget is filled from the
-    project's other videos. Passing ``--exclusive`` with ``--videos`` instead restricts the run to exactly those files,
-    extracting ``--frames-per-video`` frames from each and ignoring the budget and group balancing.
+    Each video is clustered in its own worker process pinned to a disjoint block of CPU cores, and extraction is
+    additive: a run adds freshly clustered frames to whatever a video already holds. Passing ``--overwrite`` re-rolls
+    the selection for the videos being extracted, and ``--reset`` re-rolls it across every project video, by clearing
+    their unlabeled frames first; both keep already-labeled and outlier frames. Passing ``--total-frames`` samples a
+    random subset of not-yet-processed videos sized to reach that project-wide frame budget, growing coverage across
+    repeated runs; any videos named with ``--videos`` are always included first, and the remaining budget is filled from
+    the project's other videos. Passing ``--exclusive`` with ``--videos`` instead restricts the run to exactly those
+    files, extracting ``--frames-per-video`` frames from each and ignoring the budget and group balancing.
     """
     if exclusive and not videos:
         message = "The --exclusive flag requires at least one --videos file to restrict the run to."
@@ -289,7 +292,7 @@ def frames_command(
         click.echo(message=f"\n--- error in {video} ---\n{traceback_text}", err=True)
     click.echo(
         message=(
-            f"done: {summary.extracted_video_count} extracted, {summary.skipped_video_count} skipped, "
+            f"done: {summary.extracted_video_count} extracted, {summary.cleared_frame_count} frames cleared, "
             f"{summary.failed_video_count} failed (of {summary.total_video_count})"
         ),
     )
@@ -489,3 +492,76 @@ def outliers_command(
     click.echo(message=summary.describe())
     if not summary.successful:
         raise SystemExit(1)
+
+
+@extract_group.command("purge", context_settings=_CONTEXT_SETTINGS)
+@click.option(
+    "-v",
+    "--videos",
+    multiple=True,
+    type=click.Path(dir_okay=False, path_type=Path),
+    metavar="PATH",
+    help="A project video whose entire labeled-data folder to delete, matched against the videos registered in "
+    "config.yaml. Provide the option several times to purge several. Mutually exclusive with --all.",
+)
+@click.option(
+    "-a",
+    "--all",
+    "all_videos",
+    is_flag=True,
+    help="Purge every video's labeled-data folder in the project. Mutually exclusive with --videos.",
+)
+@click.option(
+    "-y",
+    "--yes",
+    is_flag=True,
+    help="Actually delete the folders. Without this flag the command only previews what it would remove, deleting "
+    "nothing.",
+)
+@pass_shared_parameters
+def purge_command(
+    shared: SharedExtractionParameters,
+    videos: tuple[Path, ...],
+    *,
+    all_videos: bool,
+    yes: bool,
+) -> None:
+    """Deletes targeted videos' entire labeled-data folders, including their labels, after a dry-run preview.
+
+    This is the wholesale reset the frame and outlier re-extraction options deliberately avoid: where ``--overwrite``
+    and ``--reset`` clear only unlabeled or single-iteration frames and always keep the human labels, ``purge`` removes
+    each targeted ``labeled-data`` folder outright. It exists for the rare start-completely-over case, such as changing
+    the project crop, that the label-preserving options cannot serve. Target specific videos with ``--videos`` or the
+    whole project with ``--all``. The command previews what it would delete and removes nothing until ``--yes`` is
+    given.
+    """
+    try:
+        summary = purge_labeled_data(
+            config_path=shared.require_config_path(),
+            videos=tuple(videos),
+            all_videos=all_videos,
+            execute=yes,
+        )
+    except (ValueError, FileNotFoundError) as error:
+        raise click.ClickException(message=str(error)) from error
+
+    for video in summary.unmatched_videos:
+        click.echo(message=f"skipped (not a registered project video): {video}", err=True)
+    for directory in summary.removed_directories:
+        label_marker = " [has labels]" if directory in summary.labeled_directories else ""
+        verb = "removed" if summary.executed else "would remove"
+        click.echo(message=f"{verb}: {directory}{label_marker}")
+    if summary.executed:
+        click.echo(
+            message=(
+                f"purged {summary.removed_directory_count} folder(s), {summary.frame_count} frame(s) "
+                f"({summary.labeled_directory_count} had labels)"
+            )
+        )
+    else:
+        click.echo(
+            message=(
+                f"dry run: would purge {summary.removed_directory_count} folder(s), {summary.frame_count} frame(s) "
+                f"({summary.labeled_directory_count} contain labels). Re-run with --yes to delete."
+            )
+        )

@@ -22,6 +22,7 @@ from deeplabcut.refine_training_dataset import outlier_frames as dlc_outlier_fra
 from .progress import make_progress_reporter
 from .utilities import (
     extracted_frame_paths,
+    frame_names_from_index,
     iter_pinned_extraction,
     normalize_project_config,
     select_registered_videos,
@@ -884,11 +885,11 @@ def _clear_video_iteration_outliers(*, directory: Path, iteration: int, scorer: 
     if not machine_labels_path.is_file():
         return 0, False
 
-    outlier_frame_names = _frame_names(pd.read_hdf(machine_labels_path, "df_with_missing").index)
+    outlier_frame_names = frame_names_from_index(pd.read_hdf(machine_labels_path, "df_with_missing").index)
     labeled_frame_names: set[str] = set()
     collected_data_path = directory / f"CollectedData_{scorer}.h5"
     if scorer and collected_data_path.is_file():
-        labeled_frame_names = _frame_names(pd.read_hdf(collected_data_path, "df_with_missing").index)
+        labeled_frame_names = frame_names_from_index(pd.read_hdf(collected_data_path, "df_with_missing").index)
 
     removed_count = 0
     for frame_name in outlier_frame_names - labeled_frame_names:
@@ -906,24 +907,6 @@ def _clear_video_iteration_outliers(*, directory: Path, iteration: int, scorer: 
     for refinement_file in refinement_files:
         refinement_file.unlink()
     return removed_count, bool(refinement_files)
-
-
-def _frame_names(frame_index: Any) -> set[str]:
-    """Extracts the ``imgNNNN.png`` file names from a labeled-data table's row index.
-
-    Both the machine-label and ``CollectedData`` tables index their rows by a ``("labeled-data", video, image)``
-    MultiIndex, though older tables may store a flat path string; the trailing image name is taken from either form.
-
-    Args:
-        frame_index: The pandas row index of a machine-label or ``CollectedData`` table.
-
-    Returns:
-        The set of frame image file names the index references.
-    """
-    names: set[str] = set()
-    for entry in frame_index:
-        names.add(str(entry[-1]) if isinstance(entry, tuple) else Path(str(entry)).name)
-    return names
 
 
 def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
