@@ -353,7 +353,7 @@ class _OptimizedPoseTrainingRunner(_OptimizedTrainingRunnerMixin, PoseTrainingRu
         if mode == "train":
             self.optimizer.zero_grad()
 
-        inputs = batch["image"].to(self.device).float()
+        inputs = batch["image"].to(self.device, non_blocking=True).float()
         underlying_model = self._unwrap()
         with self._build_autocast_context(enabled=mode == "train"):
             if "cond_keypoints" in batch["context"]:
@@ -429,7 +429,7 @@ class _OptimizedDetectorTrainingRunner(_OptimizedTrainingRunnerMixin, DetectorTr
         else:
             self.model.eval()
 
-        images = batch["image"].to(self.device)
+        images = batch["image"].to(self.device, non_blocking=True)
         underlying_model = self._unwrap()
         target = underlying_model.get_target(batch["annotations"])
         # Move each per-image target tensor onto the training device so the detector forward can consume it.

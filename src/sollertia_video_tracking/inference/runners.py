@@ -29,8 +29,8 @@ def patch_dlc_runner_builders(profile: InferenceProfile) -> Iterator[None]:
     interpreter.
 
     Notes:
-        Wrapping the stock builders, rather than reimplementing DeepLabCut's runner setup, is worthwhile because
-        DeepLabCut's own autocast is float16-only while these models train in bfloat16, and DeepLabCut calls
+        Wrapping the stock builders is worthwhile rather than reimplementing DeepLabCut's runner setup: DeepLabCut's own
+        autocast is float16-only while these models train in bfloat16. DeepLabCut also calls
         ``torch.autocast(device_type=str(self.device))`` with a device string like ``"cuda:0"`` that is not a valid
         autocast device type. The stock autocast is disabled and replaced with one carrying the correct device type and
         dtype. Because the wrappers depend on the internal structure of DeepLabCut's inference runners, the DeepLabCut
@@ -76,9 +76,10 @@ def patch_dlc_runner_builders(profile: InferenceProfile) -> Iterator[None]:
 def _optimize_inference_runner(runner: InferenceRunner, profile: InferenceProfile) -> InferenceRunner:
     """Enhances a DeepLabCut inference runner in place with mixed precision, channels-last, and ``torch.compile``.
 
-    The runner's forward pass is replaced with a version that wraps the model call in the profile's autocast context
-    (with the correct device type and bfloat16/float16 dtype) and, when enabled, moves inputs to the channels-last
-    memory format with a non-blocking transfer. The model is converted to channels-last and compiled before the swap.
+    The runner's forward pass is replaced with a version that wraps the model call in the profile's autocast context,
+    with the correct device type and bfloat16/float16 dtype. When enabled, that version also moves inputs to the
+    channels-last memory format with a non-blocking transfer. The model is converted to channels-last and compiled
+    before the swap.
     Conditional-top-down runners drive a stateful, multi-stage forward that this simple swap would not preserve, so
     they are left unmodified with a warning.
 
@@ -161,10 +162,16 @@ def _build_pose_predict(
             raw_predictions = runner.model.get_predictions(outputs)
         if runner.dynamic is not None:
             raw_predictions["bodypart"]["poses"] = runner.dynamic.update(raw_predictions["bodypart"]["poses"])
+        # Copy each output tensor to host once, then index the resulting array per frame, rather than issuing a
+        # separate device-to-host copy for every frame of every tensor.
+        host_predictions = {
+            head: {name: prediction.cpu().numpy() for name, prediction in head_outputs.items()}
+            for head, head_outputs in raw_predictions.items()
+        }
         return [
             {
-                head: {name: prediction[index].cpu().numpy() for name, prediction in head_outputs.items()}
-                for head, head_outputs in raw_predictions.items()
+                head: {name: array[index] for name, array in head_arrays.items()}
+                for head, head_arrays in host_predictions.items()
             }
             for index in range(batch_size)
         ]

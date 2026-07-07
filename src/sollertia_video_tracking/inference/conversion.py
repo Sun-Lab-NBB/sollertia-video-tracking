@@ -64,10 +64,10 @@ def convert_predictions_to_feather(
 
     DeepLabCut writes predictions as a pandas HDF5 table whose columns are a ``scorer / [individuals] / bodyparts /
     coords`` MultiIndex and whose rows are frames. This renders that table into a wide, snake-cased feather with one row
-    per frame (``frame``) and, per keypoint, ``[<individual>_]<bodypart>_x``, ``_y``, and ``_likelihood`` columns, so
-    the rest of the Sollertia stack (numpy 2 / Python 3.14, consuming uncompressed Apache Arrow feathers written by
-    polars) reads it directly. The transcription is a direct, project-agnostic copy of DeepLabCut's own output
-    ("DeepLabCut, but in polars"); derived quantities are left to downstream consumers.
+    per frame (``frame``) and, per keypoint, ``[<individual>_]<bodypart>_x``, ``_y``, and ``_likelihood`` columns. The
+    rest of the Sollertia stack (numpy 2 / Python 3.14) reads the resulting uncompressed Apache Arrow feather directly.
+    The transcription is a direct, project-agnostic copy of DeepLabCut's own output; derived quantities are left to
+    downstream consumers.
 
     Args:
         h5_path: The path to the DeepLabCut prediction ``.h5`` file to convert.
@@ -156,7 +156,7 @@ def _flatten_predictions(
     """Flattens the prediction MultiIndex columns into snake-cased per-keypoint float columns.
 
     The leading ``scorer`` column level is dropped and the remaining levels above the coordinate are joined with
-    underscores to form each keypoint prefix, so a single-animal ``(scorer, snout, x)`` becomes ``snout_x`` and a
+    underscores to form each keypoint prefix. A single-animal ``(scorer, snout, x)`` becomes ``snout_x`` and a
     multi-animal ``(scorer, mouse1, snout, x)`` becomes ``mouse1_snout_x``. Positions below the likelihood threshold
     are masked to NaN while the likelihood channel is preserved.
 

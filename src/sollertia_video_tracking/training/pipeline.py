@@ -662,7 +662,14 @@ def _build_dataloaders(
             num_workers=worker_count,
             pin_memory=pin_memory,
         )
-    valid_dataloader = DataLoader(dataset=valid_dataset, batch_size=1, shuffle=False)
+    valid_dataloader = DataLoader(
+        dataset=valid_dataset,
+        batch_size=1,
+        shuffle=False,
+        num_workers=worker_count,
+        pin_memory=pin_memory,
+        persistent_workers=worker_count > 0,
+    )
     return train_dataloader, valid_dataloader
 
 
