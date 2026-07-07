@@ -15,6 +15,7 @@ import multiprocessing
 
 import cv2
 import numpy as np
+import pandas as pd
 from deeplabcut.utils import auxfun_multianimal, auxiliaryfunctions, frameselectiontools
 from deeplabcut.refine_training_dataset import outlier_frames as dlc_outlier_frames
 
@@ -158,6 +159,8 @@ def extract_outlier_frames_parallel(
     cores_per_worker: int = -1,
     reserved_core_count: int = DEFAULT_RESERVED_CORE_COUNT,
     fitting_worker_count: int = -1,
+    overwrite: bool = False,
+    reset: bool = False,
     display_progress: bool = True,
 ) -> OutlierExtractionSummary:
     """Flags and extracts a trained model's likely-wrong frames across many analyzed videos in parallel.
@@ -174,8 +177,12 @@ def extract_outlier_frames_parallel(
     Notes:
         The pipeline uses the spawn multiprocessing start method on every platform, so a programmatic caller must guard
         the call with ``if __name__ == "__main__":``. The installed console-script entry point is already guarded.
-        Outlier extraction is additive: re-running a video appends further frames rather than replacing the existing
-        ones, so coverage grows across repeated passes.
+        Outlier extraction is additive by default: re-running a video appends further frames rather than replacing the
+        existing ones, so coverage grows across repeated passes. Setting ``overwrite`` first discards the current
+        refinement iteration's already-extracted outlier frames for the selected videos so they are replaced instead of
+        added to, and ``reset`` discards the iteration's outlier frames across every project video for a clean slate.
+        Both clear only this iteration's freshly extracted outlier frames (those recorded in the iteration's machine
+        labels) and preserve every frame already carried in the human ``CollectedData`` labels.
 
         Empty ``labeled-data`` folders left by videos that were registered but never extracted are removed after every
         run, so the labeling GUI shows only the videos that have frames.
@@ -214,6 +221,15 @@ def extract_outlier_frames_parallel(
         reserved_core_count: The number of CPU cores to leave free for other tasks.
         fitting_worker_count: The number of processes fitting SARIMAX models during ``fitting`` detection. Set to -1 to
             use every usable core.
+        overwrite: Determines whether to re-extract the selected videos, first discarding this refinement iteration's
+            already-extracted outlier frames for those videos, along with their machine labels and any manual
+            refinement of them, so the frames are replaced rather than added to. Other videos' outlier frames are left
+            intact, and every frame already carried in the human ``CollectedData`` labels is preserved. Mutually
+            exclusive with ``reset``.
+        reset: Determines whether to discard this refinement iteration's extracted outlier frames across every project
+            video, along with their machine labels and any manual refinement, before re-extracting the selected videos,
+            giving the whole iteration a clean slate. Every frame already carried in the human ``CollectedData`` labels
+            is preserved. Mutually exclusive with ``overwrite``.
         display_progress: Determines whether to render the run header and the aggregate progress bar.
 
     Returns:
@@ -222,16 +238,20 @@ def extract_outlier_frames_parallel(
 
     Raises:
         FileNotFoundError: If ``config_path`` does not point to an existing file.
-        ValueError: If ``outlier_algorithm`` or ``extraction_algorithm`` is unknown, if ``frames_per_video`` is set
-            below one (other than the -1 sentinel), if ``candidate_step`` is below one, or if ``outlier_algorithm`` is
-            ``"list"`` without ``explicit_frame_indices``. Also raised if the comparison bodyparts resolve to none, if
-            the project lists no videos in ``video_sets``, or if no requested video matches a registered project video.
-            It is also raised if two selected videos share a file-name stem and would collide in the labeled-data tree.
+        ValueError: If ``overwrite`` and ``reset`` are both set, if ``outlier_algorithm`` or ``extraction_algorithm``
+            is unknown, if ``frames_per_video`` is set below one (other than the -1 sentinel), if ``candidate_step`` is
+            below one, or if ``outlier_algorithm`` is ``"list"`` without ``explicit_frame_indices``. Also raised if the
+            comparison bodyparts resolve to none, if the project lists no videos in ``video_sets``, or if no requested
+            video matches a registered project video. It is also raised if two selected videos share a file-name stem
+            and would collide in the labeled-data tree.
     """
     config_path = config_path.resolve()
     if not config_path.is_file():
         message = f"Unable to extract outlier frames. The config path '{config_path}' does not point to a file."
         raise FileNotFoundError(message)
+    if overwrite and reset:
+        message = "Unable to extract outlier frames. The overwrite and reset options are mutually exclusive."
+        raise ValueError(message)
     try:
         outlier_algorithm = OutlierAlgorithm(outlier_algorithm)
     except ValueError:
@@ -302,6 +322,14 @@ def extract_outlier_frames_parallel(
     video_paths = list(matched_videos)
     # Two videos that share a stem would write into one labeled-data folder, racing in the parallel extraction pool.
     ensure_unique_video_stems(video_paths, error_context="Unable to extract outlier frames.")
+
+    # Clearing runs single-threaded here, before detection, so the concurrent extraction workers never race on reading
+    # the machine-label bookkeeping and so DeepLabCut's frame writer, which skips indices whose image already exists,
+    # actually re-writes the frames it re-flags this pass.
+    if overwrite or reset:
+        _clear_iteration_outliers(
+            config_path=config_path, configuration=configuration, selected_videos=video_paths, reset=reset
+        )
 
     candidates, unanalyzed_videos, errors = _detect_all_videos(
         video_paths=video_paths,
@@ -771,6 +799,131 @@ def _video_cropping_offset(configuration: dict[str, Any], video: str) -> tuple[i
         raise ValueError(message)
     x1, _, y1, _ = (int(part) for part in parts)
     return x1, y1
+
+
+def _clear_iteration_outliers(
+    *, config_path: Path, configuration: dict[str, Any], selected_videos: list[str], reset: bool
+) -> None:
+    """Discards this refinement iteration's extracted outlier frames before re-extraction, preserving labeled frames.
+
+    Outlier frames are written into the same ``labeled-data/<stem>`` folders as the human-labeled training frames, so
+    clearing cannot simply delete the images: only the frames this iteration extracted as outliers, recorded in the
+    iteration's ``machinelabels-iter<N>`` bookkeeping, are removed, and any of those that already appear in the human
+    ``CollectedData`` labels are kept. ``reset`` wipes every project video's outlier set for the iteration, whereas
+    ``overwrite`` (``reset`` False) wipes only the videos this run re-extracts, leaving the rest intact.
+
+    Args:
+        config_path: The resolved project config.yaml path, whose parent holds the ``labeled-data`` tree.
+        configuration: The loaded project configuration, read for the current ``iteration`` and human ``scorer``.
+        selected_videos: The registered project videos this run re-extracts, cleared under ``overwrite``.
+        reset: Determines whether to clear every project video's outlier set for the iteration rather than only the
+            selected videos.
+    """
+    iteration = int(configuration.get("iteration", 0))
+    scorer = str(configuration.get("scorer", ""))
+    labeled_data_directory = config_path.parent / "labeled-data"
+    if reset:
+        # Reset clears every folder holding an outlier set for this iteration, not just the videos being re-extracted,
+        # so the whole refinement iteration starts from a clean slate.
+        machine_labels_name = f"machinelabels-iter{iteration}.h5"
+        target_directories = (
+            sorted(path.parent for path in labeled_data_directory.glob(f"*/{machine_labels_name}"))
+            if labeled_data_directory.exists()
+            else []
+        )
+        scope_label = "--reset"
+    else:
+        target_directories = [labeled_data_directory / Path(video).stem for video in selected_videos]
+        scope_label = "--overwrite"
+
+    removed_frame_count = 0
+    cleared_directory_count = 0
+    refined_directory_count = 0
+    for directory in target_directories:
+        try:
+            removed_count, had_refined_labels = _clear_video_iteration_outliers(
+                directory=directory, iteration=iteration, scorer=scorer
+            )
+        except Exception:  # noqa: BLE001 -- a folder that cannot be read is warned about, not fatal to the run.
+            sys.stderr.write(f"WARNING: {scope_label} could not clear the outlier frames in '{directory}'.\n")
+            continue
+        if removed_count or had_refined_labels:
+            cleared_directory_count += 1
+        removed_frame_count += removed_count
+        refined_directory_count += 1 if had_refined_labels else 0
+
+    sys.stderr.write(
+        f"{scope_label} removed {removed_frame_count} outlier frame(s) from {cleared_directory_count} video folder(s) "
+        f"for iteration {iteration} before re-extraction.\n"
+    )
+    if refined_directory_count:
+        sys.stderr.write(
+            f"WARNING: {scope_label} discarded manual outlier refinements in {refined_directory_count} folder(s); "
+            f"those MachineLabelsRefine corrections must be redone.\n"
+        )
+    sys.stderr.flush()
+
+
+def _clear_video_iteration_outliers(*, directory: Path, iteration: int, scorer: str) -> tuple[int, bool]:
+    """Removes one video folder's outlier frames for a refinement iteration, keeping any already-labeled frames.
+
+    The iteration's ``machinelabels-iter<N>.h5`` records exactly the frames extracted as outliers this iteration, keyed
+    by their ``imgNNNN.png`` names. Those frames are deleted, except any that also appear in the human
+    ``CollectedData`` labels, along with the iteration's machine-label bookkeeping and any manual refinement of it, so
+    re-extraction rebuilds the set from scratch without orphaning either images or labels.
+
+    Args:
+        directory: The ``labeled-data/<stem>`` directory whose iteration outlier frames are cleared.
+        iteration: The refinement iteration whose machine-label record names the frames to remove.
+        scorer: The human scorer naming the ``CollectedData`` labels whose frames are preserved.
+
+    Returns:
+        A tuple of the number of frames removed and whether a manual ``MachineLabelsRefine`` file was discarded.
+    """
+    machine_labels_path = directory / f"machinelabels-iter{iteration}.h5"
+    if not machine_labels_path.is_file():
+        return 0, False
+
+    outlier_frame_names = _frame_names(pd.read_hdf(machine_labels_path, "df_with_missing").index)
+    labeled_frame_names: set[str] = set()
+    collected_data_path = directory / f"CollectedData_{scorer}.h5"
+    if scorer and collected_data_path.is_file():
+        labeled_frame_names = _frame_names(pd.read_hdf(collected_data_path, "df_with_missing").index)
+
+    removed_count = 0
+    for frame_name in outlier_frame_names - labeled_frame_names:
+        frame_path = directory / frame_name
+        if frame_path.is_file():
+            frame_path.unlink()
+            removed_count += 1
+        # Drop the prediction overlay saved beside the frame when --save-labeled was used, so it never orphans.
+        (directory / f"{Path(frame_name).stem}labeled.png").unlink(missing_ok=True)
+
+    machine_labels_path.unlink(missing_ok=True)
+    (directory / "machinelabels.csv").unlink(missing_ok=True)
+    # Any manual refinement of this iteration's outliers references the frames just cleared, so it is discarded too.
+    refinement_files = sorted(directory.glob("MachineLabelsRefine.*"))
+    for refinement_file in refinement_files:
+        refinement_file.unlink()
+    return removed_count, bool(refinement_files)
+
+
+def _frame_names(frame_index: Any) -> set[str]:
+    """Extracts the ``imgNNNN.png`` file names from a labeled-data table's row index.
+
+    Both the machine-label and ``CollectedData`` tables index their rows by a ``("labeled-data", video, image)``
+    MultiIndex, though older tables may store a flat path string; the trailing image name is taken from either form.
+
+    Args:
+        frame_index: The pandas row index of a machine-label or ``CollectedData`` table.
+
+    Returns:
+        The set of frame image file names the index references.
+    """
+    names: set[str] = set()
+    for entry in frame_index:
+        names.add(str(entry[-1]) if isinstance(entry, tuple) else Path(str(entry)).name)
+    return names
 
 
 def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:

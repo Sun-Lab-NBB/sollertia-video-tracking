@@ -390,6 +390,23 @@ def frames_command(
     help="Also save a copy of each extracted frame with the model's predictions drawn on it.",
 )
 @click.option(
+    "-o",
+    "--overwrite",
+    is_flag=True,
+    help="Re-extract outlier frames for the selected --videos, first discarding this refinement iteration's "
+    "already-extracted outlier frames for those videos (and their machine labels) so they are replaced rather than "
+    "added to. Other videos' outlier frames, and every already-labeled training frame, are left intact. Mutually "
+    "exclusive with --reset.",
+)
+@click.option(
+    "-r",
+    "--reset",
+    is_flag=True,
+    help="Discard this refinement iteration's extracted outlier frames across ALL of the project's videos (and their "
+    "machine labels) before re-extracting the selected --videos, giving the whole iteration a clean slate. "
+    "Already-labeled training frames are preserved. Mutually exclusive with --overwrite.",
+)
+@click.option(
     "-tm",
     "--tracking-method",
     type=click.Choice([method.value for method in TrackingMethod]),
@@ -422,6 +439,8 @@ def outliers_command(
     fit_workers: int,
     *,
     save_labeled: bool,
+    overwrite: bool,
+    reset: bool,
 ) -> None:
     """Extracts a trained model's likely-wrong frames from the project's analyzed videos to refine the model.
 
@@ -430,7 +449,9 @@ def outliers_command(
     model's predictions rather than re-running the model; requested paths that are not registered project videos are
     skipped with a warning. The flagged outlier frames are clustered in parallel, one video per worker pinned to a
     disjoint block of CPU cores, and added to each video's labeled-data directory alongside the model's predictions as
-    machine pre-labels. Outlier extraction is additive, so repeated passes grow the refinement set.
+    machine pre-labels. Outlier extraction is additive by default, so repeated passes grow the refinement set; pass
+    ``--overwrite`` to replace the selected videos' outlier frames for the current iteration instead, or ``--reset`` to
+    clear the whole iteration's outlier frames before re-extracting. Both preserve every already-labeled training frame.
     """
     try:
         summary = extract_outlier_frames_parallel(
@@ -454,6 +475,8 @@ def outliers_command(
             worker_count=shared.worker_count,
             cores_per_worker=shared.cores_per_worker,
             fitting_worker_count=fit_workers,
+            overwrite=overwrite,
+            reset=reset,
             display_progress=shared.display_progress,
         )
     except (ValueError, FileNotFoundError) as error:
