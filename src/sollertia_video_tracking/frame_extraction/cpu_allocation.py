@@ -27,9 +27,10 @@ def plan_core_allocation(
     videos need. The full core budget is therefore deployed only when there are enough videos to fill it, and any
     remaining videos run in later waves. When more videos than full blocks remain and the budget does not divide
     evenly, one extra worker runs on the leftover cores as a smaller block so the whole budget is used. An explicit
-    cores-per-worker instead sizes an automatic worker count to give each worker exactly that many cores, while an
-    explicit worker count spreads the usable cores evenly across those workers. Explicit counts are honored as given
-    and may overlap only within the usable band, leaving the reserved cores free regardless.
+    cores-per-worker instead gives each worker exactly that many cores, sizing an automatic worker count from the
+    usable cores, while an explicit worker count splits the usable cores evenly across those workers. In both cases
+    the worker count is capped at the number of videos, so a request for more workers than videos runs one worker
+    per video. The pinned blocks stay within the usable band, leaving the reserved cores free regardless.
 
     Notes:
         DeepLabCut reads a single video's frames in one serial Python loop that cannot be sped up, but each frame's
@@ -52,10 +53,7 @@ def plan_core_allocation(
 
     if cores_per_worker < 1:
         if worker_count < 1:
-            # Automatic worker and core counts: give each worker a saturating core block and run only as many workers
-            # as the selected videos need, so the full budget is deployed solely when there are enough videos to fill
-            # it. When more videos than full blocks remain and the budget does not divide evenly, one extra worker
-            # takes the leftover cores as a smaller block.
+            # Automatic worker and core counts: a saturating block per worker, one worker per video up to the budget.
             full_worker_count = usable_core_count // _SATURATING_CORES_PER_WORKER
             if full_worker_count == 0:
                 worker_count = 1

@@ -24,7 +24,7 @@ constant rather than a parameter because it cannot change which frames are flagg
 
 
 class OutlierAlgorithm(StrEnum):
-    """The supported frame-selection modes.
+    """Defines the supported frame-selection modes.
 
     ``jump``, ``uncertain``, and ``fitting`` flag likely-wrong frames from a trained model's predictions; ``list``
     extracts an explicit, caller-supplied index list instead.
@@ -51,7 +51,7 @@ def uncertain_outlier_indices(predictions: pd.DataFrame, minimum_confidence: flo
     Returns:
         The frame indices, in the prediction table's own index, that hold at least one low-confidence keypoint.
     """
-    likelihoods = predictions.xs("likelihood", level="coords", axis=1)
+    likelihoods = predictions.xs(key="likelihood", level="coords", axis=1)
     # pandas-stubs types the DataFrame.xs(axis=1) cross-section as DataFrame | Series, so the boolean reduction is
     # seen as a Series that rejects axis=1; the runtime object is always a DataFrame.
     return predictions.index[(likelihoods < minimum_confidence).any(axis=1)].tolist()  # type: ignore[arg-type]
@@ -75,14 +75,14 @@ def jump_outlier_indices(predictions: pd.DataFrame, pixel_distance_threshold: fl
         The frame indices, in the prediction table's own index, that hold at least one over-threshold jump.
     """
     with warnings.catch_warnings():
-        # This intentionally mirrors DeepLabCut's own "jump" branch in extract_outlier_frames
+        # Mirrors DeepLabCut's own "jump" branch in extract_outlier_frames
         # (deeplabcut/refine_training_dataset/outlier_frames.py), which uses the same axis=1 groupby; matching it keeps
         # flagged frames identical to upstream. pandas 2.x deprecates axis=1 groupby but still evaluates it, and DLC
         # 3.0 itself calls it, so the env stays on pandas 2.x regardless. Follow DLC if it migrates off axis=1 groupby.
         warnings.simplefilter("ignore", category=FutureWarning)
         warnings.simplefilter("ignore", category=DeprecationWarning)
         squared_step = predictions.diff(axis=0) ** 2
-        squared_step = squared_step.drop("likelihood", axis=1, level="coords")
+        squared_step = squared_step.drop(labels="likelihood", axis=1, level="coords")
         per_bodypart = squared_step.groupby(level="bodyparts", axis=1).sum()  # type: ignore[call-overload]
     return predictions.index[(per_bodypart > pixel_distance_threshold**2).any(axis=1)].tolist()
 
@@ -136,8 +136,8 @@ def fit_keypoint_distance(
         vertical_positions: The keypoint's per-frame vertical positions.
         confidences: The keypoint's per-frame prediction confidences.
         minimum_confidence: The likelihood below which a position is treated as missing while fitting.
-        autoregressive_degree: The autoregressive degree of the SARIMAX model.
-        moving_average_degree: The moving-average degree of the SARIMAX model.
+        autoregressive_degree: The number of lagged observations the SARIMAX fit regresses each point on.
+        moving_average_degree: The number of lagged residual terms the SARIMAX fit includes.
 
     Returns:
         The per-frame Euclidean distance between the observed position and the model's fitted position.
@@ -147,7 +147,7 @@ def fit_keypoint_distance(
         # these fits run in pool workers that do not redirect their streams, so the warnings are silenced at the source.
         warnings.simplefilter("ignore")
         try:
-            mean_x, _ = FitSARIMAXModel(
+            mean_horizontal, _ = FitSARIMAXModel(
                 x=horizontal_positions,
                 p=confidences,
                 pcutoff=minimum_confidence,
@@ -155,7 +155,7 @@ def fit_keypoint_distance(
                 ARdegree=autoregressive_degree,
                 MAdegree=moving_average_degree,
             )
-            mean_y, _ = FitSARIMAXModel(
+            mean_vertical, _ = FitSARIMAXModel(
                 x=vertical_positions,
                 p=confidences,
                 pcutoff=minimum_confidence,
@@ -164,8 +164,8 @@ def fit_keypoint_distance(
                 MAdegree=moving_average_degree,
             )
         except Exception:  # noqa: BLE001 -- a keypoint whose fit raises yields NaN, like one with too few points.
-            return np.full(horizontal_positions.shape, np.nan, dtype=np.float64)
-    return np.sqrt((horizontal_positions - mean_x) ** 2 + (vertical_positions - mean_y) ** 2)
+            return np.full(horizontal_positions.shape, fill_value=np.nan, dtype=np.float64)
+    return np.sqrt((horizontal_positions - mean_horizontal) ** 2 + (vertical_positions - mean_vertical) ** 2)
 
 
 def fitting_outlier_indices(

@@ -37,6 +37,9 @@ _REEXTRACTION_ARTIFACT_PATTERNS: tuple[str, ...] = (
 )
 """The labeled-data file patterns removed before a video is re-extracted, covering both frames and their labels."""
 
+_MAXIMUM_HEADER_READ_THREADS: int = 8
+"""The largest thread pool used to read video container headers concurrently while sizing the aggregate bar."""
+
 
 @dataclass(frozen=True, slots=True)
 class FrameExtractionSummary:
@@ -174,11 +177,12 @@ def extract_frames_kmeans(
 
     Raises:
         FileNotFoundError: If ``config_path`` does not point to an existing file.
-        ValueError: If ``overwrite`` and ``reset`` are both set, if ``clustering_stride`` is below one, or if
-            ``frames_per_video`` or ``total_frame_budget`` is set below one (other than the -1 sentinel). Also raised
-            when budgeted sampling is requested without a valid ``numframes2pick``, when config.yaml defines no
-            ``video_sets``, or when two selected videos share a file-name stem and would collide in the labeled-data
-            tree.
+        ValueError: If ``overwrite`` and ``reset`` are both set, if ``exclusive`` is set without any
+            ``requested_videos``, if ``clustering_stride`` is below one, or if ``frames_per_video`` or
+            ``total_frame_budget`` is set below one (other than the -1 sentinel). Also raised when budgeted sampling is
+            requested without a valid ``numframes2pick``, when config.yaml defines no ``video_sets``, or when an
+            exclusive run's requested videos match no registered project video. It is also raised when two selected
+            videos share a file-name stem and would collide in the labeled-data tree.
     """
     config_path = config_path.resolve()
     if overwrite and reset:
@@ -201,7 +205,7 @@ def extract_frames_kmeans(
     # normalized here, single-threaded, and persisted before any worker starts. The -1 sentinel leaves numframes2pick
     # untouched.
     configuration = normalize_project_config(
-        config_path, frames_per_video=frames_per_video, error_context="Unable to extract frames."
+        config_path=config_path, frames_per_video=frames_per_video, error_context="Unable to extract frames."
     )
     start_fraction = float(configuration.get("start", 0))
     stop_fraction = float(configuration.get("stop", 1))
@@ -238,7 +242,7 @@ def extract_frames_kmeans(
             pinned_videos = tuple(matched_videos)
     # Two videos that share a stem would map to one labeled-data folder, so their frame counts and writes collide;
     # this is checked before sampling, whose per-video accounting reads those same stem-keyed folders.
-    ensure_unique_video_stems(videos, error_context="Unable to extract frames.")
+    ensure_unique_video_stems(videos=videos, error_context="Unable to extract frames.")
 
     project_directory_path = config_path.parent
     if reset:
@@ -278,7 +282,7 @@ def extract_frames_kmeans(
             )
             raise ValueError(message)
         groups = (
-            group_videos(videos, group_by_pattern=group_by_pattern)
+            group_videos(videos=videos, group_by_pattern=group_by_pattern)
             if (balance_groups or group_by_pattern is not None)
             else None
         )
@@ -342,7 +346,7 @@ def extract_frames_kmeans(
     # honors the same project-wide cropping toggle inference and outlier extraction do.
     crop_frames = bool(configuration.get("cropping", False))
 
-    # Each worker decodes one video pinned to a disjoint core block, streaming progress to the shared aggregate bar.
+    # Decode one video per worker, pinned to a disjoint core block, streaming progress to the shared aggregate bar.
     def build_tasks(reporting_queue: Any | None) -> list[tuple[Any, ...]]:
         """Packs one work item per selected video, embedding the progress queue only when progress is displayed."""
         return [
@@ -566,7 +570,7 @@ def _count_clustering_frames(
     # Opening a container to read its header is I/O-bound and releases the GIL, so the header reads overlap across a
     # small thread pool rather than serializing one video at a time. executor.map preserves the input order.
     frame_totals: dict[int, int] = {}
-    with ThreadPoolExecutor(max_workers=min(len(videos), 8)) as executor:
+    with ThreadPoolExecutor(max_workers=min(len(videos), _MAXIMUM_HEADER_READ_THREADS)) as executor:
         for video_index, frame_count in enumerate(executor.map(_frame_count, videos)):
             start_index, end_index = math.floor(frame_count * start_fraction), math.ceil(frame_count * stop_fraction)
             frame_totals[video_index] = max(1, len(range(start_index, end_index, clustering_stride)))
@@ -628,7 +632,7 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
             contextlib.redirect_stderr(null_stream),
         ):
             deeplabcut.extract_frames(
-                str(config_path),
+                config=str(config_path),
                 mode="automatic",
                 algo="kmeans",
                 # Applies the per-video crop stored in config.yaml only when the project is configured to crop.

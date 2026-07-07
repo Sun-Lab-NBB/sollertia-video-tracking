@@ -11,10 +11,9 @@ from .dataset import (
     build_conditional_top_down_conditions,
 )
 from .pipeline import TrainingSummary, train_model, detect_fixed_input_size
+from ..hardware import Toggle, AmpMode
 from .evaluation import SplitMetrics, EvaluationSummary, evaluate_trained_model
 from .optimization import (
-    Toggle,
-    AmpMode,
     MultiGpuStrategy,
     OptimizationProfile,
     apply_runtime_optimizations,

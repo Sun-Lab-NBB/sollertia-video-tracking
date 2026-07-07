@@ -1,15 +1,19 @@
 """Provides the shared assets the k-means and outlier frame-extraction pipelines both build on."""
 
+from __future__ import annotations
+
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from pathlib import Path
-from collections.abc import Callable, Iterator
 import multiprocessing
 
 from ruamel.yaml import YAML
 
 from .progress import AggregateBar
 from .cpu_allocation import pin_worker_to_cores
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
 
 
 def normalize_project_config(config_path: Path, *, frames_per_video: int, error_context: str) -> Any:
@@ -179,8 +183,8 @@ def select_registered_videos(
         requested_videos: The specific project video files the caller named.
 
     Returns:
-        A tuple of the matched registered video paths, deduplicated and in registered order, and the list of requested
-        paths, as given, that matched no registered video.
+        A tuple of the matched registered video paths, deduplicated and in registered order, and the deduplicated
+        requested paths, unresolved, that matched no registered video.
     """
     resolved_registered = {video: Path(video).resolve() for video in registered_videos}
     matched_videos: set[str] = set()

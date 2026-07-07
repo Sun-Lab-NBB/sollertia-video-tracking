@@ -113,7 +113,8 @@ def _select_kmeans_frames(
         progress: The ``tqdm``-compatible iteration wrapper used to report progress.
 
     Returns:
-        The selected frame indices, one representative per non-empty cluster.
+        The selected frame indices, one representative per non-empty cluster, or all candidate indices unchanged when
+        there are fewer candidates than ``cluster_count``.
 
     Raises:
         ValueError: If ``resize_width`` would upsample the frames, matching DeepLabCut's own guard.
@@ -182,7 +183,7 @@ def _resolve_candidate_indices(
     if frame_indices is None:
         return np.arange(start_index, stop_index, sampling_step, dtype=np.int64)
     candidate_indices = np.asarray(frame_indices, dtype=np.int64)
-    # Mirror DeepLabCut's strict-inequality window crop so the flagged frames match the upstream tool exactly.
+    # Mirrors DeepLabCut's strict-inequality window crop so the flagged frames match the upstream tool exactly.
     return candidate_indices[(candidate_indices > start_index) & (candidate_indices < stop_index)]
 
 
@@ -289,7 +290,7 @@ def _downsample_frame(
         The downsampled frame as a two-dimensional array, color channels stacked horizontally when in color.
     """
     image = img_as_ubyte(
-        cv2.resize(frame, None, fx=downsample_ratio, fy=downsample_ratio, interpolation=cv2.INTER_NEAREST)
+        cv2.resize(frame, dsize=None, fx=downsample_ratio, fy=downsample_ratio, interpolation=cv2.INTER_NEAREST)
     )
     if cluster_in_color:
         return np.hstack([image[:, :, 0], image[:, :, 1], image[:, :, 2]])
@@ -330,9 +331,7 @@ def _cluster_and_pick(
     kmeans.fit(centered)
 
     generator = np.random.default_rng()
-    selected: list[int] = []
-    for cluster_id in range(cluster_count):
-        members = np.flatnonzero(kmeans.labels_ == cluster_id)
-        if len(members) > 0:
-            selected.append(int(candidate_indices[members[generator.integers(len(members))]]))
-    return selected
+    cluster_members = (np.flatnonzero(kmeans.labels_ == cluster_id) for cluster_id in range(cluster_count))
+    return [
+        int(candidate_indices[members[generator.integers(len(members))]]) for members in cluster_members if members.size
+    ]

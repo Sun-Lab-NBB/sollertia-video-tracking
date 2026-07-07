@@ -20,6 +20,7 @@ from deeplabcut.refine_training_dataset import outlier_frames as dlc_outlier_fra
 
 from .progress import make_progress_reporter
 from .utilities import (
+    extracted_frame_paths,
     iter_pinned_extraction,
     normalize_project_config,
     select_registered_videos,
@@ -46,7 +47,7 @@ _CROP_FIELD_COUNT: int = 4
 
 
 class ExtractionAlgorithm(StrEnum):
-    """The supported algorithms for selecting which flagged candidate frames to extract."""
+    """Defines the supported algorithms for selecting which flagged candidate frames to extract."""
 
     KMEANS = "kmeans"
     """Clusters the flagged candidates and keeps one representative frame per cluster."""
@@ -55,14 +56,14 @@ class ExtractionAlgorithm(StrEnum):
 
 
 class TrackingMethod(StrEnum):
-    """The supported multi-animal trackers that may have produced a video's predictions."""
+    """Defines the supported multi-animal trackers that may have produced a video's predictions."""
 
     BOX = "box"
-    """The bounding-box tracker."""
+    """Identifies the bounding-box tracker."""
     SKELETON = "skeleton"
-    """The skeleton tracker."""
+    """Identifies the skeleton tracker."""
     ELLIPSE = "ellipse"
-    """The ellipse tracker."""
+    """Identifies the ellipse tracker."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,8 +94,8 @@ class OutlierExtractionSummary:
     total_core_count: int
     """The total number of CPU cores available on the machine."""
     candidate_frame_count: int
-    """The total number of putative outlier frames flagged across all videos that had candidates, i.e. the videos
-    submitted for extraction."""
+    """The number of candidate frames submitted for extraction across all videos that had candidates, after any
+    ``candidate_step`` sub-sampling of the flagged frames."""
     extracted_frame_count: int
     """The total number of frames freshly written into the project's labeled-data tree across all videos."""
     unanalyzed_videos: tuple[str, ...] = ()
@@ -163,9 +164,9 @@ def extract_outlier_frames_parallel(
 
     Reads the predictions a trained model already wrote for each video (which must therefore be analyzed first),
     flags putative outlier frames with the chosen algorithm, and pulls a ``numframes2pick`` budget of them into each
-    video's ``labeled-data`` directory for correction. The run has two phases: detection loads every video's
+    video's ``labeled-data`` directory for correction. The run has two phases. Detection loads every video's
     predictions and computes its outlier candidates, fanning the ``fitting`` algorithm's per-keypoint SARIMAX fits out
-    across a process pool that spans the whole run; extraction then decodes and selects the frames one video per pinned
+    across a process pool that spans the whole run. Extraction then decodes and selects the frames one video per pinned
     worker. Only videos already registered in the project's config.yaml are refined, matched by resolved path like the
     k-means extractor, so the workers only ever read the configuration file and never race on writing it. A single bad
     video is recorded in the returned summary rather than aborting the run.
@@ -222,10 +223,10 @@ def extract_outlier_frames_parallel(
     Raises:
         FileNotFoundError: If ``config_path`` does not point to an existing file.
         ValueError: If ``outlier_algorithm`` or ``extraction_algorithm`` is unknown, if ``frames_per_video`` is set
-            below one (other than the -1 sentinel), if ``candidate_step`` is below one, if ``outlier_algorithm`` is
-            ``"list"`` without ``explicit_frame_indices``, if the comparison bodyparts resolve to none, if the project
-            lists no videos in ``video_sets``, if no requested video matches a registered project video, or if two
-            selected videos share a file-name stem and would collide in the labeled-data tree.
+            below one (other than the -1 sentinel), if ``candidate_step`` is below one, or if ``outlier_algorithm`` is
+            ``"list"`` without ``explicit_frame_indices``. Also raised if the comparison bodyparts resolve to none, if
+            the project lists no videos in ``video_sets``, or if no requested video matches a registered project video.
+            It is also raised if two selected videos share a file-name stem and would collide in the labeled-data tree.
     """
     config_path = config_path.resolve()
     if not config_path.is_file():
@@ -259,7 +260,7 @@ def extract_outlier_frames_parallel(
         raise ValueError(message)
 
     normalize_project_config(
-        config_path, frames_per_video=frames_per_video, error_context="Unable to extract outlier frames."
+        config_path=config_path, frames_per_video=frames_per_video, error_context="Unable to extract outlier frames."
     )
     configuration = auxiliaryfunctions.read_config(str(config_path))
 
@@ -271,8 +272,8 @@ def extract_outlier_frames_parallel(
         raise ValueError(message)
     resolved_tracking_method = auxfun_multianimal.get_track_method(configuration, track_method=tracking_method or "")
     scorer, _ = auxiliaryfunctions.get_scorer_name(
-        configuration,
-        shuffle_index,
+        cfg=configuration,
+        shuffle=shuffle_index,
         trainFraction=configuration["TrainingFraction"][training_set_index],
         modelprefix=model_prefix,
         snapshot_index=pose_snapshot_index,
@@ -414,9 +415,9 @@ def _detect_all_videos(
 
     for video in video_paths:
         video_predictions_directory = Path(video).parent
-        # Detection compute is inside the try alongside the load, so a malformed prediction table (empty, missing a
-        # likelihood level, or a column count the fitting reshape rejects) is recorded per-video rather than aborting
-        # the whole run, upholding the summary's per-video error contract.
+        # Detection compute is inside the try alongside the load. A malformed prediction table (empty, missing a
+        # likelihood level, or a column count the fitting reshape rejects) is therefore recorded per-video rather than
+        # aborting the whole run, upholding the summary's per-video error contract.
         try:
             predictions = _load_sliced_predictions(
                 video=video,
@@ -439,7 +440,7 @@ def _detect_all_videos(
         except FileNotFoundError:
             unanalyzed_videos.append(video)
             continue
-        except Exception:  # noqa: BLE001 -- a missing or malformed prediction table is recorded, never aborting the rest.
+        except Exception:  # noqa: BLE001 -- a malformed prediction table is recorded per-video, not raised.
             errors.append((video, "detection error:\n" + traceback.format_exc()))
             continue
 
@@ -813,7 +814,7 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
         )
 
         output_directory = Path(configuration["project_path"]) / "labeled-data" / Path(video).stem
-        frame_count_before = _count_extracted_frames(output_directory)
+        frame_count_before = _count_directory_frames(output_directory)
 
         # Swap DeepLabCut's random-seek k-means reader for the streaming one, routing its per-candidate progress to the
         # parent's aggregate bar. The queue is None when progress is disabled, leaving a plain (stream-suppressed) bar.
@@ -851,11 +852,11 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
     except Exception:  # noqa: BLE001 -- one bad video must not kill the pool; the traceback is returned as status.
         return video, 0, "error:\n" + traceback.format_exc()
     else:
-        frames_written = _count_extracted_frames(output_directory) - frame_count_before
+        frames_written = _count_directory_frames(output_directory) - frame_count_before
         return video, max(0, frames_written), "ok"
 
 
-def _count_extracted_frames(output_directory: Path) -> int:
+def _count_directory_frames(output_directory: Path) -> int:
     """Counts the extracted image frames in a labeled-data directory, ignoring the predicted-label overlays.
 
     Args:
@@ -864,9 +865,7 @@ def _count_extracted_frames(output_directory: Path) -> int:
     Returns:
         The number of ``img*.png`` frames that are not ``*labeled.png`` prediction overlays.
     """
-    if not output_directory.exists():
-        return 0
-    return sum(1 for frame in output_directory.glob("img*.png") if not frame.stem.endswith("labeled"))
+    return len(extracted_frame_paths(output_directory))
 
 
 def _skip_video_registration(**_kwargs: Any) -> bool:

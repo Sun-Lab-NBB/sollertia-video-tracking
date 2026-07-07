@@ -1,10 +1,15 @@
 """Provides the aggregate progress bar and the DeepLabCut tqdm shim used to report frame-extraction progress."""
 
-from typing import Any, TextIO
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
 import contextlib
-from collections.abc import Callable, Iterable
 
 from ..reporting import LiveBar, format_duration
+
+if TYPE_CHECKING:
+    from typing import TextIO
+    from collections.abc import Callable, Iterable
 
 _MAX_PROGRESS_UPDATES_PER_VIDEO: int = 100
 """The approximate number of progress messages each worker targets per video. It sets the base per-video update stride
@@ -153,7 +158,7 @@ class AggregateBar(LiveBar):
             The composed active line body.
         """
         frames_read = min(sum(self._frames.values()), self._grand_frame_total)
-        bar, percent = self._bar(frames_read / self._grand_frame_total)
+        bar, percent = self._bar(fraction=frames_read / self._grand_frame_total)
         # Videos that have announced their decode but are not yet done are actively working; surfacing the count tells
         # the operator work is in flight even while the aggregate frame count holds steady.
         active = max(0, len(self._frames) - self._videos_done)

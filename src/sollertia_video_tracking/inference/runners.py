@@ -1,21 +1,5 @@
-"""Provides thin optimization wrappers over DeepLabCut's inference runners for mixed precision and channels-last.
+"""Provides thin optimization wrappers over DeepLabCut's inference runners for mixed precision and channels-last."""
 
-DeepLabCut builds and configures its inference runners through ``get_pose_inference_runner`` and
-``get_detector_inference_runner`` (preprocessors, postprocessors, the optional detector, and snapshot loading), then
-drives them from ``analyze_videos`` (which also handles snapshot selection, output naming, and multi-animal assembly).
-Rather than reimplement any of that, this module patches those two builder functions for the duration of an
-``analyze_videos`` call so every runner DeepLabCut builds is enhanced in place. Its forward pass is swapped onto our
-own autocast context and, optionally, the channels-last memory format and ``torch.compile``. Conditional-top-down
-runners are the exception, left at stock precision. Two DeepLabCut behaviors make
-this worthwhile: its built-in autocast is float16-only (our models train in bfloat16), and it calls
-``torch.autocast(device_type=str(self.device))`` with a device string like ``"cuda:0"``, which is not a valid autocast
-device type. We disable the stock autocast and apply our own with the correct device type and dtype.
-
-Because these wrappers depend on the internal structure of DeepLabCut's inference runners, the DeepLabCut version is
-pinned exactly in ``pyproject.toml`` and must be re-verified against any new release.
-"""
-
-import sys
 from typing import Any
 import warnings
 from contextlib import AbstractContextManager, nullcontext, contextmanager
@@ -30,6 +14,7 @@ from deeplabcut.pose_estimation_pytorch.runners.inference import (
     DetectorInferenceRunner,
 )
 
+from ..hardware import warn
 from .optimization import InferenceProfile
 
 
@@ -42,6 +27,14 @@ def patch_dlc_runner_builders(profile: InferenceProfile) -> Iterator[None]:
     those two functions with versions that build the stock runner and then enhance it in place with the profile's
     optimizations, restoring the originals on exit. It affects only the calling process, so each worker patches its own
     interpreter.
+
+    Notes:
+        Wrapping the stock builders, rather than reimplementing DeepLabCut's runner setup, is worthwhile because
+        DeepLabCut's own autocast is float16-only while these models train in bfloat16, and DeepLabCut calls
+        ``torch.autocast(device_type=str(self.device))`` with a device string like ``"cuda:0"`` that is not a valid
+        autocast device type. The stock autocast is disabled and replaced with one carrying the correct device type and
+        dtype. Because the wrappers depend on the internal structure of DeepLabCut's inference runners, the DeepLabCut
+        version is pinned exactly in ``pyproject.toml`` and must be re-verified against any new release.
 
     Args:
         profile: The resolved optimization profile applied to every runner built while the patch is active.
@@ -97,7 +90,7 @@ def _optimize_inference_runner(runner: InferenceRunner, profile: InferenceProfil
         The same runner instance, enhanced in place.
     """
     if isinstance(runner, CTDInferenceRunner):
-        _warn(
+        warn(
             "Conditional-top-down inference is not accelerated by the optimized runner and will run at stock "
             "precision; its frame-to-frame tracking forward pass is left unmodified."
         )
@@ -209,13 +202,3 @@ def _build_detector_predict(
         ]
 
     return predict
-
-
-def _warn(message: str) -> None:
-    """Writes a non-fatal warning to the standard error stream.
-
-    Args:
-        message: The warning text to emit, without the ``WARNING:`` prefix or trailing newline.
-    """
-    sys.stderr.write(f"WARNING: {message}\n")
-    sys.stderr.flush()

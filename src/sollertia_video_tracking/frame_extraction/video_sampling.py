@@ -31,7 +31,8 @@ class VideoSamplingPlan:
     per_group: tuple[tuple[str, int, int, int, int], ...] = ()
     """The per-group breakdown when grouping is used, as ``(group, existing_frame_count, added_video_count,
     projected_frame_count, available_video_count)`` tuples in canonical group order, or empty when the selection was
-    not grouped. ``available_video_count`` is how many un-extracted videos the group had before this pass."""
+    not grouped or the budget was already met. ``available_video_count`` is how many un-extracted videos the group had
+    before this pass."""
     always_included_overshoot: bool = False
     """Indicates whether the always-included videos alone exceeded the pass budget, so the projected total overshoots
     the target by the surplus always-included videos."""
@@ -116,7 +117,7 @@ def plan_video_sampling(
         )
         selected_videos = tuple(selected_video_list)
     elif eligible_pinned_videos:
-        selected_videos = _select_uniform_with_pins(
+        selected_videos = _select_uniform_with_pinned_videos(
             unextracted_videos=unextracted_videos,
             needed_video_count=needed_video_count,
             pinned_videos=eligible_pinned_videos,
@@ -124,7 +125,7 @@ def plan_video_sampling(
         )
     else:
         generator = Random(random_seed)  # noqa: S311 -- video sampling is not security-sensitive.
-        selected_videos = tuple(generator.sample(unextracted_videos, needed_video_count))
+        selected_videos = tuple(generator.sample(population=unextracted_videos, k=needed_video_count))
 
     projected_frame_count = existing_frame_count + len(selected_videos) * frames_per_video_count
     return VideoSamplingPlan(
@@ -137,29 +138,6 @@ def plan_video_sampling(
         per_group=per_group,
         always_included_overshoot=always_included_overshoot,
     )
-
-
-def _select_uniform_with_pins(
-    unextracted_videos: list[str], needed_video_count: int, pinned_videos: list[str], random_seed: int | None
-) -> tuple[str, ...]:
-    """Selects the pinned videos and fills the remaining budget with a uniform random draw over the rest.
-
-    Args:
-        unextracted_videos: The not-yet-extracted candidate videos.
-        needed_video_count: The number of videos the budget calls for this pass.
-        pinned_videos: The eligible pinned videos to always include, already deduplicated.
-        random_seed: The seed for the random fill draw, or None for a nondeterministic draw.
-
-    Returns:
-        The selected videos, the pinned ones first, in a tuple.
-    """
-    generator = Random(random_seed)  # noqa: S311 -- video sampling is not security-sensitive.
-    selected_videos = list(pinned_videos)
-    pinned_video_set = set(pinned_videos)
-    fill_candidate_videos = [video for video in unextracted_videos if video not in pinned_video_set]
-    fill_video_count = min(max(0, needed_video_count - len(selected_videos)), len(fill_candidate_videos))
-    selected_videos.extend(generator.sample(fill_candidate_videos, fill_video_count))
-    return tuple(selected_videos)
 
 
 def _select_balanced(
@@ -235,7 +213,7 @@ def _select_balanced(
         if available_videos_by_group[group_key]
     ]
     heapq.heapify(heap)
-    while remaining_video_budget > 0 and heap:
+    while remaining_video_budget and heap:
         _, group_key = heapq.heappop(heap)
         video = available_videos_by_group[group_key].pop(0)
         selected_videos.append(video)
@@ -256,3 +234,26 @@ def _select_balanced(
         for group_key in group_keys
     )
     return selected_videos, per_group
+
+
+def _select_uniform_with_pinned_videos(
+    unextracted_videos: list[str], needed_video_count: int, pinned_videos: list[str], random_seed: int | None
+) -> tuple[str, ...]:
+    """Selects the pinned videos and fills the remaining budget with a uniform random draw over the rest.
+
+    Args:
+        unextracted_videos: The not-yet-extracted candidate videos.
+        needed_video_count: The number of videos the budget calls for this pass.
+        pinned_videos: The eligible pinned videos to always include, already deduplicated.
+        random_seed: The seed for the random fill draw, or None for a nondeterministic draw.
+
+    Returns:
+        The selected videos, with the pinned ones first.
+    """
+    generator = Random(random_seed)  # noqa: S311 -- video sampling is not security-sensitive.
+    selected_videos = list(pinned_videos)
+    pinned_video_set = set(pinned_videos)
+    fill_candidate_videos = [video for video in unextracted_videos if video not in pinned_video_set]
+    fill_video_count = min(max(0, needed_video_count - len(selected_videos)), len(fill_candidate_videos))
+    selected_videos.extend(generator.sample(population=fill_candidate_videos, k=fill_video_count))
+    return tuple(selected_videos)

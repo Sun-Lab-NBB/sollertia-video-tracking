@@ -3,12 +3,9 @@
 import re
 from pathlib import Path
 
-# A date is recognized only when it is anchored by an unambiguous signal, never by a lone numeric run. A name
-# component that merely contains a year-like number (a token numbered 2019, a "Cohort2020" prefix) or a run of
-# counters (a session_trial_rep triple) is therefore preserved rather than mistaken for a date. Two anchors are
-# trusted: a full four-digit year and an alphabetic month name. Every supported span carries one of these, so purely
-# two-digit numeric dates are left to the pattern override. Grouping only locates and removes the date, so day-first
-# and month-first orders are both accepted wherever they cannot be told apart.
+# Every date pattern below is anchored on a full four-digit year or an alphabetic month name, never on a lone numeric
+# run. A component that merely contains a year-like number or a run of counters is therefore preserved rather than
+# mistaken for a date. Two-digit-only numeric dates are left to the pattern override in ``group_videos``.
 _YEAR: str = r"(?:19|20)\d{2}"
 """Matches a full four-digit year in the 1900s or 2000s."""
 _MONTH: str = r"(?:0[1-9]|1[0-2])"
@@ -32,7 +29,7 @@ _FUSED_NAMED_DATE: re.Pattern[str] = re.compile(
     rf"^(?:{_DAY_LOOSE}(?:{_MONTH_NAMES}){_YEAR}"
     rf"|(?:{_MONTH_NAMES}){_DAY_LOOSE}?{_YEAR}"
     rf"|{_YEAR}(?:{_MONTH_NAMES}){_DAY_LOOSE}?)$",
-    re.IGNORECASE,
+    flags=re.IGNORECASE,
 )
 """Matches a single fused component carrying a month name and a full year with an optional day, in any order that keeps
 the name and the year adjacent to the month (``15Jan2024``, ``Jan2024``, ``2024Jan15``)."""
@@ -47,7 +44,7 @@ _DAY_LOOSE_PIECE: re.Pattern[str] = re.compile(rf"^{_DAY_LOOSE}$")
 """Matches a whole component that is exactly a one- or two-digit day."""
 _TWO_DIGIT_PIECE: re.Pattern[str] = re.compile(r"^\d\d$")
 """Matches a whole component that is exactly two digits, used for a two-digit year beside a month name."""
-_MONTH_NAME_PIECE: re.Pattern[str] = re.compile(rf"^(?:{_MONTH_NAMES})$", re.IGNORECASE)
+_MONTH_NAME_PIECE: re.Pattern[str] = re.compile(rf"^(?:{_MONTH_NAMES})$", flags=re.IGNORECASE)
 """Matches a whole component that is exactly a full or abbreviated month name."""
 
 
@@ -129,8 +126,8 @@ def _infer_group_key(stem: str) -> str | None:
     # The ISO 8601 date-time separator ``T`` is a letter, so a timestamp like ``20240115T093000`` would otherwise fuse
     # into one non-numeric component and hide the date. Splitting only a ``T`` that sits between digits exposes the date
     # without disturbing a name that merely contains a ``T`` (for example ``MT_3`` or ``T3``).
-    normalized = re.sub(r"(?<=\d)T(?=\d)", "_", stem)
-    pieces = [piece for piece in re.split(r"[^A-Za-z0-9]+", normalized) if piece]
+    normalized = re.sub(pattern=r"(?<=\d)T(?=\d)", repl="_", string=stem)
+    pieces = [piece for piece in re.split(pattern=r"[^A-Za-z0-9]+", string=normalized) if piece]
     if not pieces:
         return None
 
@@ -157,9 +154,9 @@ def _find_date_span(pieces: list[str]) -> tuple[int, int] | None:
     """Locates the first date span in a list of delimiter-bounded name components.
 
     Scans the components left to right and returns the first span that carries a trusted anchor: a four-digit year or a
-    month name. At each position a three-component span (a numeric or named year-month-day triple) is preferred over a
-    two-component span (a month name beside a year), which is preferred over a one-component span (a compact all-digit
-    date or a fused named-month date), so the longest date rooted at that position wins.
+    month name. At each position the longest date rooted there wins: a three-component span (a numeric or named
+    year-month-day triple) is preferred over a two-component span (a month name beside a year). A two-component span is
+    in turn preferred over a one-component span (a compact all-digit date or a fused named-month date).
 
     Args:
         pieces: The delimiter-bounded components of a file-name stem, in order.
@@ -181,7 +178,7 @@ def _find_date_span(pieces: list[str]) -> tuple[int, int] | None:
     return None
 
 
-def _valid_month_day_pair(first: str, second: str) -> bool:
+def _is_month_day_pair(first: str, second: str) -> bool:
     """Reports whether two two-digit components form a month and a day in either order.
 
     Args:
@@ -212,9 +209,9 @@ def _is_numeric_date_triple(trio: tuple[str, str, str]) -> bool:
     first, middle, last = trio
     if not (first.isdigit() and middle.isdigit() and last.isdigit()):
         return False
-    if _YEAR_PIECE.match(first) and _valid_month_day_pair(middle, last):
+    if _YEAR_PIECE.match(first) and _is_month_day_pair(middle, last):
         return True
-    return bool(_YEAR_PIECE.match(last) and _valid_month_day_pair(first, middle))
+    return bool(_YEAR_PIECE.match(last) and _is_month_day_pair(first, middle))
 
 
 def _is_named_date_triple(trio: tuple[str, str, str]) -> bool:

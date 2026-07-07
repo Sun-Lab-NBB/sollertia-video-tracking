@@ -1,29 +1,29 @@
 """Provides device capability detection and the resolved optimization profile that tunes DeepLabCut training."""
 
 import os
-import sys
 from typing import Literal
 from dataclasses import dataclass
 
 import torch
 
-type Toggle = Literal["auto", "on", "off"]
-"""The tri-state control for one optimization: use the capability-detected default, force it on, or force it off."""
-
-type AmpMode = Literal["auto", "off", "bf16", "fp16"]
-"""The automatic-mixed-precision selection: capability-detected default, disabled, or a forced compute dtype."""
+from ..hardware import (
+    DEFAULT_RESERVED_CPU_THREADS,
+    Toggle,
+    AmpMode,
+    warn,
+    resolve_toggle,
+    precision_label,
+    supports_ampere,
+    resolve_amp_dtype,
+    apply_backend_flags,
+    resolve_target_device,
+)
 
 type MultiGpuStrategy = Literal["ddp", "dp", "single"]
 """The resolved multi-GPU execution strategy: DistributedDataParallel, DataParallel, or a single device."""
 
-_AMPERE_CAPABILITY: tuple[int, int] = (8, 0)
-"""The minimum CUDA compute capability (Ampere) that provides TF32 and native bfloat16 tensor-core acceleration."""
-
 _MIN_MULTI_GPU_COUNT: int = 2
 """The minimum number of selected GPUs required to run any multi-GPU strategy rather than a single device."""
-
-_DEFAULT_RESERVED_CPU_THREADS: int = 2
-"""The number of CPU cores held back from the automatic dataloader-worker and CPU-thread budgets for other work."""
 
 _MAX_AUTO_DATALOADER_WORKERS: int = 8
 """The upper bound on the automatically chosen number of dataloader workers per training process."""
@@ -93,7 +93,7 @@ class OptimizationProfile:
             A compact description of the device, parallelism, precision, and dataloader settings.
         """
         where = f"CUDA {list(self.gpus)} ({self.multi_gpu_strategy})" if self.device == "cuda" else self.device.upper()
-        precision = "fp32" if self.amp_dtype is None else str(self.amp_dtype).removeprefix("torch.")
+        precision = precision_label(self.amp_dtype)
         extras = [
             name
             for name, enabled in (
@@ -148,14 +148,15 @@ def resolve_optimization_profile(
     Returns:
         The resolved ``OptimizationProfile`` describing exactly what to apply to the run.
     """
-    base_device, resolved_gpus = _resolve_target_device(device=device, gpus=gpus)
+    base_device, resolved_gpus = resolve_target_device(device=device, gpus=gpus, role="training")
     strategy = _resolve_multi_gpu(multi_gpu=multi_gpu, gpus=resolved_gpus)
-    amp_dtype, use_gradient_scaler = _resolve_amp(amp=amp, device=base_device, gpus=resolved_gpus)
+    amp_dtype = resolve_amp_dtype(amp=amp, device=base_device, gpus=resolved_gpus)
+    use_gradient_scaler = amp_dtype is torch.float16
     if strategy == "dp" and amp_dtype is not None:
         # Mixed precision cannot take effect under DataParallel: autocast state is thread-local and does not reach the
         # per-GPU replica threads DataParallel spawns, so the forward runs in float32 regardless. Disable it here so
         # the resolved profile reports the precision that actually runs and drops the then-pointless gradient scaler.
-        _warn(
+        warn(
             "Mixed precision has no effect under DataParallel (--multi-gpu dp) because autocast does not reach its "
             "per-GPU replica threads; training would run in float32. Disabling mixed precision. Use DDP (the default "
             "when two or more GPUs are selected) to combine mixed precision with multi-GPU training."
@@ -163,17 +164,17 @@ def resolve_optimization_profile(
         amp_dtype, use_gradient_scaler = None, False
 
     on_cuda = base_device == "cuda"
-    resolved_tf32 = _resolve_toggle(value=tf32, auto=_resolve_tf32_support(resolved_gpus)) if on_cuda else False
+    resolved_tf32 = resolve_toggle(value=tf32, auto=supports_ampere(resolved_gpus)) if on_cuda else False
 
-    resolved_benchmark = _resolve_toggle(value=cudnn_benchmark, auto=fixed_input_size) if on_cuda else False
+    resolved_benchmark = resolve_toggle(value=cudnn_benchmark, auto=fixed_input_size) if on_cuda else False
     if resolved_benchmark and not fixed_input_size:
-        _warn(
+        warn(
             "cuDNN benchmark was forced on, but the shuffle's training transform was not detected to use a single "
             "fixed input size. DeepLabCut's dynamic-resize augmentation can make this slower, and it disables "
             "deterministic training."
         )
 
-    resolved_pin_memory = _resolve_toggle(value=pin_memory, auto=on_cuda) if on_cuda else False
+    resolved_pin_memory = resolve_toggle(value=pin_memory, auto=on_cuda) if on_cuda else False
 
     world_size = len(resolved_gpus) if strategy == "ddp" else 1
     if dataloader_workers >= 0:
@@ -187,9 +188,9 @@ def resolve_optimization_profile(
         workers = _choose_dataloader_worker_count(world_size=world_size)
 
     # Restore intra-op threading for CPU training (the package pins OMP_NUM_THREADS=1 for the extraction workers),
-    # deliberately holding back _DEFAULT_RESERVED_CPU_THREADS cores so other work stays responsive rather than
+    # deliberately holding back DEFAULT_RESERVED_CPU_THREADS cores so other work stays responsive rather than
     # saturating the machine.
-    cpu_threads = max(1, (os.cpu_count() or 1) - _DEFAULT_RESERVED_CPU_THREADS) if base_device == "cpu" else None
+    cpu_threads = max(1, (os.cpu_count() or 1) - DEFAULT_RESERVED_CPU_THREADS) if base_device == "cpu" else None
 
     return OptimizationProfile(
         device=base_device,
@@ -199,7 +200,7 @@ def resolve_optimization_profile(
         use_gradient_scaler=use_gradient_scaler,
         tf32=resolved_tf32,
         cudnn_benchmark=resolved_benchmark,
-        torch_compile=_resolve_toggle(value=torch_compile, auto=False),
+        torch_compile=resolve_toggle(value=torch_compile, auto=False),
         dataloader_workers=workers,
         pin_memory=resolved_pin_memory,
         cpu_threads=cpu_threads,
@@ -216,27 +217,9 @@ def apply_runtime_optimizations(profile: OptimizationProfile) -> None:
     Args:
         profile: The resolved optimization profile whose global flags should be applied.
     """
-    if profile.device == "cuda":
-        torch.backends.cuda.matmul.allow_tf32 = profile.tf32
-        torch.backends.cudnn.allow_tf32 = profile.tf32
-        if profile.tf32:
-            torch.set_float32_matmul_precision("high")
-        if profile.cudnn_benchmark:
-            torch.backends.cudnn.benchmark = True
-            torch.backends.cudnn.deterministic = False
-
+    apply_backend_flags(device=profile.device, tf32=profile.tf32, cudnn_benchmark=profile.cudnn_benchmark)
     if profile.cpu_threads is not None:
         torch.set_num_threads(profile.cpu_threads)
-
-
-def _warn(message: str) -> None:
-    """Writes a non-fatal warning to the standard error stream.
-
-    Args:
-        message: The warning text to emit, without the ``WARNING:`` prefix or trailing newline.
-    """
-    sys.stderr.write(f"WARNING: {message}\n")
-    sys.stderr.flush()
 
 
 def _choose_dataloader_worker_count(world_size: int) -> int:
@@ -248,63 +231,9 @@ def _choose_dataloader_worker_count(world_size: int) -> int:
     Returns:
         The number of dataloader workers each process should use.
     """
-    usable = (os.cpu_count() or 1) - _DEFAULT_RESERVED_CPU_THREADS
+    usable = (os.cpu_count() or 1) - DEFAULT_RESERVED_CPU_THREADS
     per_rank = usable // max(1, world_size)
     return max(0, min(_MAX_AUTO_DATALOADER_WORKERS, per_rank))
-
-
-def _resolve_target_device(device: str | None, gpus: tuple[int, ...] | None) -> tuple[str, tuple[int, ...]]:
-    """Reconciles the requested device and GPU indices with the available hardware.
-
-    Args:
-        device: The requested device (``"auto"``, ``"cpu"``, ``"mps"``, ``"cuda"``, or ``"cuda:N"``), or None for
-            automatic selection.
-        gpus: The explicitly requested CUDA device indices, or None to select them automatically.
-
-    Returns:
-        A tuple of the resolved base device type and the tuple of CUDA indices to use.
-
-    Raises:
-        ValueError: When an explicitly requested CUDA index is not present on the machine.
-    """
-    request = (device or "auto").lower()
-    available = _get_cuda_device_count()
-
-    if request == "cpu":
-        return "cpu", ()
-    if request == "mps":
-        return "mps", ()
-
-    if request.startswith("cuda") or request == "auto":
-        if available == 0:
-            if request != "auto":
-                _warn(f"Requested device '{request}' but no CUDA device is available. Falling back to CPU.")
-            return "cpu", ()
-        if gpus is not None:
-            for index in gpus:
-                if index < 0 or index >= available:
-                    message = (
-                        f"Unable to select GPUs using the requested indices. The GPU index must be below the visible "
-                        f"device count {available}, but got {index}."
-                    )
-                    raise ValueError(message)
-            return "cuda", tuple(gpus)
-        if ":" in request:
-            index = int(request.split(":", 1)[1])
-            if index < 0 or index >= available:
-                message = (
-                    f"Unable to select a GPU using device '{request}'. The GPU index must be below the visible device "
-                    f"count {available}, but got {index}."
-                )
-                raise ValueError(message)
-            return "cuda", (index,)
-        return "cuda", tuple(range(available))
-
-    message = (
-        f"Unable to resolve the training device. The device must be 'auto', 'cpu', 'mps', 'cuda', or 'cuda:N', "
-        f"but got '{request}'."
-    )
-    raise ValueError(message)
 
 
 def _resolve_multi_gpu(multi_gpu: Literal["auto", "ddp", "dp", "single"], gpus: tuple[int, ...]) -> MultiGpuStrategy:
@@ -320,7 +249,7 @@ def _resolve_multi_gpu(multi_gpu: Literal["auto", "ddp", "dp", "single"], gpus: 
     """
     if len(gpus) < _MIN_MULTI_GPU_COUNT:
         if multi_gpu in ("ddp", "dp"):
-            _warn(
+            warn(
                 f"Requested '{multi_gpu}' multi-GPU training but only {len(gpus)} GPU is selected. Using a single "
                 f"device."
             )
@@ -330,88 +259,3 @@ def _resolve_multi_gpu(multi_gpu: Literal["auto", "ddp", "dp", "single"], gpus: 
     if multi_gpu == "single":
         return "single"
     return "ddp"
-
-
-def _resolve_amp(amp: AmpMode, device: str, gpus: tuple[int, ...]) -> tuple[torch.dtype | None, bool]:
-    """Reconciles the requested mixed-precision mode with the device and its capabilities.
-
-    Args:
-        amp: The requested mixed-precision mode.
-        device: The resolved base device type.
-        gpus: The resolved CUDA device indices.
-
-    Returns:
-        A tuple of the autocast dtype (or None when disabled) and whether a gradient scaler is required.
-    """
-    if amp == "off":
-        return None, False
-    if amp == "auto":
-        # Enable bfloat16 only where it is natively fast so the automatic default stays close to stock float32.
-        if device == "cuda" and _resolve_bfloat16_support(gpus):
-            return torch.bfloat16, False
-        return None, False
-    if amp == "bf16":
-        if device == "mps":
-            _warn("bfloat16 autocast is unreliable on MPS. Disabling mixed precision.")
-            return None, False
-        if device == "cuda" and not _resolve_bfloat16_support(gpus):
-            _warn(
-                "bfloat16 was requested but the selected GPU lacks native bfloat16 support (pre-Ampere); it may run "
-                "slowly. Consider '--amp fp16' instead."
-            )
-        return torch.bfloat16, False
-    # The only remaining mode is float16, which is CUDA-only and needs a gradient scaler to avoid underflow.
-    if device != "cuda":
-        _warn(f"float16 autocast is only supported on CUDA, not '{device}'. Disabling mixed precision.")
-        return None, False
-    return torch.float16, True
-
-
-def _resolve_toggle(value: Toggle, *, auto: bool) -> bool:
-    """Resolves a tri-state toggle to a boolean, using the given capability-detected default for ``"auto"``.
-
-    Args:
-        value: The requested tri-state value.
-        auto: The capability-detected default applied when the value is ``"auto"``.
-
-    Returns:
-        The resolved boolean decision.
-    """
-    if value == "on":
-        return True
-    if value == "off":
-        return False
-    return auto
-
-
-def _get_cuda_device_count() -> int:
-    """Returns the number of visible CUDA devices, or zero when CUDA is unavailable.
-
-    Returns:
-        The count of CUDA devices reported by the active PyTorch build.
-    """
-    return torch.cuda.device_count() if torch.cuda.is_available() else 0
-
-
-def _resolve_bfloat16_support(gpus: tuple[int, ...]) -> bool:
-    """Determines whether every listed CUDA device natively accelerates bfloat16 (Ampere or newer).
-
-    Args:
-        gpus: The CUDA device indices to check.
-
-    Returns:
-        True when all listed devices report at least Ampere compute capability, False otherwise.
-    """
-    return len(gpus) > 0 and all(torch.cuda.get_device_capability(device=index) >= _AMPERE_CAPABILITY for index in gpus)
-
-
-def _resolve_tf32_support(gpus: tuple[int, ...]) -> bool:
-    """Determines whether every listed CUDA device supports TF32 matmul and convolution acceleration (Ampere+).
-
-    Args:
-        gpus: The CUDA device indices to check.
-
-    Returns:
-        True when all listed devices report at least Ampere compute capability, False otherwise.
-    """
-    return len(gpus) > 0 and all(torch.cuda.get_device_capability(device=index) >= _AMPERE_CAPABILITY for index in gpus)

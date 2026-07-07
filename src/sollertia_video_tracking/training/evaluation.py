@@ -503,7 +503,7 @@ def _surviving_individual_indices(ground_truth: NDArray[np.float32]) -> NDArray[
     Returns:
         The original indices of the individuals that survive preparation, in prepared-row order.
     """
-    visible = ground_truth.astype(float).copy()
+    visible = ground_truth.astype(float)
     visible[visible[..., 2] <= 0] = np.nan
     kept = np.any(np.all(~np.isnan(visible), axis=-1), axis=-1)
     return np.nonzero(kept)[0]

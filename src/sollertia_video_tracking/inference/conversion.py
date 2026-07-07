@@ -1,13 +1,4 @@
-"""Provides conversion of DeepLabCut prediction HDF5 files into flat, wide polars feather files for the Sollertia stack.
-
-DeepLabCut writes predictions as a pandas HDF5 file whose columns are a ``scorer / [individuals] / bodyparts / coords``
-MultiIndex and whose row index is the frame number. The rest of the Sollertia stack runs on numpy 2 / Python 3.14 and
-consumes uncompressed Apache Arrow "feather" files written by polars. This module renders that prediction table into
-a wide, snake-cased feather: one row per frame (``frame``) and, per keypoint, ``[<individual>_]<bodypart>_x``, ``_y``,
-and ``_likelihood`` columns. It is a direct, project-agnostic transcription of DeepLabCut's own output ("DeepLabCut, but
-in polars"); domain-specific derived quantities are left to downstream consumers. A YAML provenance sidecar records the
-source file and the conversion parameters.
-"""
+"""Provides conversion of DeepLabCut prediction HDF5 files into wide polars feather files for the Sollertia stack."""
 
 from __future__ import annotations
 
@@ -71,6 +62,13 @@ def convert_predictions_to_feather(
 ) -> ConversionSummary:
     """Converts a DeepLabCut prediction HDF5 file into a wide polars feather file with an optional provenance sidecar.
 
+    DeepLabCut writes predictions as a pandas HDF5 table whose columns are a ``scorer / [individuals] / bodyparts /
+    coords`` MultiIndex and whose rows are frames. This renders that table into a wide, snake-cased feather with one row
+    per frame (``frame``) and, per keypoint, ``[<individual>_]<bodypart>_x``, ``_y``, and ``_likelihood`` columns, so
+    the rest of the Sollertia stack (numpy 2 / Python 3.14, consuming uncompressed Apache Arrow feathers written by
+    polars) reads it directly. The transcription is a direct, project-agnostic copy of DeepLabCut's own output
+    ("DeepLabCut, but in polars"); derived quantities are left to downstream consumers.
+
     Args:
         h5_path: The path to the DeepLabCut prediction ``.h5`` file to convert.
         feather_path: The path of the feather file to write.
@@ -92,7 +90,7 @@ def convert_predictions_to_feather(
     keypoints, columns = _flatten_predictions(predictions, likelihood_threshold=likelihood_threshold)
 
     data: dict[str, pl.Series] = {
-        "frame": pl.Series(name="frame", values=np.asarray(predictions.index, dtype=np.uint64)),
+        "frame": pl.Series(name="frame", values=np.asarray(predictions.index, dtype=np.uint32)),
     }
     for name, values in columns.items():
         data[name] = pl.Series(name=name, values=values, dtype=pl.Float32)
