@@ -5,17 +5,17 @@ from typing import Literal
 
 import torch
 
-type Toggle = Literal["auto", "on", "off"]
-"""The tri-state control for one optimization: use the capability-detected default, force it on, or force it off."""
-
-type AmpMode = Literal["auto", "off", "bf16", "fp16"]
-"""The automatic-mixed-precision selection: capability-detected default, disabled, or a forced compute dtype."""
-
 DEFAULT_RESERVED_CPU_THREADS: int = 2
 """The number of CPU cores held back from the automatic worker and thread budgets so other work stays responsive."""
 
 _AMPERE_CAPABILITY: tuple[int, int] = (8, 0)
 """The minimum CUDA compute capability (Ampere) that provides TF32 and native bfloat16 tensor-core acceleration."""
+
+type Toggle = Literal["auto", "on", "off"]
+"""The tri-state control for one optimization: use the capability-detected default, force it on, or force it off."""
+
+type AmpMode = Literal["auto", "off", "bf16", "fp16"]
+"""The automatic-mixed-precision selection: capability-detected default, disabled, or a forced compute dtype."""
 
 
 def warn(message: str) -> None:
@@ -47,9 +47,10 @@ def supports_ampere(gpus: tuple[int, ...]) -> bool:
         gpus: The CUDA device indices to check.
 
     Returns:
-        True when all listed devices report at least Ampere compute capability, False otherwise.
+        True when at least one device is listed and every listed device reports at least Ampere compute capability,
+        False otherwise (including when the device list is empty).
     """
-    return len(gpus) > 0 and all(torch.cuda.get_device_capability(device=index) >= _AMPERE_CAPABILITY for index in gpus)
+    return bool(gpus) and all(torch.cuda.get_device_capability(device=index) >= _AMPERE_CAPABILITY for index in gpus)
 
 
 def resolve_toggle(value: Toggle, *, auto: bool) -> bool:
@@ -88,7 +89,7 @@ def resolve_target_device(
 
     Raises:
         ValueError: When an explicitly requested CUDA index is not present on the machine, or when the requested device
-            is not one of ``"auto"``, ``"cpu"``, ``"mps"``, ``"cuda"``, or ``"cuda:N"``.
+            does not begin with ``"cuda"`` and is not one of ``"auto"``, ``"cpu"``, or ``"mps"``.
     """
     request = (device or "auto").lower()
     available = cuda_device_count()
@@ -99,7 +100,7 @@ def resolve_target_device(
         return "mps", ()
 
     if request.startswith("cuda") or request == "auto":
-        if available == 0:
+        if not available:
             if request != "auto":
                 warn(f"Requested device '{request}' but no CUDA device is available. Falling back to CPU.")
             return "cpu", ()
@@ -113,7 +114,7 @@ def resolve_target_device(
                     raise ValueError(message)
             return "cuda", tuple(gpus)
         if ":" in request:
-            index = int(request.split(":", 1)[1])
+            index = int(request.split(sep=":", maxsplit=1)[1])
             if index < 0 or index >= available:
                 message = (
                     f"Unable to select a GPU using device '{request}'. Expected an index below the visible device "

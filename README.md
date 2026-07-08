@@ -105,6 +105,8 @@ This library provides the `slvt` CLI that exposes the following commands:
 | `create-training-dataset` | Creates a training-dataset shuffle with a chosen network architecture and train/test split |
 | `train`                   | Trains a shuffle with mixed precision and multi-GPU DistributedDataParallel               |
 | `infer`                   | Analyzes videos across multiple GPUs, a single GPU, or the CPU, with in-flight polars output |
+| `export`                  | Serializes a trained model into a portable, self-contained asset that runs on another machine |
+| `predict`                 | Runs an exported model asset over videos into caller-chosen prediction files, cleaning up after itself |
 
 The `extract` group owns the project config.yaml every subcommand operates on, alongside the parallelism and
 frame-selection options the `frames` and `outliers` subcommands share; these must be given before the subcommand name,
@@ -134,6 +136,18 @@ The following command extracts outlier frames from two analyzed videos to refine
 
 The following command analyzes two videos with a project's trained model, writing a polars feather of predictions per
 video into an output directory: `slvt infer /path/to/project/config.yaml video1.mp4 video2.mp4 --dest /path/to/output`
+
+While `infer` operates inside a live project as part of the refinement loop, `export` and `predict` cover deployment.
+`export` packages a trained shuffle into a single portable asset that carries everything needed to run the model, with
+no dependence on the original project's labeled data, so the asset can be moved to any machine. `predict` then runs that
+asset over videos, writing each video's predictions to the exact file path paired with it and removing every
+intermediary once it finishes.
+
+The following command exports a project's trained shuffle into a portable model asset:
+`slvt export /path/to/project/config.yaml --destination /path/to/model.slvtmodel`
+
+The following command runs that asset over two videos, writing each video's predictions to its own file:
+`slvt predict /path/to/model.slvtmodel --job video1.mp4 out1.feather --job video2.mp4 out2.feather --device cuda`
 
 ### Python API
 
@@ -170,6 +184,32 @@ summary = run_inference(
     config=Path("/path/to/project/config.yaml"),
     videos=[Path("video1.mp4"), Path("video2.mp4")],
     destination=Path("/path/to/output"),
+    profile=profile,
+)
+
+print(summary.describe())
+```
+
+Model export and deployment are also available as functions. `export_model` writes a portable asset from a trained
+shuffle, and `run_predictions` runs that asset over videos into caller-chosen prediction files:
+
+```python
+from pathlib import Path
+
+from sollertia_video_tracking import export_model, run_predictions, PredictionJob, resolve_inference_profile
+
+# Packages a trained shuffle into a single portable asset that runs on any machine.
+export_model(config=Path("/path/to/project/config.yaml"), destination=Path("/path/to/model.slvtmodel"))
+
+# Runs the asset over videos, writing each video's predictions to the file paired with it and cleaning up every
+# intermediary, including the extracted model and DeepLabCut's own prediction files.
+profile = resolve_inference_profile()
+summary = run_predictions(
+    asset=Path("/path/to/model.slvtmodel"),
+    jobs=[
+        PredictionJob(video=Path("video1.mp4"), output=Path("out1.feather")),
+        PredictionJob(video=Path("video2.mp4"), output=Path("out2.feather")),
+    ],
     profile=profile,
 )
 

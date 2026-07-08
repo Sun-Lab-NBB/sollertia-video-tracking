@@ -27,6 +27,16 @@ os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "-8")
 # regardless of any inherited MPLBACKEND, keeping the spawned workers display-independent.
 os.environ["MPLBACKEND"] = "Agg"
 
+from .deploy import (  # noqa: E402 - after thread-limit setup
+    JobResult,
+    ExportSummary,
+    ModelManifest,
+    PredictionJob,
+    PredictionSummary,
+    ArchiveCompression,
+    export_model,
+    run_predictions,
+)
 from .training import (  # noqa: E402 - after thread-limit setup
     TrainingSummary,
     OptimizationProfile,
@@ -62,14 +72,20 @@ from .frame_extraction import (  # noqa: E402 - after thread-limit setup
 )
 
 __all__ = [
+    "ArchiveCompression",
     "ConversionSummary",
+    "ExportSummary",
     "ExtractionAlgorithm",
     "FrameExtractionSummary",
     "InferenceProfile",
     "InferenceSummary",
+    "JobResult",
+    "ModelManifest",
     "OptimizationProfile",
     "OutlierAlgorithm",
     "OutlierExtractionSummary",
+    "PredictionJob",
+    "PredictionSummary",
     "PurgeSummary",
     "TrackingMethod",
     "TrainingDatasetSummary",
@@ -78,6 +94,7 @@ __all__ = [
     "build_superanimal_weight_init",
     "convert_predictions_to_feather",
     "create_training_dataset",
+    "export_model",
     "extract_frames_kmeans",
     "extract_outlier_frames_parallel",
     "get_available_augmenters",
@@ -88,5 +105,6 @@ __all__ = [
     "resolve_inference_profile",
     "resolve_optimization_profile",
     "run_inference",
+    "run_predictions",
     "train_model",
 ]

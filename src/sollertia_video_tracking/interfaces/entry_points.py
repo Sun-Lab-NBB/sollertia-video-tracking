@@ -4,7 +4,9 @@ import click
 
 from .infer import infer_command
 from .train import train_command
+from .export import export_command
 from .extract import extract_group
+from .predict import predict_command
 from .create_training_dataset import create_training_dataset_command
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
@@ -20,3 +22,5 @@ slvt_cli.add_command(cmd=extract_group)
 slvt_cli.add_command(cmd=create_training_dataset_command)
 slvt_cli.add_command(cmd=train_command)
 slvt_cli.add_command(cmd=infer_command)
+slvt_cli.add_command(cmd=export_command)
+slvt_cli.add_command(cmd=predict_command)

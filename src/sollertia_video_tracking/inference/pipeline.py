@@ -114,6 +114,8 @@ class _InferenceLaunch:
     """Determines whether DeepLabCut also writes a CSV alongside each prediction file."""
     keep_dlc_outputs: bool
     """Determines whether DeepLabCut's own prediction artifacts are kept after conversion."""
+    write_provenance: bool
+    """Determines whether the in-flight conversion writes its own provenance sidecar beside each feather."""
     display_progress: bool
     """Determines whether the live aggregate progress bar is rendered."""
     video_queue: Any
@@ -186,6 +188,8 @@ def run_inference(
     likelihood_threshold: float = 0.0,
     save_as_csv: bool = False,
     keep_dlc_outputs: bool = True,
+    output_feathers: list[str | Path] | None = None,
+    write_conversion_provenance: bool = True,
     display_progress: bool = True,
 ) -> InferenceSummary:
     """Runs DeepLabCut inference over many videos, distributing whole videos across GPU or CPU worker slots.
@@ -216,13 +220,17 @@ def run_inference(
             full/meta/assemblies pickles, and any tracker files) after conversion. Kept by default so all DeepLabCut
             data survives; only relevant when ``to_polars`` is set, since conversion is what would otherwise remove
             them.
+        output_feathers: The per-video feather paths to write, parallel to ``videos``, or None to name each video's
+            feather from its stem inside ``destination``. Only valid together with ``to_polars``.
+        write_conversion_provenance: Determines whether the in-flight conversion writes its own provenance sidecar
+            beside each feather. Kept on by default; a deployment caller disables it to write a richer sidecar itself.
         display_progress: Determines whether to render the live aggregate progress bar.
 
     Returns:
         A summary of what was analyzed and the hardware configuration used.
 
     Raises:
-        ValueError: When no videos are provided.
+        ValueError: When no videos are provided, or when the per-video output paths do not match the videos.
     """
     config = Path(config)
     destination = Path(destination) if destination is not None else None
@@ -230,6 +238,19 @@ def run_inference(
     if not video_paths:
         message = "Unable to run inference. Expected at least one video, but got an empty video list."
         raise ValueError(message)
+    if output_feathers is not None:
+        if not to_polars:
+            message = (
+                "Unable to run inference. Per-video output paths were provided, but polars conversion is disabled; "
+                "enable to_polars to write feather files at the requested paths."
+            )
+            raise ValueError(message)
+        if len(output_feathers) != len(video_paths):
+            message = (
+                f"Unable to run inference. Expected one output path per video, but got {len(output_feathers)} output "
+                f"paths for {len(video_paths)} videos."
+            )
+            raise ValueError(message)
     if destination is not None:
         destination.mkdir(parents=True, exist_ok=True)
 
@@ -246,7 +267,8 @@ def run_inference(
     results_queue = manager.Queue()
     for index, video in enumerate(video_paths):
         crop = _resolve_video_cropping(project_config=project_config, video=str(video))
-        video_queue.put((index, str(video), totals[index], crop))
+        feather = str(Path(output_feathers[index])) if output_feathers is not None else None
+        video_queue.put((index, str(video), totals[index], crop, feather))
     for _ in slots:
         video_queue.put(None)
 
@@ -273,6 +295,7 @@ def run_inference(
         likelihood_threshold=likelihood_threshold,
         save_as_csv=save_as_csv,
         keep_dlc_outputs=keep_dlc_outputs,
+        write_provenance=write_conversion_provenance,
         display_progress=display_progress,
         video_queue=video_queue,
         progress_queue=progress_queue,
@@ -559,16 +582,20 @@ def _run_inference_worker(slot: _Slot, launch: _InferenceLaunch) -> None:
             _analyze_one_video(slot=slot, launch=launch, item=item)
 
 
-def _analyze_one_video(slot: _Slot, launch: _InferenceLaunch, item: tuple[int, str, int, list[int] | None]) -> None:
+def _analyze_one_video(
+    slot: _Slot, launch: _InferenceLaunch, item: tuple[int, str, int, list[int] | None, str | None]
+) -> None:
     """Analyzes a single video from the queue, converts its output, and reports the result and progress.
 
     Args:
         slot: The device and optional CPU-core placement for this worker.
         launch: The bundle of picklable per-run parameters.
-        item: The (video index, video path, frame total, crop rectangle) work item pulled from the queue, where the
-            crop rectangle is the ``[x1, x2, y1, y2]`` region to analyze or None to analyze the full frame.
+        item: The (video index, video path, frame total, crop rectangle, output feather path) work item pulled from the
+            queue, where the crop rectangle is the ``[x1, x2, y1, y2]`` region to analyze or None to analyze the full
+            frame, and the output feather path is the explicit destination for this video's feather or None to name it
+            from the video stem.
     """
-    index, video, total, cropping = item
+    index, video, total, cropping, output_feather = item
     output_folder = launch.destination if launch.destination is not None else Path(video).parent
     original_tqdm = dlc_videos.tqdm
     if launch.display_progress:
@@ -594,7 +621,9 @@ def _analyze_one_video(slot: _Slot, launch: _InferenceLaunch, item: tuple[int, s
                 overwrite=True,
                 inference_cfg=_STOCK_ACCELERATION_DISABLED,
             )
-        output = _resolve_output(launch=launch, video=video, scorer=scorer, destination=output_folder)
+        output = _resolve_output(
+            launch=launch, video=video, scorer=scorer, destination=output_folder, feather_override=output_feather
+        )
         launch.results_queue.put((index, str(output) if output is not None else None, None))
     except Exception as error:  # noqa: BLE001 - report the per-video failure and keep draining the queue.
         launch.results_queue.put((index, None, f"{type(error).__name__}: {error}"))
@@ -627,7 +656,9 @@ def _cleanup_dlc_artifacts(destination: Path, stem: str, scorer: str, *, keep_cs
         artifact.unlink(missing_ok=True)
 
 
-def _resolve_output(launch: _InferenceLaunch, video: str, scorer: str, destination: Path) -> Path | None:
+def _resolve_output(
+    launch: _InferenceLaunch, video: str, scorer: str, destination: Path, feather_override: str | None = None
+) -> Path | None:
     """Locates the prediction HDF5 DeepLabCut wrote and optionally converts it to a polars feather.
 
     Args:
@@ -636,6 +667,8 @@ def _resolve_output(launch: _InferenceLaunch, video: str, scorer: str, destinati
         scorer: The DeepLabCut scorer string returned by ``analyze_videos``, which names the output file.
         destination: The folder this video's predictions were written to, which is the video's own folder when the run
             configured no destination.
+        feather_override: The explicit feather path to write for this video, or None to name it from the video stem
+            inside ``destination``.
 
     Returns:
         The produced feather (when converting) or HDF5 file, or None when no prediction file was written.
@@ -654,9 +687,12 @@ def _resolve_output(launch: _InferenceLaunch, video: str, scorer: str, destinati
     if not launch.to_polars:
         return h5_path
 
-    feather_path = destination / f"{stem}_pose.feather"
+    feather_path = Path(feather_override) if feather_override is not None else destination / f"{stem}_pose.feather"
     convert_predictions_to_feather(
-        h5_path=h5_path, feather_path=feather_path, likelihood_threshold=launch.likelihood_threshold
+        h5_path=h5_path,
+        feather_path=feather_path,
+        likelihood_threshold=launch.likelihood_threshold,
+        write_provenance=launch.write_provenance,
     )
     # Deployment leaves only the feather and its provenance sidecar: once conversion succeeds, remove DeepLabCut's own
     # prediction artifacts for this video. Conversion runs just above, so a failed conversion raises before this point
