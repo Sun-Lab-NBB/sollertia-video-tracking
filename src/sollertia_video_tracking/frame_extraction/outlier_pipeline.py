@@ -190,8 +190,9 @@ def extract_outlier_frames_parallel(
 
     Args:
         config_path: The path to the DeepLabCut project's config.yaml.
-        videos: The project video files to refine on; each must already be registered in the project's config.yaml
-            video_sets and analyzed. Requested paths that match no registered video are skipped with a warning.
+        videos: The project video files to refine on. Each must already be registered in the project's config.yaml
+            video_sets and analyzed. Requested paths that match no registered video are skipped with a warning. Leave
+            empty to refine every registered video the current model has already analyzed.
         shuffle_index: The shuffle index whose trained model wrote the predictions.
         training_set_index: The training-set fraction index.
         outlier_algorithm: The detection algorithm: ``"jump"``, ``"uncertain"``, ``"fitting"``, or ``"list"``.
@@ -222,11 +223,11 @@ def extract_outlier_frames_parallel(
         reserved_core_count: The number of CPU cores to leave free for other tasks.
         fitting_worker_count: The number of processes fitting SARIMAX models during ``fitting`` detection. Set to -1 to
             use every usable core.
-        overwrite: Determines whether to re-extract the selected videos, first discarding this refinement iteration's
+        overwrite: Determines whether to re-extract the named ``videos``, first discarding this refinement iteration's
             already-extracted outlier frames for those videos, along with their machine labels and any manual
             refinement of them, so the frames are replaced rather than added to. Other videos' outlier frames are left
-            intact, and every frame already carried in the human ``CollectedData`` labels is preserved. Mutually
-            exclusive with ``reset``.
+            intact, and every frame already carried in the human ``CollectedData`` labels is preserved. Requires at
+            least one entry in ``videos``. Mutually exclusive with ``reset``.
         reset: Determines whether to discard this refinement iteration's extracted outlier frames across every project
             video, along with their machine labels and any manual refinement, before re-extracting the selected videos,
             giving the whole iteration a clean slate. Every frame already carried in the human ``CollectedData`` labels
@@ -239,12 +240,14 @@ def extract_outlier_frames_parallel(
 
     Raises:
         FileNotFoundError: If ``config_path`` does not point to an existing file.
-        ValueError: If ``overwrite`` and ``reset`` are both set, if ``outlier_algorithm`` or ``extraction_algorithm``
-            is unknown, if ``frames_per_video`` is set below one (other than the -1 sentinel), if ``candidate_step`` is
-            below one, or if ``outlier_algorithm`` is ``"list"`` without ``explicit_frame_indices``. Also raised if the
-            comparison bodyparts resolve to none, if the project lists no videos in ``video_sets``, or if no requested
-            video matches a registered project video. It is also raised if two selected videos share a file-name stem
-            and would collide in the labeled-data tree.
+        ValueError: Raised when the options conflict: ``overwrite`` and ``reset`` are both set, or ``overwrite`` is set
+            without any ``videos``. Raised when an argument is invalid: ``outlier_algorithm`` or
+            ``extraction_algorithm`` is unknown, ``frames_per_video`` (other than the -1 sentinel) or ``candidate_step``
+            is below one, or ``outlier_algorithm`` is ``"list"`` without ``explicit_frame_indices``. Raised when the
+            comparison bodyparts resolve to none. Raised when no videos can be refined: the project lists none in
+            ``video_sets``, no requested video matches a registered one, or no videos are named and the current model
+            has analyzed none. Raised when two selected videos share a file-name stem and would collide in the
+            labeled-data tree.
     """
     config_path = config_path.resolve()
     if not config_path.is_file():
@@ -252,6 +255,9 @@ def extract_outlier_frames_parallel(
         raise FileNotFoundError(message)
     if overwrite and reset:
         message = "Unable to extract outlier frames. The overwrite and reset options are mutually exclusive."
+        raise ValueError(message)
+    if overwrite and not videos:
+        message = "Unable to extract outlier frames. The overwrite option requires at least one video to re-extract."
         raise ValueError(message)
     try:
         outlier_algorithm = OutlierAlgorithm(outlier_algorithm)
@@ -308,19 +314,33 @@ def extract_outlier_frames_parallel(
     if not registered_videos:
         message = "Unable to extract outlier frames. The project's config.yaml does not list any videos in video_sets."
         raise ValueError(message)
-    matched_videos, unmatched_videos = select_registered_videos(
-        registered_videos=registered_videos, requested_videos=tuple(videos)
-    )
-    for video in unmatched_videos:
-        sys.stderr.write(f"WARNING: {video} is not registered in the project's config.yaml and was skipped.\n")
-    sys.stderr.flush()
-    if not matched_videos:
-        message = (
-            "Unable to extract outlier frames. None of the requested videos matched a registered project video. "
-            "Outlier extraction only refines videos already registered in the project's config.yaml."
+    if videos:
+        matched_videos, unmatched_videos = select_registered_videos(
+            registered_videos=registered_videos, requested_videos=tuple(videos)
         )
-        raise ValueError(message)
-    video_paths = list(matched_videos)
+        for video in unmatched_videos:
+            sys.stderr.write(f"WARNING: {video} is not registered in the project's config.yaml and was skipped.\n")
+        sys.stderr.flush()
+        if not matched_videos:
+            message = (
+                "Unable to extract outlier frames. None of the requested videos matched a registered project video. "
+                "Outlier extraction only refines videos already registered in the project's config.yaml."
+            )
+            raise ValueError(message)
+        video_paths = list(matched_videos)
+    else:
+        # With no videos named, refines every registered video the current model has already analyzed, closing the
+        # default refinement pass over exactly this model's own outputs. A registered video with no predictions is not
+        # part of the model's processed set, so it is left out rather than reported as an unanalyzed failure.
+        video_paths = _discover_analyzed_videos(
+            registered_videos=registered_videos, scorer=scorer, tracking_method=resolved_tracking_method
+        )
+        if not video_paths:
+            message = (
+                "Unable to extract outlier frames. No registered project video has predictions from the current model "
+                f"(scorer '{scorer}'). Analyze videos with this model first, or name specific videos to refine."
+            )
+            raise ValueError(message)
     # Two videos that share a stem would write into one labeled-data folder, racing in the parallel extraction pool.
     ensure_unique_video_stems(video_paths, error_context="Unable to extract outlier frames.")
 
@@ -396,6 +416,36 @@ def extract_outlier_frames_parallel(
 
     prune_empty_labeled_data_directories(config_path.parent, display_progress=display_progress)
     return summary
+
+
+def _discover_analyzed_videos(*, registered_videos: list[str], scorer: str, tracking_method: str) -> list[str]:
+    """Returns the registered videos the current model has already analyzed, in configuration order.
+
+    A video counts as analyzed when DeepLabCut can locate a prediction file named by ``scorer`` in the video's own
+    directory. This is a filename probe rather than a full prediction-table load, so resolving the default refinement
+    set — every video the current model processed — stays cheap even for a project with many large videos.
+
+    Args:
+        registered_videos: The project's registered video paths, in configuration order.
+        scorer: The DeepLabCut scorer string naming the current model's prediction files.
+        tracking_method: The resolved multi-animal tracker method, matched against the prediction file suffix.
+
+    Returns:
+        The registered videos that have a matching prediction file, in configuration order.
+    """
+    analyzed_videos: list[str] = []
+    for video in registered_videos:
+        try:
+            auxiliaryfunctions.find_analyzed_data(
+                folder=str(Path(video).parent),
+                videoname=Path(video).stem,
+                scorer=scorer,
+                track_method=tracking_method,
+            )
+        except FileNotFoundError:
+            continue
+        analyzed_videos.append(video)
+    return analyzed_videos
 
 
 def _detect_all_videos(

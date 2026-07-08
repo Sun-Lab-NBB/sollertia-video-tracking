@@ -238,6 +238,23 @@ def machine_label_frame_names(directory: Path) -> set[str]:
     return names
 
 
+def has_outlier_refinement_data(directory: Path) -> bool:
+    """Reports whether a video folder already holds outlier-refinement data from a prior ``extract outliers`` pass.
+
+    A video enters the outlier-refinement workflow once its folder holds a ``machinelabels-iter<N>.h5`` machine-label
+    record or a ``MachineLabelsRefine.h5`` manual-refinement table. Frame extraction is the bootstrap step that runs
+    before refinement, so it treats such a video as off-limits. This is a cheap file-presence probe rather than a table
+    read, so it never fails on a malformed table and cannot be fooled by a table that references no frames.
+
+    Args:
+        directory: The ``labeled-data/<stem>`` directory to probe for outlier-refinement tables.
+
+    Returns:
+        True when the directory holds at least one outlier-refinement table, False otherwise.
+    """
+    return any(directory.glob("machinelabels-iter*.h5")) or (directory / "MachineLabelsRefine.h5").is_file()
+
+
 def select_registered_videos(
     registered_videos: list[str], requested_videos: tuple[str | Path, ...]
 ) -> tuple[list[str], list[str]]:
@@ -335,7 +352,7 @@ class PurgeSummary:
 
 
 def purge_labeled_data(
-    config_path: Path, *, videos: tuple[str | Path, ...] = (), all_videos: bool = False, execute: bool = False
+    config_path: Path, *, videos: tuple[str | Path, ...] = (), execute: bool = False
 ) -> PurgeSummary:
     """Removes targeted videos' entire ``labeled-data`` folders, previewing the deletion unless ``execute`` is set.
 
@@ -348,9 +365,7 @@ def purge_labeled_data(
     Args:
         config_path: The path to the DeepLabCut project's config.yaml, whose parent holds the ``labeled-data`` tree.
         videos: The specific project video files whose folders to purge, matched to the project's registered videos by
-            resolved path. Mutually exclusive with ``all_videos``.
-        all_videos: Determines whether to purge every video folder in the project's ``labeled-data`` tree. Mutually
-            exclusive with ``videos``.
+            resolved path. Leave empty to purge every video folder in the project's ``labeled-data`` tree.
         execute: Determines whether to actually delete the folders. When False, the folders are only reported for a
             dry-run preview and nothing is removed.
 
@@ -360,22 +375,18 @@ def purge_labeled_data(
 
     Raises:
         FileNotFoundError: If ``config_path`` does not point to an existing file.
-        ValueError: If neither or both of ``videos`` and ``all_videos`` are given.
     """
     config_path = config_path.resolve()
     if not config_path.is_file():
         message = f"Unable to purge labeled data. The config path '{config_path}' does not point to a file."
         raise FileNotFoundError(message)
-    if all_videos == bool(videos):
-        message = "Unable to purge labeled data. Provide either specific videos or all videos, but not both or neither."
-        raise ValueError(message)
 
     configuration = YAML().load(config_path.read_text())
     scorer = str(configuration.get("scorer", ""))
     labeled_data_directory = config_path.parent / "labeled-data"
 
     unmatched_videos: tuple[str, ...] = ()
-    if all_videos:
+    if not videos:
         # Iterate the folders actually present on disk so the purge covers every video's labeled data, including any
         # folders for videos no longer registered in config.yaml. The '_labeled' folders hold DeepLabCut's rendered
         # label overlays rather than a video's frames, and dot-prefixed entries are temporary, so both are left alone.

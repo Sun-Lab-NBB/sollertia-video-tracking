@@ -43,7 +43,6 @@ def plan_video_sampling(
     extracted_frame_counts: dict[str, int],
     frames_per_video_count: int,
     total_frame_budget: int,
-    random_seed: int | None,
     *,
     groups: dict[str, list[str]] | None = None,
     pinned_videos: tuple[str, ...] = (),
@@ -66,13 +65,11 @@ def plan_video_sampling(
         extracted_frame_counts: The number of frames already extracted for each candidate video, keyed by path.
         frames_per_video_count: The number of frames each newly sampled video contributes.
         total_frame_budget: The total number of frames the project should hold after extraction.
-        random_seed: The seed for the random draw, or None to draw nondeterministically. With grouping, the seed also
-            fixes the random choice of which of a group's videos are sampled.
         groups: A mapping of group to that group's candidate videos, enabling balanced per-group selection. Set to None
             to draw uniformly across all candidates.
-        pinned_videos: The videos to include whenever the pass extracts frames — they are skipped entirely if the
-            budget is already met — selected before the budgeted draw. Duplicates and already-extracted or unknown
-            entries are ignored.
+        pinned_videos: The videos to include first whenever the pass extracts frames — skipped entirely if the budget is
+            already met — selected before the budgeted draw. Duplicates, unknown, and already-extracted entries are
+            ignored, so a pin is re-extracted only when the caller has cleared its frames up front (with overwrite).
 
     Returns:
         A VideoSamplingPlan naming the selected videos and reporting the existing, target, and projected frame counts
@@ -113,7 +110,6 @@ def plan_video_sampling(
             frames_per_video_count=frames_per_video_count,
             needed_video_count=needed_video_count,
             pinned_videos=eligible_pinned_videos,
-            random_seed=random_seed,
         )
         selected_videos = tuple(selected_video_list)
     elif eligible_pinned_videos:
@@ -121,10 +117,9 @@ def plan_video_sampling(
             unextracted_videos=unextracted_videos,
             needed_video_count=needed_video_count,
             pinned_videos=eligible_pinned_videos,
-            random_seed=random_seed,
         )
     else:
-        generator = Random(random_seed)  # noqa: S311 -- video sampling is not security-sensitive.
+        generator = Random()  # noqa: S311 -- video sampling is not security-sensitive.
         selected_videos = tuple(generator.sample(population=unextracted_videos, k=needed_video_count))
 
     projected_frame_count = existing_frame_count + len(selected_videos) * frames_per_video_count
@@ -147,15 +142,13 @@ def _select_balanced(
     frames_per_video_count: int,
     needed_video_count: int,
     pinned_videos: list[str],
-    random_seed: int | None,
 ) -> tuple[list[str], tuple[tuple[str, int, int, int, int], ...]]:
     """Balances the pass's videos across groups by always extending the group with the fewest projected frames.
 
     Seeds each group's projected frame count with the frames it already holds from prior passes, honors the pinned
     videos first, then repeatedly assigns the next video to the least-covered group that still has an un-extracted
-    video. This ensures that the pass equalizes cumulative per-group coverage. Determinism is fixed by a canonical
-    group order, a seeded shuffle of each group's videos, and a group-name tiebreak, so a fixed seed reproduces
-    the selection.
+    video. This ensures that the pass equalizes cumulative per-group coverage. Each group's videos are shuffled
+    randomly, so which of an equally-covered group's videos are sampled differs each run.
 
     Args:
         groups: A mapping of group to that group's candidate videos.
@@ -164,7 +157,6 @@ def _select_balanced(
         frames_per_video_count: The number of frames each newly sampled video contributes.
         needed_video_count: The total number of videos to select this pass, including any pinned videos.
         pinned_videos: The eligible pinned videos to always include, already deduplicated.
-        random_seed: The seed for the per-group video shuffle, or None for a nondeterministic shuffle.
 
     Returns:
         A tuple of the selected video paths (pinned first, then the balanced fill) and the per-group breakdown as
@@ -172,7 +164,7 @@ def _select_balanced(
         canonical group order, where ``available_video_count`` is how many un-extracted videos the group had before
         this pass.
     """
-    generator = Random(random_seed)  # noqa: S311 -- video sampling is not security-sensitive.
+    generator = Random()  # noqa: S311 -- video sampling is not security-sensitive.
     unextracted_video_set = set(unextracted_videos)
     group_keys = sorted(groups)
 
@@ -237,7 +229,7 @@ def _select_balanced(
 
 
 def _select_uniform_with_pinned_videos(
-    unextracted_videos: list[str], needed_video_count: int, pinned_videos: list[str], random_seed: int | None
+    unextracted_videos: list[str], needed_video_count: int, pinned_videos: list[str]
 ) -> tuple[str, ...]:
     """Selects the pinned videos and fills the remaining budget with a uniform random draw over the rest.
 
@@ -245,12 +237,11 @@ def _select_uniform_with_pinned_videos(
         unextracted_videos: The not-yet-extracted candidate videos.
         needed_video_count: The number of videos the budget calls for this pass.
         pinned_videos: The eligible pinned videos to always include, already deduplicated.
-        random_seed: The seed for the random fill draw, or None for a nondeterministic draw.
 
     Returns:
         The selected videos, with the pinned ones first.
     """
-    generator = Random(random_seed)  # noqa: S311 -- video sampling is not security-sensitive.
+    generator = Random()  # noqa: S311 -- video sampling is not security-sensitive.
     selected_videos = list(pinned_videos)
     pinned_video_set = set(pinned_videos)
     fill_candidate_videos = [video for video in unextracted_videos if video not in pinned_video_set]
