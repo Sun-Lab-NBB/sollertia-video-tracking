@@ -12,15 +12,14 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 
 
 @click.command("train", context_settings=_CONTEXT_SETTINGS)
-@click.argument("config", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@click.option("-s", "--shuffle", default=1, show_default=True, help="The shuffle index to train.")
 @click.option(
-    "-tsi",
-    "--training-set-index",
-    default=0,
-    show_default=True,
-    help="Which training/test split to train, when the shuffle defines more than one.",
+    "-cfg",
+    "--config-path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="The path to the DeepLabCut project's config.yaml whose shuffle to train.",
 )
+@click.option("-s", "--shuffle", default=1, show_default=True, help="The shuffle index to train.")
 @click.option(
     "-mp",
     "--model-prefix",
@@ -35,7 +34,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     help="The maximum number of pose-model training epochs. Omit to use the shuffle's configured value.",
 )
 @click.option(
-    "-bs",
+    "-b",
     "--batch-size",
     type=int,
     default=None,
@@ -204,9 +203,8 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "console.",
 )
 def train_command(
-    config: Path,
+    config_path: Path,
     shuffle: int,
-    training_set_index: int,
     model_prefix: str,
     epochs: int | None,
     batch_size: int | None,
@@ -236,7 +234,7 @@ def train_command(
 ) -> None:
     """Trains a DeepLabCut shuffle with hardware optimizations and a clean progress monitor.
 
-    CONFIG is the path to the DeepLabCut project's config.yaml. The shuffle's model architecture and train/test split
+    ``--config-path`` names the DeepLabCut project's config.yaml. The shuffle's model architecture and train/test split
     are fixed when the shuffle is created (see ``slvt prepare``); this command fits that shuffle. Every
     optimization is exposed as a flag: automatic defaults are chosen for the detected hardware and never run slower
     than stock DeepLabCut, while explicit flags let you tune for silicon you know. Training runs as a
@@ -253,9 +251,7 @@ def train_command(
 
     # Detect whether the shuffle's training transform feeds the network one fixed input size so the cuDNN autotuner's
     # 'auto' default can enable itself only when it pays off, replacing the operator-declared flag this used to require.
-    fixed_input_size = detect_fixed_input_size(
-        config, shuffle=shuffle, training_set_index=training_set_index, model_prefix=model_prefix
-    )
+    fixed_input_size = detect_fixed_input_size(config_path, shuffle=shuffle, model_prefix=model_prefix)
 
     try:
         profile = resolve_optimization_profile(
@@ -271,10 +267,9 @@ def train_command(
             fixed_input_size=fixed_input_size,
         )
         summary = train_model(
-            config=config,
+            config=config_path,
             profile=profile,
             shuffle=shuffle,
-            training_set_index=training_set_index,
             model_prefix=model_prefix,
             epochs=epochs,
             batch_size=batch_size,
