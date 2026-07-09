@@ -278,7 +278,7 @@ def extract_frames_kmeans(
         return has_outlier_refinement_data(labeled_data_directory / Path(video).stem)
 
     cleared_frame_count = 0
-    # Videos whose bare frames --reset cleared but whose surviving human labels keep their img count positive: they
+    # Videos whose bare frames --reset cleared but whose surviving human labels keep their image count positive: they
     # cannot re-enter the eligibility draw on their own, so they are force-included below to actually re-roll them.
     reset_forced_videos: list[str] = []
     if reset:
@@ -332,7 +332,9 @@ def extract_frames_kmeans(
 
     def _nothing_to_extract(existing_frames: int, target_frames: int) -> FrameExtractionSummary:
         """Prunes the empty labeled-data folders and returns a do-nothing summary carrying the frames cleared so far."""
-        prune_empty_labeled_data_directories(project_directory_path, display_progress=display_progress)
+        prune_empty_labeled_data_directories(
+            project_directory=project_directory_path, display_progress=display_progress
+        )
         return FrameExtractionSummary(
             extracted_video_count=0,
             cleared_frame_count=cleared_frame_count,
@@ -346,7 +348,7 @@ def extract_frames_kmeans(
         )
 
     # --overwrite honors --videos even without a budget (it clears and re-extracts exactly them), so the "ignored"
-    # warning is suppressed in that case. Balance-groups and group-by still only apply to budgeted sampling.
+    # warning is suppressed in that case. Balance-groups and group-regex still only apply to budgeted sampling.
     budgetless_options_ignored = (
         total_frame_budget == -1
         and not overwrite
@@ -355,14 +357,14 @@ def extract_frames_kmeans(
     if exclusive:
         if balance_groups or group_by_pattern is not None:
             sys.stderr.write(
-                "WARNING: --balance-groups and --group-by are ignored with --exclusive, which extracts "
+                "WARNING: --balance-groups and --group-regex are ignored with --exclusive, which extracts "
                 "--frames-per-video frames from each requested video directly.\n"
             )
             sys.stderr.flush()
     elif budgetless_options_ignored:
         sys.stderr.write(
-            "WARNING: --balance-groups, --group-by, and --videos only apply when sampling toward a frame budget. Pass "
-            "--total-frames to enable budgeted sampling (or --exclusive to extract only the requested videos), "
+            "WARNING: --balance-groups, --group-regex, and --videos only apply when sampling toward a frame budget. "
+            "Pass --total-frames to enable budgeted sampling (or --exclusive to extract only the requested videos), "
             "otherwise every not-yet-extracted project video is extracted.\n"
         )
         sys.stderr.flush()
@@ -394,7 +396,7 @@ def extract_frames_kmeans(
         selected_videos = list(plan.selected_videos)
         selected_video_set = set(selected_videos)
         # Overwrite targets were explicitly cleared and must be re-rolled even when surviving human labels keep their
-        # img count above zero, which the eligibility filter would otherwise read as "already extracted". Reset
+        # image count above zero, which the eligibility filter would otherwise read as "already extracted". Reset
         # targets that survived clearing with human labels are dropped by the draw for the same reason, so force those
         # back too; without it their cleared bootstrap frames would be deleted but never re-rolled. The two options are
         # mutually exclusive, so at most one list is non-empty. Maintaining the set makes the extend and the
@@ -414,16 +416,16 @@ def extract_frames_kmeans(
             )
             sys.stderr.flush()
         if not selected_videos:
-            return _nothing_to_extract(plan.existing_frame_count, plan.target_frame_count)
+            return _nothing_to_extract(existing_frames=plan.existing_frame_count, target_frames=plan.target_frame_count)
         videos = selected_videos
         existing_frame_count = plan.existing_frame_count
         target_frame_count = plan.target_frame_count
     else:
-        # Exclusive or unbudgeted (-1) extraction visits every selected video, but honors the skip rule: a video that
+        # Exclusive or unbudgeted (-1) extraction visits every selected video, but honors the skip rule. A video that
         # still holds extracted frames — one that overwrite or reset did not just clear — is left untouched, so a re-run
         # never re-clusters already-bootstrapped or refined videos.
         extracted_counts = _count_extracted_frames(videos=videos, project_directory=project_directory_path)
-        # Overwrite targets are re-extracted even when surviving human labels keep their img count above zero. Reset
+        # Overwrite targets are re-extracted even when surviving human labels keep their image count above zero. Reset
         # forces back exactly the cleared videos that still hold human labels, for the same reason.
         if overwrite:
             forced_videos = set(requested_matched)
@@ -453,7 +455,7 @@ def extract_frames_kmeans(
             )
             sys.stderr.flush()
         if not videos:
-            return _nothing_to_extract(existing_frame_count, target_frame_count)
+            return _nothing_to_extract(existing_frames=existing_frame_count, target_frames=target_frame_count)
 
     total_core_count = os.cpu_count() or 1
     worker_count, core_sets = plan_core_allocation(
@@ -522,7 +524,7 @@ def extract_frames_kmeans(
         else:
             errors.append((video, status))
 
-    prune_empty_labeled_data_directories(project_directory_path, display_progress=display_progress)
+    prune_empty_labeled_data_directories(project_directory=project_directory_path, display_progress=display_progress)
     return FrameExtractionSummary(
         extracted_video_count=extracted_count,
         cleared_frame_count=cleared_frame_count,
@@ -644,11 +646,9 @@ def _count_extracted_frames(videos: list[str], project_directory: Path) -> dict[
         A mapping of video path to the number of extracted ``img*.png`` frames currently in its labeled-data
         directory, excluding any ``*labeled.png`` prediction overlays.
     """
-    counts: dict[str, int] = {}
-    for video in videos:
-        directory = project_directory / "labeled-data" / Path(video).stem
-        counts[video] = len(extracted_frame_paths(directory))
-    return counts
+    return {
+        video: len(extracted_frame_paths(project_directory / "labeled-data" / Path(video).stem)) for video in videos
+    }
 
 
 def _clear_bare_frames(
@@ -797,7 +797,7 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
 
     Args:
         task: The packed work item carrying the video path, the config path, the clustering parameters, the video
-            index, the per-video frame total, and the progress queue (or None when progress is off).
+            index, the per-video frame total, the progress queue (or None when progress is off), and the crop flag.
 
     Returns:
         A tuple of the video path, the number of frames freshly written, and a status string (``"ok"``, ``"empty"``,

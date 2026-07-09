@@ -30,7 +30,9 @@ def plan_core_allocation(
     cores-per-worker instead gives each worker exactly that many cores, sizing an automatic worker count from the
     usable cores, while an explicit worker count splits the usable cores evenly across those workers. In both cases
     the worker count is capped at the number of videos, so a request for more workers than videos runs one worker
-    per video. The pinned blocks stay within the usable band, leaving the reserved cores free regardless.
+    per video. The pinned blocks stay within the usable band, leaving the reserved cores free regardless. An explicit
+    request that cannot fit (more workers than usable cores, or a worker count times cores-per-worker that exceeds
+    them) raises ``ValueError`` instead of overlapping the blocks and thrashing.
 
     Notes:
         DeepLabCut reads a single video's frames in one serial Python loop that cannot be sped up, but each frame's
@@ -48,6 +50,11 @@ def plan_core_allocation(
 
     Returns:
         A tuple of the resolved worker count and a list of core-id sets, one per worker.
+
+    Raises:
+        ValueError: If an explicit worker count or cores-per-worker (or their combination) needs more cores than
+            are usable, which would force two or more workers to share cores. Lower the request so the workers'
+            core blocks fit within the usable cores.
     """
     usable_core_count = max(1, total_core_count - max(0, reserved_core_count))
 
@@ -69,7 +76,7 @@ def plan_core_allocation(
                     worker_count += 1
                     per_worker_core_counts.append(leftover_core_count)
         else:
-            # Explicit worker count with automatic cores: spread the usable cores evenly across the workers.
+            # Explicit worker count with automatic cores: spreads the usable cores evenly across the workers.
             worker_count = max(1, min(worker_count, video_count))
             base_cores_per_worker, remainder = divmod(usable_core_count, worker_count)
             per_worker_core_counts = [
@@ -80,6 +87,16 @@ def plan_core_allocation(
             worker_count = max(1, usable_core_count // cores_per_worker)
         worker_count = max(1, min(worker_count, video_count))
         per_worker_core_counts = [max(1, cores_per_worker)] * worker_count
+
+    requested_core_count = sum(per_worker_core_counts)
+    if worker_count > 1 and requested_core_count > usable_core_count:
+        message = (
+            f"Unable to pin {worker_count} frame-extraction workers to disjoint core blocks. The requested "
+            f"configuration needs {requested_core_count} cores, but only {usable_core_count} of the machine's "
+            f"{total_core_count} cores are usable after reserving {max(0, reserved_core_count)}. Lower the worker "
+            f"count or the cores-per-worker so their total fits the usable cores, or reserve fewer cores."
+        )
+        raise ValueError(message)
 
     core_sets: list[set[int]] = []
     core_cursor = 0

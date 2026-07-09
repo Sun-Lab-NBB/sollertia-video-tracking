@@ -19,6 +19,41 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
 
+@dataclass(frozen=True, slots=True)
+class PurgeSummary:
+    """Summarizes a wholesale labeled-data purge, whether previewed as a dry run or actually executed.
+
+    Notes:
+        A purge is deliberately destructive: unlike the frame and outlier re-extraction options, which preserve every
+        human-labeled and machine-labeled frame, it removes each targeted video's entire ``labeled-data`` folder,
+        including its labels. The ``executed`` flag distinguishes a dry-run preview from a completed deletion, and
+        ``labeled_directories`` names the folders that held human labels so callers can warn before deleting them.
+    """
+
+    config_path: Path
+    """The path to the DeepLabCut project's config.yaml the purge targeted."""
+    executed: bool
+    """Indicates whether the folders were actually deleted (True) or only previewed as a dry run (False)."""
+    removed_directories: tuple[Path, ...]
+    """The ``labeled-data/<stem>`` folders that were removed, or that a dry run would remove."""
+    labeled_directories: tuple[Path, ...]
+    """The targeted folders that held a human ``CollectedData`` label file, whose labels the purge discards."""
+    frame_count: int
+    """The total number of extracted frames across the targeted folders, reported to convey the purge's scope."""
+    unmatched_videos: tuple[str, ...] = ()
+    """The requested videos that matched no registered project video and were skipped."""
+
+    @property
+    def removed_directory_count(self) -> int:
+        """Returns the number of labeled-data folders removed, or that a dry run would remove."""
+        return len(self.removed_directories)
+
+    @property
+    def labeled_directory_count(self) -> int:
+        """Returns the number of targeted folders that held human labels."""
+        return len(self.labeled_directories)
+
+
 def normalize_project_config(config_path: Path, *, frames_per_video: int, error_context: str) -> Any:
     """Persists a normalized project_path and optional numframes2pick before any worker reads the configuration.
 
@@ -209,7 +244,7 @@ def finite_labeled_frame_names(collected_data_path: Path) -> set[str]:
     """
     if not collected_data_path.is_file():
         return set()
-    labels = cast("pd.DataFrame", pd.read_hdf(collected_data_path, "df_with_missing"))
+    labels = cast("pd.DataFrame", pd.read_hdf(collected_data_path, key="df_with_missing"))
     annotated_labels = labels[labels.notna().any(axis=1)]
     return frame_names_from_index(annotated_labels.index)
 
@@ -234,7 +269,7 @@ def machine_label_frame_names(directory: Path) -> set[str]:
     names: set[str] = set()
     table_paths = [*sorted(directory.glob("machinelabels-iter*.h5")), *sorted(directory.glob("MachineLabelsRefine.h5"))]
     for table_path in table_paths:
-        names |= frame_names_from_index(pd.read_hdf(table_path, "df_with_missing").index)
+        names |= frame_names_from_index(pd.read_hdf(table_path, key="df_with_missing").index)
     return names
 
 
@@ -316,47 +351,12 @@ def ensure_unique_video_stems(videos: list[str], *, error_context: str) -> None:
         stems[stem] = video
 
 
-@dataclass(frozen=True, slots=True)
-class PurgeSummary:
-    """Summarizes a wholesale labeled-data purge, whether previewed as a dry run or actually executed.
-
-    Notes:
-        A purge is deliberately destructive: unlike the frame and outlier re-extraction options, which preserve every
-        human-labeled and machine-labeled frame, it removes each targeted video's entire ``labeled-data`` folder,
-        including its labels. The ``executed`` flag distinguishes a dry-run preview from a completed deletion, and
-        ``labeled_directories`` names the folders that held human labels so callers can warn before deleting them.
-    """
-
-    config_path: Path
-    """The path to the DeepLabCut project's config.yaml the purge targeted."""
-    executed: bool
-    """Whether the folders were actually deleted (True) or only previewed as a dry run (False)."""
-    removed_directories: tuple[Path, ...]
-    """The ``labeled-data/<stem>`` folders that were removed, or that a dry run would remove."""
-    labeled_directories: tuple[Path, ...]
-    """The targeted folders that held a human ``CollectedData`` label file, whose labels the purge discards."""
-    frame_count: int
-    """The total number of extracted frames across the targeted folders, reported to convey the purge's scope."""
-    unmatched_videos: tuple[str, ...] = ()
-    """The requested videos that matched no registered project video and were skipped."""
-
-    @property
-    def removed_directory_count(self) -> int:
-        """Returns the number of labeled-data folders removed, or that a dry run would remove."""
-        return len(self.removed_directories)
-
-    @property
-    def labeled_directory_count(self) -> int:
-        """Returns the number of targeted folders that held human labels."""
-        return len(self.labeled_directories)
-
-
 def purge_labeled_data(
     config_path: Path, *, videos: tuple[str | Path, ...] = (), execute: bool = False
 ) -> PurgeSummary:
     """Removes targeted videos' entire ``labeled-data`` folders, previewing the deletion unless ``execute`` is set.
 
-    This is the wholesale counterpart to the frame and outlier re-extraction options: where those clear only a video's
+    This is the wholesale counterpart to the frame and outlier re-extraction options. Where those clear only a video's
     unlabeled bootstrap frames or a single iteration's outlier frames and always keep the human labels, a purge deletes
     each targeted folder outright, labels included. It exists for the rare start-completely-over case, such as changing
     the project crop, that the label-preserving options cannot serve. It defaults to a dry run so the caller sees the

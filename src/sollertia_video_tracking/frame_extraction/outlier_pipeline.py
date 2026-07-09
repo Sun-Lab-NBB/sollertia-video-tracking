@@ -247,7 +247,8 @@ def extract_outlier_frames_parallel(
             comparison bodyparts resolve to none. Raised when no videos can be refined: the project lists none in
             ``video_sets``, no requested video matches a registered one, or no videos are named and the current model
             has analyzed none. Raised when two selected videos share a file-name stem and would collide in the
-            labeled-data tree.
+            labeled-data tree. Raised when the ``fitting`` algorithm is selected but the project's ``numframes2pick``
+            is missing or not a positive integer and no ``frames_per_video`` override is supplied.
     """
     config_path = config_path.resolve()
     if not config_path.is_file():
@@ -342,7 +343,7 @@ def extract_outlier_frames_parallel(
             )
             raise ValueError(message)
     # Two videos that share a stem would write into one labeled-data folder, racing in the parallel extraction pool.
-    ensure_unique_video_stems(video_paths, error_context="Unable to extract outlier frames.")
+    ensure_unique_video_stems(videos=video_paths, error_context="Unable to extract outlier frames.")
 
     # Clearing runs single-threaded here, before detection, so the concurrent extraction workers never race on reading
     # the machine-label bookkeeping and so DeepLabCut's frame writer, which skips indices whose image already exists,
@@ -511,9 +512,13 @@ def _detect_all_videos(
             if outlier_algorithm == "list":
                 candidates[video] = sorted({int(frame) for frame in explicit_frame_indices})
             elif outlier_algorithm == "uncertain":
-                candidates[video] = uncertain_outlier_indices(comparison_predictions, minimum_confidence)
+                candidates[video] = uncertain_outlier_indices(
+                    predictions=comparison_predictions, minimum_confidence=minimum_confidence
+                )
             elif outlier_algorithm == "jump":
-                candidates[video] = jump_outlier_indices(comparison_predictions, pixel_distance_threshold)
+                candidates[video] = jump_outlier_indices(
+                    predictions=comparison_predictions, pixel_distance_threshold=pixel_distance_threshold
+                )
             else:
                 keypoint_series_by_video[video] = fitting_keypoint_series(comparison_predictions)
         except FileNotFoundError:
@@ -614,7 +619,7 @@ def _detect_fitting_outliers(
 
     context = multiprocessing.get_context("spawn")
     with context.Pool(processes=resolved_fitting_worker_count) as pool:
-        keypoint_deviations = pool.starmap(fit_keypoint_distance, tasks)
+        keypoint_deviations = pool.starmap(func=fit_keypoint_distance, iterable=tasks)
 
     deviations_by_video: dict[str, list[NDArray[np.float64]]] = {video: [] for video in keypoint_series_by_video}
     for video, deviation in zip(owner_videos, keypoint_deviations, strict=True):
@@ -622,7 +627,7 @@ def _detect_fitting_outliers(
 
     return {
         video: fitting_outlier_indices(
-            video_deviations,
+            keypoint_deviations=video_deviations,
             frames_per_video_count=frames_per_video_count,
             pixel_distance_threshold=pixel_distance_threshold,
         )
@@ -827,7 +832,7 @@ def _load_sliced_predictions(
     stop_index = min(math.ceil(frame_count * configuration["stop"]), frame_count)
     window = np.arange(start_index, stop_index)
 
-    output_crop_x, output_crop_y = _video_cropping_offset(configuration, video)
+    output_crop_x, output_crop_y = _video_cropping_offset(configuration=configuration, video=video)
     if metadata.get("data", {}).get("cropping"):
         x1, _, y1, _ = metadata["data"]["cropping_parameters"]
         predictions.iloc[:, predictions.columns.get_level_values(level="coords") == "x"] += x1 - output_crop_x
@@ -945,11 +950,11 @@ def _clear_video_iteration_outliers(*, directory: Path, iteration: int, scorer: 
     if not machine_labels_path.is_file():
         return 0, False
 
-    outlier_frame_names = frame_names_from_index(pd.read_hdf(machine_labels_path, "df_with_missing").index)
+    outlier_frame_names = frame_names_from_index(pd.read_hdf(machine_labels_path, key="df_with_missing").index)
     labeled_frame_names: set[str] = set()
     collected_data_path = directory / f"CollectedData_{scorer}.h5"
     if scorer and collected_data_path.is_file():
-        labeled_frame_names = frame_names_from_index(pd.read_hdf(collected_data_path, "df_with_missing").index)
+        labeled_frame_names = frame_names_from_index(pd.read_hdf(collected_data_path, key="df_with_missing").index)
 
     removed_count = 0
     for frame_name in outlier_frame_names - labeled_frame_names:
@@ -1065,7 +1070,7 @@ def _count_directory_frames(output_directory: Path) -> int:
 
 
 def _skip_video_registration(**_kwargs: Any) -> bool:
-    """Neutralizes DeepLabCut's per-video config.yaml registration inside a worker; the pipeline registers up front.
+    """Neutralizes DeepLabCut's per-video config.yaml registration inside a worker; the videos are pre-registered.
 
     Returns:
         True, reporting a successful registration so DeepLabCut's frame writer proceeds unchanged.

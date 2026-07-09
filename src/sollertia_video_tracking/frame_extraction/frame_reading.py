@@ -144,7 +144,8 @@ def _select_kmeans_frames(
     column_count = scaled_width * 3 if cluster_in_color else scaled_width
     thumbnails = np.empty((len(candidate_indices), scaled_height, column_count), dtype=np.float64)
 
-    read_thumbnails = _read_thumbnails_streaming if _should_stream(candidate_indices) else _read_thumbnails_seeking
+    should_stream = _should_stream(candidate_indices=candidate_indices)
+    read_thumbnails = _read_thumbnails_streaming if should_stream else _read_thumbnails_seeking
     read_thumbnails(
         video_reader=video_reader,
         candidate_indices=candidate_indices,

@@ -145,7 +145,7 @@ class AggregateBar(LiveBar):
         """
         return (
             f"[{'-' * self._width}] {self._preparing_label} | {self._videos_done}/{self._total_video_count} videos | "
-            f"{format_duration(elapsed)} elapsed"
+            f"{format_duration(seconds=elapsed)} elapsed"
         )
 
     def _compose_active(self, elapsed: float) -> str:
@@ -166,5 +166,5 @@ class AggregateBar(LiveBar):
         return (
             f"[{bar}] {percent:5.1f}% | {self._videos_done}/{self._total_video_count} videos "
             f"({active} decoding) | {frames_read:,}/{self._grand_frame_total:,} frames | "
-            f"{format_duration(elapsed)} | ETA {eta}"
+            f"{format_duration(seconds=elapsed)} | ETA {eta}"
         )

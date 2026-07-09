@@ -57,8 +57,9 @@ def plan_video_sampling(
 
     Without ``groups`` the additional videos are drawn uniformly at random. With ``groups`` the additional videos are
     balanced across groups by repeatedly assigning the next video to the group with the fewest projected frames
-    (counting frames from prior passes). This ensures that every group is represented and coverage evens out over
-    repeated passes. In both modes any ``pinned_videos`` are selected first and always included in the draw.
+    (counting frames from prior passes). This equalizes cumulative per-group coverage over repeated passes, though a
+    single pass may skip a group when the video budget is smaller than the group count or the group is already
+    well-covered or exhausted. In both modes any ``pinned_videos`` are selected first and always included in the draw.
 
     Args:
         videos: The ordered candidate video paths the pass may sample from.
@@ -161,8 +162,7 @@ def _select_balanced(
     Returns:
         A tuple of the selected video paths (pinned first, then the balanced fill) and the per-group breakdown as
         ``(group, existing_frame_count, added_video_count, projected_frame_count, available_video_count)`` tuples in
-        canonical group order, where ``available_video_count`` is how many un-extracted videos the group had before
-        this pass.
+        canonical group order. ``available_video_count`` is how many un-extracted videos the group had before this pass.
     """
     generator = Random()  # noqa: S311 -- video sampling is not security-sensitive.
     unextracted_video_set = set(unextracted_videos)
@@ -178,7 +178,7 @@ def _select_balanced(
             group_of[video] = group_key
         existing_frames_by_group[group_key] = sum(extracted_frame_counts.get(video, 0) for video in members)
         eligible_videos = sorted(video for video in members if video in unextracted_video_set)
-        generator.shuffle(eligible_videos)
+        generator.shuffle(x=eligible_videos)
         available_videos_by_group[group_key] = eligible_videos
         available_video_counts_by_group[group_key] = len(eligible_videos)
 
