@@ -185,7 +185,7 @@ pass_shared_parameters = click.make_pass_decorator(SharedExtractionParameters)
 @click.pass_context
 def extract_group(
     ctx: click.Context,
-    config_path: Path,
+    config_path: Path | None,
     workers: int,
     cores: int,
     frames_per_video: int,

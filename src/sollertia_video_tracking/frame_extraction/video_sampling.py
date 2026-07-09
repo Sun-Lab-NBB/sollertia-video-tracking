@@ -207,7 +207,9 @@ def _select_balanced(
     heapq.heapify(heap)
     while remaining_video_budget and heap:
         _, group_key = heapq.heappop(heap)
-        video = available_videos_by_group[group_key].pop(0)
+        # The group's videos were shuffled when seeded, so popping the tail is a uniform-random draw at O(1) and
+        # avoids the O(n) left shift of pop(0).
+        video = available_videos_by_group[group_key].pop()
         selected_videos.append(video)
         seen.add(video)
         projected_frames_by_group[group_key] += frames_per_video_count

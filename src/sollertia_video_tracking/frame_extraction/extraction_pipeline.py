@@ -61,8 +61,9 @@ class FrameExtractionSummary:
     total_core_count: int
     """The total number of CPU cores available on the machine."""
     clustering_frame_count: int
-    """The total number of frames scheduled to be read and clustered across all selected videos, estimated from the
-    video headers before extraction; this includes videos that are later skipped on a resumable re-run."""
+    """The total number of frames scheduled to be read and clustered across the videos selected for extraction this
+    pass, estimated from the video headers before extraction. Videos skipped on a resumable re-run (already
+    extracted, or left untouched) are excluded from this count."""
     existing_frame_count: int = 0
     """The number of frames already extracted across the selection before this run, reported in sampling mode."""
     target_frame_count: int = -1
@@ -277,6 +278,9 @@ def extract_frames_kmeans(
         return has_outlier_refinement_data(labeled_data_directory / Path(video).stem)
 
     cleared_frame_count = 0
+    # Videos whose bare frames --reset cleared but whose surviving human labels keep their img count positive: they
+    # cannot re-enter the eligibility draw on their own, so they are force-included below to actually re-roll them.
+    reset_forced_videos: list[str] = []
     if reset:
         # Reset re-rolls the whole bootstrap: it clears every not-yet-refined registered video's unlabeled frames before
         # sampling, so the cleared frames do not count toward the budget and their videos re-enter the draw. Videos
@@ -290,12 +294,22 @@ def extract_frames_kmeans(
                 f"extraction does not re-extract refined videos.\n"
             )
             sys.stderr.flush()
-        cleared_frame_count += _clear_bare_frames(
+        removed_frame_count, cleared_stems = _clear_bare_frames(
             project_directory=project_directory_path,
             video_stems=[Path(video).stem for video in resettable_videos],
             scorer=scorer,
             scope_label="--reset",
         )
+        cleared_frame_count += removed_frame_count
+        # A cleared video that still holds frames on disk is partially labeled: its bare bootstrap frames were
+        # deleted but its human labels keep it out of the not-yet-extracted pool, so force it back in to re-roll it.
+        # A video cleared to zero re-enters the draw naturally, and a fully-labeled video that lost nothing is left
+        # untouched, so neither is forced here.
+        reset_forced_videos = [
+            video
+            for video in resettable_videos
+            if Path(video).stem in cleared_stems and extracted_frame_paths(labeled_data_directory / Path(video).stem)
+        ]
     if overwrite:
         # Overwrite re-rolls exactly the requested videos: it clears their unlabeled frames before sampling so they
         # re-cluster from scratch and re-enter the not-yet-extracted pool. A video already in refinement cannot be
@@ -308,12 +322,13 @@ def extract_frames_kmeans(
                 f"with --overwrite: {listed_videos}. They belong to the refinement workflow ('extract outliers')."
             )
             raise ValueError(message)
-        cleared_frame_count += _clear_bare_frames(
+        removed_frame_count, _ = _clear_bare_frames(
             project_directory=project_directory_path,
             video_stems=[Path(video).stem for video in requested_matched],
             scorer=scorer,
             scope_label="--overwrite",
         )
+        cleared_frame_count += removed_frame_count
 
     def _nothing_to_extract(existing_frames: int, target_frames: int) -> FrameExtractionSummary:
         """Prunes the empty labeled-data folders and returns a do-nothing summary carrying the frames cleared so far."""
@@ -377,13 +392,21 @@ def extract_frames_kmeans(
         )
         _report_sampling_plan(plan=plan)
         selected_videos = list(plan.selected_videos)
+        selected_video_set = set(selected_videos)
         # Overwrite targets were explicitly cleared and must be re-rolled even when surviving human labels keep their
-        # img count above zero, which the eligibility filter would otherwise read as "already extracted".
-        if overwrite:
-            selected_videos.extend(video for video in requested_matched if video not in set(selected_videos))
+        # img count above zero, which the eligibility filter would otherwise read as "already extracted". Reset
+        # targets that survived clearing with human labels are dropped by the draw for the same reason, so force those
+        # back too; without it their cleared bootstrap frames would be deleted but never re-rolled. The two options are
+        # mutually exclusive, so at most one list is non-empty. Maintaining the set makes the extend and the
+        # skipped-pin check linear rather than rebuilding the set per candidate.
+        forced_reroll_videos = requested_matched if overwrite else reset_forced_videos
+        for video in forced_reroll_videos:
+            if video not in selected_video_set:
+                selected_videos.append(video)
+                selected_video_set.add(video)
         # A pin that still holds frames and was not force-included is dropped by the draw to skip already-extracted
         # videos. Tell the caller how to force it, unless the pass extracts nothing, which the budget report explains.
-        skipped_pins = [video for video in requested_matched if video not in set(selected_videos)]
+        skipped_pins = [video for video in requested_matched if video not in selected_video_set]
         if selected_videos and skipped_pins:
             sys.stderr.write(
                 f"WARNING: {len(skipped_pins)} of the --videos already have extracted frames and were skipped. Pass "
@@ -400,16 +423,33 @@ def extract_frames_kmeans(
         # still holds extracted frames — one that overwrite or reset did not just clear — is left untouched, so a re-run
         # never re-clusters already-bootstrapped or refined videos.
         extracted_counts = _count_extracted_frames(videos=videos, project_directory=project_directory_path)
-        # Overwrite targets are re-extracted even when surviving human labels keep their img count above zero.
-        forced_videos = set(requested_matched) if overwrite else set()
+        # Overwrite targets are re-extracted even when surviving human labels keep their img count above zero. Reset
+        # forces back exactly the cleared videos that still hold human labels, for the same reason.
+        if overwrite:
+            forced_videos = set(requested_matched)
+        elif reset:
+            forced_videos = set(reset_forced_videos)
+        else:
+            forced_videos = set()
         already_extracted_videos = [
             video for video in videos if extracted_counts.get(video, 0) > 0 and video not in forced_videos
         ]
         videos = [video for video in videos if extracted_counts.get(video, 0) == 0 or video in forced_videos]
         if already_extracted_videos:
+            if reset:
+                # Under reset the only videos still skipped are fully-labeled ones (no bootstrap frames to re-roll)
+                # and any already in outlier refinement, reported above; do not advise passing --reset again.
+                reextract_hint = (
+                    "They are fully labeled or already in outlier refinement, so they hold no unlabeled bootstrap "
+                    "frames to re-roll."
+                )
+            elif overwrite:
+                reextract_hint = "Pass --reset to also re-extract project videos beyond the requested --videos."
+            else:
+                reextract_hint = "Pass --overwrite (with --videos) or --reset to re-extract."
             sys.stderr.write(
                 f"WARNING: {len(already_extracted_videos)} video(s) already have extracted frames and were skipped. "
-                f"Pass --overwrite (with --videos) or --reset to re-extract.\n"
+                f"{reextract_hint}\n"
             )
             sys.stderr.flush()
         if not videos:
@@ -611,8 +651,10 @@ def _count_extracted_frames(videos: list[str], project_directory: Path) -> dict[
     return counts
 
 
-def _clear_bare_frames(*, project_directory: Path, video_stems: list[str], scorer: str, scope_label: str) -> int:
-    """Clears each named video's unlabeled bootstrap frames before re-extraction, reporting the total removed.
+def _clear_bare_frames(
+    *, project_directory: Path, video_stems: list[str], scorer: str, scope_label: str
+) -> tuple[int, set[str]]:
+    """Clears each named video's unlabeled bootstrap frames before re-extraction, reporting what was removed.
 
     Runs single-threaded before the workers start, so re-reading and rewriting the per-video label tables never races
     against the concurrent extraction. A video folder that cannot be read is warned about and left untouched rather
@@ -625,11 +667,13 @@ def _clear_bare_frames(*, project_directory: Path, video_stems: list[str], score
         scope_label: The option name (``--overwrite`` or ``--reset``) reported in the clearing summary and any warning.
 
     Returns:
-        The total number of bare frames removed across the named videos.
+        A tuple of the total number of bare frames removed across the named videos and the set of video stems that
+        had at least one bare frame removed, which the caller uses to force those videos back into the re-extraction
+        set even when surviving human labels would otherwise mark them already-extracted.
     """
     labeled_data_directory = project_directory / "labeled-data"
     removed_frame_count = 0
-    cleared_directory_count = 0
+    cleared_stems: set[str] = set()
     for stem in video_stems:
         directory = labeled_data_directory / stem
         try:
@@ -638,15 +682,15 @@ def _clear_bare_frames(*, project_directory: Path, video_stems: list[str], score
             sys.stderr.write(f"WARNING: {scope_label} could not clear the unlabeled frames in '{directory}'.\n")
             continue
         if removed_count:
-            cleared_directory_count += 1
+            cleared_stems.add(stem)
         removed_frame_count += removed_count
 
     sys.stderr.write(
-        f"{scope_label} cleared {removed_frame_count} unlabeled bootstrap frame(s) from {cleared_directory_count} "
+        f"{scope_label} cleared {removed_frame_count} unlabeled bootstrap frame(s) from {len(cleared_stems)} "
         f"video folder(s) before re-extraction.\n"
     )
     sys.stderr.flush()
-    return removed_frame_count
+    return removed_frame_count, cleared_stems
 
 
 def _clear_bare_frames_in_directory(*, directory: Path, scorer: str) -> int:

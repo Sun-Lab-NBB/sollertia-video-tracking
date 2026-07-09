@@ -524,10 +524,20 @@ def _detect_all_videos(
             continue
 
     if keypoint_series_by_video:
+        # The fitting reduction needs a valid numframes2pick to size its fallback selection. Guard it here (the
+        # k-means budgeted path guards the identical value) so a config that is missing or nulls the key fails with
+        # a clean ValueError the CLI reports, rather than an uncaught KeyError/TypeError escaping as a raw traceback.
+        frames_per_video_count = configuration.get("numframes2pick")
+        if not isinstance(frames_per_video_count, int) or frames_per_video_count < 1:
+            message = (
+                "Unable to extract outlier frames. The project's numframes2pick must be a positive integer, but got "
+                f"{frames_per_video_count!r}. Pass frames_per_video to set it."
+            )
+            raise ValueError(message)
         candidates.update(
             _detect_fitting_outliers(
                 keypoint_series_by_video=keypoint_series_by_video,
-                frames_per_video_count=int(configuration["numframes2pick"]),
+                frames_per_video_count=frames_per_video_count,
                 pixel_distance_threshold=pixel_distance_threshold,
                 minimum_confidence=minimum_confidence,
                 autoregressive_degree=autoregressive_degree,

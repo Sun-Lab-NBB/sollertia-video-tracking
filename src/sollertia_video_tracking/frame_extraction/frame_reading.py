@@ -322,8 +322,11 @@ def _cluster_and_pick(
     """
     candidate_count = len(candidate_indices)
     effective_batch_size = batch_size if batch_size <= candidate_count else candidate_count // 2
-    centered = thumbnails - thumbnails.mean(axis=0)
-    centered = centered.reshape(candidate_count, -1)
+    # Center in place: thumbnails is a local buffer that is never read after this, so subtracting the column mean
+    # into it avoids allocating a second full-size copy. The reshape is a view. Bit-identical to DeepLabCut, which
+    # centers the same way (frameselectiontools.py) before discarding its own buffer.
+    thumbnails -= thumbnails.mean(axis=0)
+    centered = thumbnails.reshape(candidate_count, -1)
 
     kmeans = MiniBatchKMeans(
         n_clusters=cluster_count, tol=1e-3, batch_size=effective_batch_size, max_iter=maximum_iterations
