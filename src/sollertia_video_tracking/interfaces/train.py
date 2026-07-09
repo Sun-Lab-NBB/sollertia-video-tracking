@@ -5,7 +5,7 @@ from pathlib import Path
 
 import click
 
-from ..training import Toggle, AmpMode, train_model, resolve_optimization_profile
+from ..training import Toggle, AmpMode, train_model, detect_fixed_input_size, resolve_optimization_profile
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the lab standard."""
@@ -15,101 +15,106 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 @click.argument("config", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("-s", "--shuffle", default=1, show_default=True, help="The shuffle index to train.")
 @click.option(
-    "-i",
+    "-tsi",
     "--training-set-index",
-    "training_set_index",
     default=0,
     show_default=True,
-    help="The index of the TrainingsetFraction to train, selecting a row of the config's TrainingFraction list.",
+    help="Which training/test split to train, when the shuffle defines more than one.",
 )
-@click.option("--modelprefix", default="", help="The model subdirectory prefix, matching the create step.")
+@click.option(
+    "-mp",
+    "--model-prefix",
+    default="",
+    help="The model subdirectory prefix, matching the one chosen when the shuffle was created.",
+)
 @click.option(
     "-e",
     "--epochs",
     type=int,
     default=None,
-    help="The maximum number of pose-model epochs. Omit to use the value stored in the model configuration.",
+    help="The maximum number of pose-model training epochs. Omit to use the shuffle's configured value.",
 )
 @click.option(
-    "-b",
+    "-bs",
     "--batch-size",
-    "batch_size",
     type=int,
     default=None,
     help="The pose-model batch size. Omit to use the configured value; larger batches use more GPU memory.",
 )
-@click.option("--save-epochs", "save_epochs", type=int, default=None, help="The number of epochs between snapshots.")
+@click.option("-se", "--save-epochs", type=int, default=None, help="The number of epochs between saved snapshots.")
 @click.option(
+    "-di",
     "--display-iterations",
-    "display_iterations",
     type=int,
     default=None,
-    help="The number of iterations between intra-epoch loss lines written to the training log.",
+    help="The number of iterations between loss updates shown during each epoch.",
 )
 @click.option(
+    "-ms",
     "--maximum-snapshots",
-    "maximum_snapshots",
     type=int,
     default=None,
     help="The maximum number of snapshots to keep per model. Omit to use the configured value.",
 )
 @click.option(
+    "-sp",
     "--snapshot-path",
-    "snapshot_path",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     default=None,
     help="The pose snapshot to resume training from.",
 )
 @click.option(
+    "-dp",
     "--detector-path",
-    "detector_path",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     default=None,
     help="The detector snapshot to resume training from, for top-down models.",
 )
 @click.option(
+    "-dbs",
     "--detector-batch-size",
-    "detector_batch_size",
     type=int,
     default=None,
     help="The detector batch size, for top-down models. Omit to use the configured value.",
 )
 @click.option(
+    "-de",
     "--detector-epochs",
-    "detector_epochs",
     type=int,
     default=None,
     help="The maximum number of detector epochs, for top-down models. Set to 0 to skip detector training.",
 )
 @click.option(
+    "-dse",
     "--detector-save-epochs",
-    "detector_save_epochs",
     type=int,
     default=None,
     help="The number of epochs between detector snapshots, for top-down models.",
 )
 @click.option(
+    "-lhw",
     "--load-head-weights/--no-load-head-weights",
-    "load_head_weights",
     default=True,
     show_default=True,
     help="Determines whether to restore head weights when resuming a pose model. Disable when changing bodyparts.",
 )
 @click.option(
+    "-d",
     "--device",
     default="auto",
     show_default=True,
     help="The device to train on: 'auto', 'cpu', 'mps', 'cuda', or 'cuda:N'. 'auto' selects every visible GPU.",
 )
 @click.option(
+    "-g",
     "--gpus",
     default=None,
     metavar="INDICES",
     help="The comma-separated CUDA device indices to use (e.g. '0,1'). Omit to use every visible GPU.",
 )
 @click.option(
+    "-mg",
     "--multi-gpu",
-    "multi_gpu",
     type=click.Choice(["auto", "ddp", "dp", "single"]),
     default="auto",
     show_default=True,
@@ -117,6 +122,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "DDP when two or more GPUs are selected.",
 )
 @click.option(
+    "-a",
     "--amp",
     type=click.Choice(["auto", "off", "bf16", "fp16"]),
     default="auto",
@@ -125,6 +131,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "cards with float16 tensor cores.",
 )
 @click.option(
+    "-t",
     "--tf32",
     type=click.Choice(["auto", "on", "off"]),
     default="auto",
@@ -132,88 +139,75 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     help="TF32 acceleration for float32 matmuls and convolutions (CUDA only). 'auto' enables it on Ampere or newer.",
 )
 @click.option(
+    "-cb",
     "--cudnn-benchmark",
-    "cudnn_benchmark",
     type=click.Choice(["auto", "on", "off"]),
     default="auto",
     show_default=True,
-    help="The cuDNN convolution autotuner. Only enable it with --fixed-input-size, since it disables deterministic "
-    "training and can slow variable-size augmentation.",
+    help="The cuDNN convolution autotuner. 'auto' enables it when the shuffle's training transform is detected to use "
+    "a single fixed input size, where it speeds up convolutions; it disables deterministic training and can slow "
+    "variable-size augmentation, so it stays off otherwise.",
 )
 @click.option(
-    "--compile",
-    "torch_compile",
+    "-cm",
+    "--compile-model",
     type=click.Choice(["auto", "on", "off"]),
     default="auto",
     show_default=True,
-    help="Whether to compile the model with torch.compile. Off by default because of its warm-up cost.",
+    help="Whether to compile the model for faster steps. Off by default because of its warm-up cost.",
 )
 @click.option(
-    "-w",
+    "-dw",
     "--dataloader-workers",
-    "dataloader_workers",
     type=int,
     default=-1,
     show_default=True,
     help="The number of dataloader workers per process. Set to -1 to choose automatically from the CPU count.",
 )
 @click.option(
+    "-pm",
     "--pin-memory",
-    "pin_memory",
     type=click.Choice(["auto", "on", "off"]),
     default="auto",
     show_default=True,
     help="Whether dataloaders pin host memory for faster transfers (CUDA only). 'auto' enables it on CUDA.",
 )
 @click.option(
-    "--fixed-input-size",
-    "fixed_input_size",
-    is_flag=True,
-    help="Declares that the training transform produces a single fixed input resolution, which makes the cuDNN "
-    "autotuner safe to enable.",
-)
-@click.option(
+    "-ev",
     "--evaluate/--no-evaluate",
-    "evaluate",
     default=True,
     show_default=True,
     help="Whether to score the trained snapshot against the labeled frames as a final step and write the evaluation "
-    "feather and provenance sidecar.",
+    "results.",
 )
 @click.option(
+    "-ebs",
     "--evaluation-batch-size",
-    "evaluation_batch_size",
     type=int,
     default=16,
     show_default=True,
     help="The number of frames scored per forward pass during the post-training evaluation.",
 )
 @click.option(
-    "--evaluation-pcutoff",
-    "evaluation_pcutoff",
+    "-ecc",
+    "--evaluation-confidence-cutoff",
     type=float,
     default=None,
     help="The confidence cutoff for the evaluation's cutoff-filtered metrics. Omit to use the default of 0.6.",
 )
 @click.option(
-    "--heartbeat",
-    default=30.0,
-    show_default=True,
-    metavar="SECONDS",
-    help="The minimum interval, in seconds, between progress lines when the output is not a TTY.",
-)
-@click.option(
+    "-p",
     "--progress/--no-progress",
-    "display_progress",
     default=True,
     show_default=True,
-    help="Determines whether to render the live progress monitor and route DeepLabCut's own logs off the console.",
+    help="Determines whether to render the live progress monitor and keep the underlying training logs off the "
+    "console.",
 )
 def train_command(
     config: Path,
     shuffle: int,
     training_set_index: int,
-    modelprefix: str,
+    model_prefix: str,
     epochs: int | None,
     batch_size: int | None,
     save_epochs: int | None,
@@ -230,22 +224,20 @@ def train_command(
     amp: AmpMode,
     tf32: Toggle,
     cudnn_benchmark: Toggle,
-    torch_compile: Toggle,
+    compile_model: Toggle,
     dataloader_workers: int,
     pin_memory: Toggle,
     evaluation_batch_size: int,
-    evaluation_pcutoff: float | None,
-    heartbeat: float,
+    evaluation_confidence_cutoff: float | None,
     *,
     load_head_weights: bool,
     evaluate: bool,
-    fixed_input_size: bool,
-    display_progress: bool,
+    progress: bool,
 ) -> None:
     """Trains a DeepLabCut shuffle with hardware optimizations and a clean progress monitor.
 
     CONFIG is the path to the DeepLabCut project's config.yaml. The shuffle's model architecture and train/test split
-    are fixed when the shuffle is created (see ``slvt create-training-dataset``); this command fits that shuffle. Every
+    are fixed when the shuffle is created (see ``slvt prepare``); this command fits that shuffle. Every
     optimization is exposed as a flag: automatic defaults are chosen for the detected hardware and never run slower
     than stock DeepLabCut, while explicit flags let you tune for silicon you know. Training runs as a
     DistributedDataParallel process group across multiple GPUs, or a single process on one GPU, the CPU, or
@@ -259,6 +251,12 @@ def train_command(
         )
         raise click.ClickException(message=message) from error
 
+    # Detect whether the shuffle's training transform feeds the network one fixed input size so the cuDNN autotuner's
+    # 'auto' default can enable itself only when it pays off, replacing the operator-declared flag this used to require.
+    fixed_input_size = detect_fixed_input_size(
+        config, shuffle=shuffle, training_set_index=training_set_index, model_prefix=model_prefix
+    )
+
     try:
         profile = resolve_optimization_profile(
             device=device,
@@ -267,7 +265,7 @@ def train_command(
             amp=amp,
             tf32=tf32,
             cudnn_benchmark=cudnn_benchmark,
-            torch_compile=torch_compile,
+            torch_compile=compile_model,
             dataloader_workers=dataloader_workers,
             pin_memory=pin_memory,
             fixed_input_size=fixed_input_size,
@@ -277,7 +275,7 @@ def train_command(
             profile=profile,
             shuffle=shuffle,
             training_set_index=training_set_index,
-            modelprefix=modelprefix,
+            model_prefix=model_prefix,
             epochs=epochs,
             batch_size=batch_size,
             save_epochs=save_epochs,
@@ -291,9 +289,8 @@ def train_command(
             load_head_weights=load_head_weights,
             evaluate=evaluate,
             evaluation_batch_size=evaluation_batch_size,
-            evaluation_pcutoff=evaluation_pcutoff,
-            heartbeat=heartbeat,
-            display_progress=display_progress,
+            evaluation_confidence_cutoff=evaluation_confidence_cutoff,
+            display_progress=progress,
         )
     except (ValueError, FileNotFoundError) as error:
         raise click.ClickException(str(error)) from error

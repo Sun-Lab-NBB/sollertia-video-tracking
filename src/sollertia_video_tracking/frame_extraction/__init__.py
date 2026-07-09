@@ -1,18 +1,37 @@
-"""Provides the parallel DeepLabCut frame-extraction pipelines, covering both k-means and model-outlier selection.
+"""Provides the parallel DeepLabCut k-means and model-outlier frame-extraction pipelines."""
 
-The k-means pipeline clusters raw video to bootstrap a project's training frames; the outlier pipeline reads a trained
-model's predictions and extracts the frames it most likely got wrong to refine the model. Both decode one video per
-worker pinned to a disjoint block of CPU cores and share the same CPU-allocation and progress-reporting logic.
-"""
-
-from .pipeline import FrameExtractionSummary, extract_frames_kmeans
-from .cpu_allocation import DEFAULT_RESERVE_CORES
-from .outlier_pipeline import OutlierExtractionSummary, extract_outlier_frames_parallel
+from .progress import AggregateBar, make_progress_reporter
+from .utilities import (
+    PurgeSummary,
+    RefinementStatusSummary,
+    RefinementDirectoryStatus,
+    purge_labeled_data,
+    summarize_refinement_status,
+)
+from .cpu_allocation import plan_core_allocation
+from .outlier_pipeline import (
+    TrackingMethod,
+    ExtractionAlgorithm,
+    OutlierExtractionSummary,
+    extract_outlier_frames_parallel,
+)
+from .outlier_detection import OutlierAlgorithm
+from .extraction_pipeline import FrameExtractionSummary, extract_frames_kmeans
 
 __all__ = [
-    "DEFAULT_RESERVE_CORES",
+    "AggregateBar",
+    "ExtractionAlgorithm",
     "FrameExtractionSummary",
+    "OutlierAlgorithm",
     "OutlierExtractionSummary",
+    "PurgeSummary",
+    "RefinementDirectoryStatus",
+    "RefinementStatusSummary",
+    "TrackingMethod",
     "extract_frames_kmeans",
     "extract_outlier_frames_parallel",
+    "make_progress_reporter",
+    "plan_core_allocation",
+    "purge_labeled_data",
+    "summarize_refinement_status",
 ]

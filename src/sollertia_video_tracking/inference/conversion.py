@@ -1,15 +1,8 @@
-"""Provides conversion of DeepLabCut prediction HDF5 files into flat, wide polars feather files for the Sollertia stack.
+"""Provides conversion of DeepLabCut prediction HDF5 files into wide polars feather files for the Sollertia stack."""
 
-DeepLabCut writes predictions as a pandas HDF5 file whose columns are a ``scorer / [individuals] / bodyparts / coords``
-MultiIndex and whose row index is the frame number. The rest of the Sollertia stack runs on numpy 2 / Python 3.14 and
-consumes uncompressed Apache Arrow "feather" files written by polars, so this module renders that prediction table into
-a wide, snake-cased feather: one row per frame (``frame``) and, per keypoint, ``[<individual>_]<bodypart>_x``, ``_y``,
-and ``_likelihood`` columns. It is a direct, project-agnostic transcription of DeepLabCut's own output ("DeepLabCut, but
-in polars"); domain-specific derived quantities are left to downstream consumers. A YAML provenance sidecar records the
-source file and the conversion parameters.
-"""
+from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -17,6 +10,9 @@ import numpy as np
 import pandas as pd
 import polars as pl
 from ruamel.yaml import YAML
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
 
 _COORDINATES: tuple[str, ...] = ("x", "y", "likelihood")
 """The per-keypoint coordinate channels DeepLabCut stores, rendered as column suffixes in this fixed order."""
@@ -54,9 +50,7 @@ class ConversionSummary:
         Returns:
             A compact description of what was converted and where it was written.
         """
-        return (
-            f"converted {self.frame_count} frames x {len(self.keypoints)} keypoints -> {self.feather_path.name}"
-        )
+        return f"converted {self.frame_count} frames x {len(self.keypoints)} keypoints -> {self.feather_path.name}"
 
 
 def convert_predictions_to_feather(
@@ -68,12 +62,19 @@ def convert_predictions_to_feather(
 ) -> ConversionSummary:
     """Converts a DeepLabCut prediction HDF5 file into a wide polars feather file with an optional provenance sidecar.
 
+    DeepLabCut writes predictions as a pandas HDF5 table whose columns are a ``scorer / [individuals] / bodyparts /
+    coords`` MultiIndex and whose rows are frames. This renders that table into a wide, snake-cased feather with one row
+    per frame (``frame``) and, per keypoint, ``[<individual>_]<bodypart>_x``, ``_y``, and ``_likelihood`` columns. The
+    rest of the Sollertia stack (numpy 2 / Python 3.14) reads the resulting uncompressed Apache Arrow feather directly.
+    The transcription is a direct, project-agnostic copy of DeepLabCut's own output; derived quantities are left to
+    downstream consumers.
+
     Args:
         h5_path: The path to the DeepLabCut prediction ``.h5`` file to convert.
         feather_path: The path of the feather file to write.
         likelihood_threshold: The likelihood below which a keypoint's ``x`` and ``y`` are masked to NaN; 0.0 keeps
             every prediction.
-        write_provenance: Whether to write a ``<feather-stem>_provenance.yaml`` sidecar next to the feather.
+        write_provenance: Determines whether to write a ``<feather-stem>_provenance.yaml`` sidecar next to the feather.
 
     Returns:
         A summary describing the converted file.
@@ -89,7 +90,7 @@ def convert_predictions_to_feather(
     keypoints, columns = _flatten_predictions(predictions, likelihood_threshold=likelihood_threshold)
 
     data: dict[str, pl.Series] = {
-        "frame": pl.Series(name="frame", values=np.asarray(predictions.index, dtype=np.uint64)),
+        "frame": pl.Series(name="frame", values=np.asarray(predictions.index, dtype=np.uint32)),
     }
     for name, values in columns.items():
         data[name] = pl.Series(name=name, values=values, dtype=pl.Float32)
@@ -142,18 +143,20 @@ def _read_prediction_dataframe(h5_path: Path) -> pd.DataFrame:
                 f"prediction table, but it stores no objects."
             )
             raise ValueError(message)
-        return store[keys[0]]
+        # pandas-stubs types HDFStore.__getitem__ as DataFrame | Series; a DeepLabCut prediction table is always a
+        # DataFrame.
+        return store[keys[0]]  # type: ignore[return-value]
 
 
 def _flatten_predictions(
     predictions: pd.DataFrame,
     *,
     likelihood_threshold: float,
-) -> tuple[tuple[str, ...], dict[str, np.ndarray]]:
+) -> tuple[tuple[str, ...], dict[str, NDArray[np.float32]]]:
     """Flattens the prediction MultiIndex columns into snake-cased per-keypoint float columns.
 
     The leading ``scorer`` column level is dropped and the remaining levels above the coordinate are joined with
-    underscores to form each keypoint prefix, so a single-animal ``(scorer, snout, x)`` becomes ``snout_x`` and a
+    underscores to form each keypoint prefix. A single-animal ``(scorer, snout, x)`` becomes ``snout_x`` and a
     multi-animal ``(scorer, mouse1, snout, x)`` becomes ``mouse1_snout_x``. Positions below the likelihood threshold
     are masked to NaN while the likelihood channel is preserved.
 
@@ -164,17 +167,19 @@ def _flatten_predictions(
     Returns:
         A tuple of the ordered keypoint prefixes and a mapping of flat column name to float32 values.
     """
-    groups: dict[str, dict[str, np.ndarray]] = {}
+    groups: dict[str, dict[str, NDArray[np.float32]]] = {}
     keypoint_order: list[str] = []
     for column in predictions.columns:
-        *prefix, coordinate = column
+        # Iterating a MultiIndex yields per-column tuples, but pandas-stubs types the elements as str; the unpack is
+        # valid at runtime.
+        *prefix, coordinate = column  # type: ignore[str-unpack]
         keypoint = "_".join(str(level) for level in prefix[1:])
         if keypoint not in groups:
             groups[keypoint] = {}
             keypoint_order.append(keypoint)
         groups[keypoint][coordinate] = predictions[column].to_numpy(dtype=np.float32)
 
-    columns: dict[str, np.ndarray] = {}
+    columns: dict[str, NDArray[np.float32]] = {}
     for keypoint in keypoint_order:
         channels = groups[keypoint]
         likelihood = channels.get("likelihood")
@@ -210,7 +215,7 @@ def _write_provenance(
         keypoints: The flattened per-keypoint prefixes.
         likelihood_threshold: The likelihood threshold applied during conversion.
     """
-    record: dict[str, Any] = {
+    record: dict[str, str | int | float | list[str]] = {
         "source_h5": str(h5_path),
         "feather": str(feather_path.name),
         "frame_count": int(frame_count),
@@ -221,4 +226,4 @@ def _write_provenance(
     yaml = YAML()
     yaml.default_flow_style = False
     with provenance_path.open("w", encoding="utf-8") as stream:
-        yaml.dump(record, stream)
+        yaml.dump(data=record, stream=stream)

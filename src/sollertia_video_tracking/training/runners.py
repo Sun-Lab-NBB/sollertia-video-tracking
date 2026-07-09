@@ -1,10 +1,4 @@
-"""Provides mixed-precision, DistributedDataParallel-capable subclasses of the DeepLabCut PyTorch training runners.
-
-These runners override DeepLabCut's internal ``PoseTrainingRunner``/``DetectorTrainingRunner`` classes to add
-automatic mixed precision, ``torch.compile``, and single-node multi-process DistributedDataParallel while reusing
-every DeepLabCut building block (model, optimizer, scheduler, snapshot manager, and metric computation). Because the
-overrides depend on those internal classes, the DeepLabCut version is pinned exactly in ``pyproject.toml``.
-"""
+"""Provides mixed-precision, DistributedDataParallel-capable subclasses of the DeepLabCut PyTorch training runners."""
 
 from typing import Any
 import logging
@@ -61,6 +55,11 @@ class _OptimizedTrainingRunnerMixin(TrainingRunner):
     _epoch_predictions: Any
     _epoch_ground_truth: Any
 
+    _ddp_static_graph: bool = True
+    """Whether DDP may treat this runner's training graph as static, discovering the always-unused parameters once and
+    keeping gradient bucketing and computation/communication overlap. Pose models satisfy this; the detector runner
+    overrides it to False because its graph varies with the per-image proposal count."""
+
     def __init__(
         self,
         *args: Any,
@@ -104,21 +103,32 @@ class _OptimizedTrainingRunnerMixin(TrainingRunner):
         """Resolves the underlying DeepLabCut model, peeling DataParallel, DDP, and ``torch.compile`` wrappers.
 
         Returns:
-            The original DeepLabCut model exposing ``get_target``/``get_loss``/``get_predictions`` and clean
-            ``state_dict`` keys. Typed ``Any`` because DeepLabCut's model classes ship no type stubs.
+            The original DeepLabCut model with clean ``state_dict`` keys: a ``PoseModel`` exposing
+            ``get_target``/``get_loss``/``get_predictions``, or a ``BaseDetector`` exposing ``get_target`` (its
+            ``forward`` returns the losses and detections directly). Typed ``Any`` because DeepLabCut's model classes
+            ship no type stubs.
         """
         model = self.model
         if isinstance(model, (DataParallel, DistributedDataParallel)):
             model = model.module
         return getattr(model, "_orig_mod", model)
 
-    def _build_autocast_context(self) -> AbstractContextManager[None]:
+    def _build_autocast_context(self, *, enabled: bool = True) -> AbstractContextManager[None]:
         """Builds the autocast context for the forward pass and loss, or a no-op context when precision is float32.
 
+        Autocast is a training-throughput optimization only and must be disabled for evaluation forward passes. The
+        code downstream of an evaluation step assumes float32 tensors. The PAF predictor convolves the heatmaps with a
+        float32 Gaussian kernel (a reduced-precision heatmap raises a dtype-mismatch error), and both the pose and the
+        detector runners convert predictions to NumPy, which has no bfloat16 dtype. Evaluation also runs on the main
+        process alone over the small labeled set, so the mixed-precision speed-up would be immaterial there anyway.
+
+        Args:
+            enabled: Whether mixed precision may be enabled; pass False to force a no-op context (e.g. for evaluation).
+
         Returns:
-            A context manager that enables mixed precision on the runner's device when configured.
+            A context manager that enables mixed precision on the runner's device when configured and enabled.
         """
-        if self._amp_dtype is None:
+        if self._amp_dtype is None or not enabled:
             return nullcontext()
         device_type = "cuda" if str(self.device).startswith("cuda") else str(self.device)
         return torch.autocast(device_type=device_type, dtype=self._amp_dtype)
@@ -147,11 +157,23 @@ class _OptimizedTrainingRunnerMixin(TrainingRunner):
             # validation forward would issue a buffer broadcast that the other ranks (parked at the end-of-epoch
             # barrier) never join, deadlocking the group. Gradients are still all-reduced each step so weights stay in
             # sync; only BatchNorm running statistics remain per-rank, which is the standard multi-GPU trade-off.
+            ddp_options: dict[str, Any] = {"broadcast_buffers": False}
+            if self._ddp_static_graph:
+                # Pretrained backbones (notably timm HRNet and ResNet) carry an ImageNet classification head whose
+                # parameters never contribute to the pose loss, so they receive no gradient and would otherwise abort
+                # the reducer. Declaring the graph static lets DDP discover that always-unused set once and keep
+                # gradient bucketing and computation/communication overlap, far cheaper than the per-iteration graph
+                # traversal that find_unused_parameters performs on every step.
+                ddp_options["static_graph"] = True
+            else:
+                # Detectors build a data-dependent graph (the proposal count varies per image), so the used-parameter
+                # set is not static; fall back to per-iteration unused-parameter detection.
+                ddp_options["find_unused_parameters"] = True
             self.model = DistributedDataParallel(
                 module=self.model,
                 device_ids=[self._local_rank],
                 output_device=self._local_rank,
-                broadcast_buffers=False,
+                **ddp_options,
             )
         elif getattr(self, "_data_parallel", False):
             self.model = DataParallel(module=self.model, device_ids=self._gpus).cuda()
@@ -193,7 +215,7 @@ class _OptimizedTrainingRunnerMixin(TrainingRunner):
 
         # Extend the epoch budget when resuming so the count reflects the total, not the extra, epochs.
         if self.starting_epoch > 0:
-            epochs = self.starting_epoch + epochs
+            epochs += self.starting_epoch
 
         for epoch in range(self.starting_epoch + 1, epochs + 1):
             self.current_epoch = epoch
@@ -216,7 +238,7 @@ class _OptimizedTrainingRunnerMixin(TrainingRunner):
             message += self._gpu_usage_str()
 
             if self._is_main:
-                self.snapshot_manager.update(epoch, self.state_dict(), last=(epoch == epochs))
+                self.snapshot_manager.update(epoch=epoch, state_dict=self.state_dict(), last=(epoch == epochs))
                 _logger.info("%s", message)
                 epoch_metrics = self._metadata.get("metrics")
                 if epoch % self.eval_interval == 0 and epoch_metrics:
@@ -241,18 +263,20 @@ class _OptimizedTrainingRunnerMixin(TrainingRunner):
             mode: Either ``"train"`` or ``"eval"``.
             display_iters: The number of iterations between each intra-epoch loss log.
 
-        Raises:
-            ValueError: When the mode is neither ``"train"`` nor ``"eval"``.
-
         Returns:
             The mean loss over the epoch, computed from this process's shard of the data under DDP.
+
+        Raises:
+            ValueError: When the mode is neither ``"train"`` nor ``"eval"``.
         """
         if mode == "train":
             self.model.train()
         elif mode == "eval":
             self.model.eval()
         else:
-            message = f"Unable to run the epoch using mode '{mode}'. Expected 'train' or 'eval', but got '{mode}'."
+            message = (
+                f"Unable to run the epoch using mode '{mode}'. The mode must be 'train' or 'eval', but got '{mode}'."
+            )
             raise ValueError(message)
 
         epoch_loss = []
@@ -313,28 +337,31 @@ class _OptimizedPoseTrainingRunner(_OptimizedTrainingRunnerMixin, PoseTrainingRu
             batch: The batch of images, annotations, and context for the step.
             mode: Either ``"train"`` or ``"eval"``.
 
-        Raises:
-            ValueError: When the mode is neither ``"train"`` nor ``"eval"``.
-
         Returns:
             The per-loss values for the step as detached NumPy arrays.
+
+        Raises:
+            ValueError: When the mode is neither ``"train"`` nor ``"eval"``.
         """
         if mode not in ("train", "eval"):
-            message = f"Unable to run the pose step using mode '{mode}'. Expected 'train' or 'eval', but got '{mode}'."
+            message = (
+                f"Unable to run the pose step using mode '{mode}'. "
+                f"The mode must be 'train' or 'eval', but got '{mode}'."
+            )
             raise ValueError(message)
 
         if mode == "train":
             self.optimizer.zero_grad()
 
-        inputs = batch["image"].to(self.device).float()
+        inputs = batch["image"].to(self.device, non_blocking=True).float()
         underlying_model = self._unwrap()
-        with self._build_autocast_context():
+        with self._build_autocast_context(enabled=mode == "train"):
             if "cond_keypoints" in batch["context"]:
                 outputs = self.model(inputs, cond_kpts=batch["context"]["cond_keypoints"])
             else:
                 outputs = self.model(inputs)
-            target = underlying_model.get_target(outputs, batch["annotations"])
-            losses_dict = underlying_model.get_loss(outputs, target)
+            target = underlying_model.get_target(outputs=outputs, labels=batch["annotations"])
+            losses_dict = underlying_model.get_loss(outputs=outputs, targets=target)
         if mode == "train":
             self._backward_and_step(loss=losses_dict["total_loss"])
 
@@ -373,6 +400,9 @@ class _OptimizedPoseTrainingRunner(_OptimizedTrainingRunnerMixin, PoseTrainingRu
 class _OptimizedDetectorTrainingRunner(_OptimizedTrainingRunnerMixin, DetectorTrainingRunner):
     """Trains object detection models with mixed precision and DistributedDataParallel."""
 
+    _ddp_static_graph = False
+    """Detectors build a data-dependent graph, so DDP must detect unused parameters per iteration rather than once."""
+
     def step(self, batch: dict[str, Any], mode: str = "train") -> dict[str, Any]:
         """Runs a single detector training or evaluation step with the forward pass and loss under autocast.
 
@@ -380,15 +410,16 @@ class _OptimizedDetectorTrainingRunner(_OptimizedTrainingRunnerMixin, DetectorTr
             batch: The batch of images and annotations for the step.
             mode: Either ``"train"`` or ``"eval"``.
 
-        Raises:
-            ValueError: When the mode is neither ``"train"`` nor ``"eval"``.
-
         Returns:
             The per-loss values for the step, as detached NumPy arrays during training.
+
+        Raises:
+            ValueError: When the mode is neither ``"train"`` nor ``"eval"``.
         """
         if mode not in ("train", "eval"):
             message = (
-                f"Unable to run the detector step using mode '{mode}'. Expected 'train' or 'eval', but got '{mode}'."
+                f"Unable to run the detector step using mode '{mode}'. "
+                f"The mode must be 'train' or 'eval', but got '{mode}'."
             )
             raise ValueError(message)
 
@@ -398,7 +429,7 @@ class _OptimizedDetectorTrainingRunner(_OptimizedTrainingRunnerMixin, DetectorTr
         else:
             self.model.eval()
 
-        images = batch["image"].to(self.device)
+        images = batch["image"].to(self.device, non_blocking=True)
         underlying_model = self._unwrap()
         target = underlying_model.get_target(batch["annotations"])
         # Move each per-image target tensor onto the training device so the detector forward can consume it.
@@ -407,7 +438,7 @@ class _OptimizedDetectorTrainingRunner(_OptimizedTrainingRunnerMixin, DetectorTr
                 if item[key] is not None:
                     item[key] = item[key].to(self.device)
 
-        with self._build_autocast_context():
+        with self._build_autocast_context(enabled=mode == "train"):
             losses, predictions = self.model(images, target)
 
         # Losses are only returned during training, not evaluation.
@@ -455,7 +486,7 @@ def build_optimized_training_runner(
 
     Args:
         runner_config: The ``runner`` section of the pose or detector configuration.
-        model_folder: The folder in which snapshots and training statistics are written.
+        model_folder: The directory in which snapshots and training statistics are written.
         task: The task the runner performs, selecting the pose or detector runner subclass.
         model: The model to train.
         device: The device to train on for this process, such as a CUDA index or the CPU.

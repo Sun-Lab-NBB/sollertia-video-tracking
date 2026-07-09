@@ -34,7 +34,8 @@ ___
   GPU or the CPU.
 - Runs inference over many videos across multiple GPUs, a single GPU, or the CPU, analyzing one whole video per worker
   and optionally converting predictions in-flight to polars feather files for the rest of the Sollertia stack.
-- Renders a single aggregate progress bar across all workers, with a greppable heartbeat mode for redirected logs.
+- Renders a single aggregate progress bar across all workers, falling back to periodic greppable progress lines when
+  its output is redirected to a log.
 - Apache 2.0 License.
 
 ___
@@ -98,18 +99,55 @@ This library provides the `slvt` CLI that exposes the following commands:
 
 | Command                   | Description                                                                              |
 |---------------------------|------------------------------------------------------------------------------------------|
-| `extract-frames`          | Selects DeepLabCut training frames by clustering every video in a project in parallel    |
-| `create-training-dataset` | Creates a training-dataset shuffle with a chosen network architecture and train/test split |
+| `extract frames`          | Selects DeepLabCut training frames by clustering every video in a project in parallel    |
+| `extract outliers`        | Extracts a trained model's likely-wrong frames from analyzed videos to refine the model  |
+| `extract purge`           | Deletes targeted videos' entire labeled-data directories, labels included, after a dry-run preview |
+| `prepare`                 | Creates a training-dataset shuffle with a chosen network architecture and train/test split |
 | `train`                   | Trains a shuffle with mixed precision and multi-GPU DistributedDataParallel               |
 | `infer`                   | Analyzes videos across multiple GPUs, a single GPU, or the CPU, with in-flight polars output |
+| `export`                  | Serializes a trained model into a portable, self-contained asset that runs on another machine |
+| `predict`                 | Runs an exported model asset over videos into caller-chosen prediction files, cleaning up after itself |
 
-Use `slvt --help` or `slvt COMMAND --help` for detailed usage information.
+The `extract` group owns the project config.yaml every subcommand operates on, alongside the parallelism and
+frame-selection options the `frames` and `outliers` subcommands share; these must be given before the subcommand name,
+which then carries its own parameters. The `frames` subcommand grows the project toward a `--total-frames` budget,
+always including any videos named with `--videos` and filling the remaining budget from the project's other videos,
+optionally balanced across groups of related videos with `--balance-groups`; the `outliers` subcommand extracts
+`--frames-per-video` outlier frames from each target video given with `--videos`. Both extract additively and re-roll
+their unlabeled frames on `--overwrite` or `--reset` while preserving labeled frames; the `purge` subcommand instead
+deletes a video's whole labeled-data directory, labels included, when a clean start is needed. Use `slvt --help`,
+`slvt extract --help`, or `slvt COMMAND --help` for detailed usage information.
 
 For example, the following command extracts training frames from every video referenced by a project's config.yaml,
-sampling every 500th frame for clustering: `slvt extract-frames /path/to/project/config.yaml --step 500`
+sampling every 500th frame for clustering:
+`slvt extract --config-path /path/to/project/config.yaml --clustering-stride 500 frames`
+
+The following command grows the project toward a two-thousand-frame training set while ensuring every group is
+represented, balancing the sampled videos across the groups inferred from the components their file names share:
+`slvt extract --config-path /path/to/project/config.yaml frames --total-frames 2000 --balance-groups`
+
+The following command extracts frames from two specific videos only, taking `--frames-per-video` frames from each and
+ignoring the project-wide budget and group balancing:
+`slvt extract --config-path /path/to/project/config.yaml frames --videos video1.mp4 --videos video2.mp4 --exclusive`
+
+The following command extracts outlier frames from two analyzed videos to refine a trained model, adding
+`--frames-per-video` corrected frames to each:
+`slvt extract --config-path /path/to/project/config.yaml outliers --videos video1.mp4 --videos video2.mp4`
 
 The following command analyzes two videos with a project's trained model, writing a polars feather of predictions per
 video into an output directory: `slvt infer /path/to/project/config.yaml video1.mp4 video2.mp4 --dest /path/to/output`
+
+While `infer` operates inside a live project as part of the refinement loop, `export` and `predict` cover deployment.
+`export` packages a trained shuffle into a single portable asset that carries everything needed to run the model, with
+no dependence on the original project's labeled data, so the asset can be moved to any machine. `predict` then runs that
+asset over videos, writing each video's predictions to the exact file path paired with it and removing every
+intermediary once it finishes.
+
+The following command exports a project's trained shuffle into a portable model asset:
+`slvt export /path/to/project/config.yaml --destination /path/to/model.slvtmodel`
+
+The following command runs that asset over two videos, writing each video's predictions to its own file:
+`slvt predict /path/to/model.slvtmodel --job video1.mp4 out1.feather --job video2.mp4 out2.feather --device cuda`
 
 ### Python API
 
@@ -122,10 +160,13 @@ from pathlib import Path
 from sollertia_video_tracking import extract_frames_kmeans
 
 # Clusters every video referenced by the DeepLabCut project's config.yaml, writing the selected frames into each
-# video's labeled-data directory. Re-runs skip videos that already have frames unless overwrite=True is passed.
-summary = extract_frames_kmeans(config_path=Path("/path/to/project/config.yaml"), step=500)
+# video's labeled-data directory. Extraction is additive; pass overwrite=True or reset=True to re-roll unlabeled frames.
+summary = extract_frames_kmeans(config_path=Path("/path/to/project/config.yaml"), clustering_stride=500)
 
-print(f"{summary.extracted} extracted, {summary.skipped} skipped, {summary.failed} failed of {summary.total}")
+print(
+    f"{summary.extracted_video_count} extracted, {summary.cleared_frame_count} frames cleared, "
+    f"{summary.failed_video_count} failed of {summary.total_video_count}"
+)
 ```
 
 Inference is likewise available as a function. It resolves the optimizations for the detected hardware, distributes
@@ -143,6 +184,32 @@ summary = run_inference(
     config=Path("/path/to/project/config.yaml"),
     videos=[Path("video1.mp4"), Path("video2.mp4")],
     destination=Path("/path/to/output"),
+    profile=profile,
+)
+
+print(summary.describe())
+```
+
+Model export and deployment are also available as functions. `export_model` writes a portable asset from a trained
+shuffle, and `run_predictions` runs that asset over videos into caller-chosen prediction files:
+
+```python
+from pathlib import Path
+
+from sollertia_video_tracking import export_model, run_predictions, PredictionJob, resolve_inference_profile
+
+# Packages a trained shuffle into a single portable asset that runs on any machine.
+export_model(config=Path("/path/to/project/config.yaml"), destination=Path("/path/to/model.slvtmodel"))
+
+# Runs the asset over videos, writing each video's predictions to the file paired with it and cleaning up every
+# intermediary, including the extracted model and DeepLabCut's own prediction files.
+profile = resolve_inference_profile()
+summary = run_predictions(
+    asset=Path("/path/to/model.slvtmodel"),
+    jobs=[
+        PredictionJob(video=Path("video1.mp4"), output=Path("out1.feather")),
+        PredictionJob(video=Path("video2.mp4"), output=Path("out2.feather")),
+    ],
     profile=profile,
 )
 

@@ -1,20 +1,5 @@
-"""Provides thin optimization wrappers over DeepLabCut's inference runners for mixed precision and channels-last.
+"""Provides thin optimization wrappers over DeepLabCut's inference runners for mixed precision and channels-last."""
 
-DeepLabCut builds and configures its inference runners through ``get_pose_inference_runner`` and
-``get_detector_inference_runner`` (preprocessors, postprocessors, the optional detector, and snapshot loading), then
-drives them from ``analyze_videos`` (which also handles snapshot selection, output naming, and multi-animal assembly).
-Rather than reimplement any of that, this module patches those two builder functions for the duration of an
-``analyze_videos`` call so every runner DeepLabCut builds is enhanced in place: its forward pass is swapped onto our own
-autocast context and, optionally, the channels-last memory format and ``torch.compile``. Two DeepLabCut behaviors make
-this worthwhile: its built-in autocast is float16-only (our models train in bfloat16), and it calls
-``torch.autocast(device_type=str(self.device))`` with a device string like ``"cuda:0"``, which is not a valid autocast
-device type. We disable the stock autocast and apply our own with the correct device type and dtype.
-
-Because these wrappers depend on the internal structure of DeepLabCut's inference runners, the DeepLabCut version is
-pinned exactly in ``pyproject.toml`` and must be re-verified against any new release.
-"""
-
-import sys
 from typing import Any
 import warnings
 from contextlib import AbstractContextManager, nullcontext, contextmanager
@@ -29,6 +14,7 @@ from deeplabcut.pose_estimation_pytorch.runners.inference import (
     DetectorInferenceRunner,
 )
 
+from ..hardware import warn
 from .optimization import InferenceProfile
 
 
@@ -41,6 +27,14 @@ def patch_dlc_runner_builders(profile: InferenceProfile) -> Iterator[None]:
     those two functions with versions that build the stock runner and then enhance it in place with the profile's
     optimizations, restoring the originals on exit. It affects only the calling process, so each worker patches its own
     interpreter.
+
+    Notes:
+        Wrapping the stock builders is worthwhile rather than reimplementing DeepLabCut's runner setup: DeepLabCut's own
+        autocast is float16-only while these models train in bfloat16. DeepLabCut also calls
+        ``torch.autocast(device_type=str(self.device))`` with a device string like ``"cuda:0"`` that is not a valid
+        autocast device type. The stock autocast is disabled and replaced with one carrying the correct device type and
+        dtype. Because the wrappers depend on the internal structure of DeepLabCut's inference runners, the DeepLabCut
+        version is pinned exactly in ``pyproject.toml`` and must be re-verified against any new release.
 
     Args:
         profile: The resolved optimization profile applied to every runner built while the patch is active.
@@ -66,7 +60,7 @@ def patch_dlc_runner_builders(profile: InferenceProfile) -> Iterator[None]:
                 runner = builder(*args, **kwargs)
             finally:
                 building["active"] = False
-            return _optimize_inference_runner(runner, profile)
+            return _optimize_inference_runner(runner=runner, profile=profile)
 
         return build_and_optimize
 
@@ -82,9 +76,10 @@ def patch_dlc_runner_builders(profile: InferenceProfile) -> Iterator[None]:
 def _optimize_inference_runner(runner: InferenceRunner, profile: InferenceProfile) -> InferenceRunner:
     """Enhances a DeepLabCut inference runner in place with mixed precision, channels-last, and ``torch.compile``.
 
-    The runner's forward pass is replaced with a version that wraps the model call in the profile's autocast context
-    (with the correct device type and bfloat16/float16 dtype) and, when enabled, moves inputs to the channels-last
-    memory format with a non-blocking transfer. The model is converted to channels-last and compiled before the swap.
+    The runner's forward pass is replaced with a version that wraps the model call in the profile's autocast context,
+    with the correct device type and bfloat16/float16 dtype. When enabled, that version also moves inputs to the
+    channels-last memory format with a non-blocking transfer. The model is converted to channels-last and compiled
+    before the swap.
     Conditional-top-down runners drive a stateful, multi-stage forward that this simple swap would not preserve, so
     they are left unmodified with a warning.
 
@@ -96,7 +91,7 @@ def _optimize_inference_runner(runner: InferenceRunner, profile: InferenceProfil
         The same runner instance, enhanced in place.
     """
     if isinstance(runner, CTDInferenceRunner):
-        _warn(
+        warn(
             "Conditional-top-down inference is not accelerated by the optimized runner and will run at stock "
             "precision; its frame-to-frame tracking forward pass is left unmodified."
         )
@@ -109,9 +104,10 @@ def _optimize_inference_runner(runner: InferenceRunner, profile: InferenceProfil
     if profile.channels_last:
         runner.model = runner.model.to(memory_format=torch.channels_last)
     if profile.torch_compile:
+        # torch.compile can raise a range of backend errors; fall back to eager execution when it does.
         try:
             runner.model = torch.compile(runner.model)
-        except Exception as error:  # noqa: BLE001 - torch.compile can raise a range of backend errors; fall back to eager.
+        except Exception as error:  # noqa: BLE001
             warnings.warn(f"torch.compile failed; falling back to eager execution. Error: {error}", stacklevel=2)
 
     device_type = "cuda" if str(runner.device).startswith("cuda") else str(runner.device)
@@ -133,9 +129,11 @@ def _optimize_inference_runner(runner: InferenceRunner, profile: InferenceProfil
         return moved
 
     if isinstance(runner, DetectorInferenceRunner):
-        runner.predict = _build_detector_predict(runner, autocast_context, move_inputs)
+        runner.predict = _build_detector_predict(
+            runner=runner, autocast_context=autocast_context, move_inputs=move_inputs
+        )
     else:
-        runner.predict = _build_pose_predict(runner, autocast_context, move_inputs)
+        runner.predict = _build_pose_predict(runner=runner, autocast_context=autocast_context, move_inputs=move_inputs)
     return runner
 
 
@@ -164,10 +162,16 @@ def _build_pose_predict(
             raw_predictions = runner.model.get_predictions(outputs)
         if runner.dynamic is not None:
             raw_predictions["bodypart"]["poses"] = runner.dynamic.update(raw_predictions["bodypart"]["poses"])
+        # Copy each output tensor to host once, then index the resulting array per frame, rather than issuing a
+        # separate device-to-host copy for every frame of every tensor.
+        host_predictions = {
+            head: {name: prediction.cpu().numpy() for name, prediction in head_outputs.items()}
+            for head, head_outputs in raw_predictions.items()
+        }
         return [
             {
-                head: {name: prediction[index].cpu().numpy() for name, prediction in head_outputs.items()}
-                for head, head_outputs in raw_predictions.items()
+                head: {name: array[index] for name, array in head_arrays.items()}
+                for head, head_arrays in host_predictions.items()
             }
             for index in range(batch_size)
         ]
@@ -205,13 +209,3 @@ def _build_detector_predict(
         ]
 
     return predict
-
-
-def _warn(message: str) -> None:
-    """Writes a non-fatal warning to the standard error stream.
-
-    Args:
-        message: The warning text to emit, without the ``WARNING:`` prefix or trailing newline.
-    """
-    sys.stderr.write(f"WARNING: {message}\n")
-    sys.stderr.flush()

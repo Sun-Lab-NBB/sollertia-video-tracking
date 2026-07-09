@@ -1,23 +1,7 @@
-"""Provides reproducible evaluation of a trained DeepLabCut shuffle as a clean, self-describing polars feather.
-
-After a shuffle is trained, this module scores one snapshot against the project's labeled train and test frames and
-renders the ground-truth-versus-prediction comparison as a tidy polars feather: one row per predicted keypoint,
-carrying the prediction, the matched human label, and the pixel error. It is the evaluation counterpart of the
-inference conversion module ("DeepLabCut, but in polars") and follows the same two-file convention, a wide feather
-beside a YAML provenance sidecar. The headline error metrics (RMSE, RMSE above the confidence cutoff, mAP, and mAR) are
-computed by DeepLabCut's own canonical scorer, and the per-keypoint pixel errors are produced by the same matching
-routine DeepLabCut uses internally, so the numbers agree with ``deeplabcut.evaluate_network``; this module adds the
-per-frame, per-keypoint detail that DeepLabCut computes and then discards.
-
-Evaluation runs a single batched forward pass over the labeled frames on one device in full float32 precision. The
-labeled set is small (the hand-labeled train and test frames, not video), so there is no throughput problem to solve,
-and the canonical error numbers are defined at float32; mixed precision is deliberately not used here.
-
-Because it depends on DeepLabCut's internal evaluation, matching, and runner-construction functions, the DeepLabCut
-version is pinned exactly in ``pyproject.toml`` and must be re-verified against any new release.
-"""
+"""Provides reproducible evaluation of a trained DeepLabCut shuffle as a clean, self-describing polars feather."""
 
 from typing import Any
+import logging
 from pathlib import Path
 from datetime import UTC, datetime
 from dataclasses import dataclass
@@ -26,12 +10,18 @@ import numpy as np
 import polars as pl
 import deeplabcut
 from ruamel.yaml import YAML
+from numpy.typing import NDArray
+from deeplabcut.utils import auxiliaryfunctions
 from deeplabcut.core.metrics.api import prepare_evaluation_data
-from deeplabcut.pose_estimation_pytorch.data import DLCLoader
+from deeplabcut.core.weight_init import WeightInitialization
+from deeplabcut.pose_estimation_pytorch.data import DLCLoader, PoseDatasetParameters
 from deeplabcut.pose_estimation_pytorch.task import Task
 from deeplabcut.core.metrics.distance_metrics import match_predictions_for_rmse
 from deeplabcut.pose_estimation_pytorch.apis.utils import get_model_snapshots, get_inference_runners
 from deeplabcut.pose_estimation_pytorch.apis.evaluation import evaluate
+
+_logger = logging.getLogger(__name__)
+"""The module logger; its records propagate to the root handlers configured for the training run."""
 
 _SPLITS: tuple[str, ...] = ("train", "test")
 """The labeled-data partitions scored during evaluation, in report order."""
@@ -124,7 +114,7 @@ class EvaluationSummary:
 
     @property
     def generalization_gap_px(self) -> float:
-        """The test-minus-train RMSE gap in pixels; a large positive gap indicates overfitting."""
+        """Returns the test-minus-train RMSE gap in pixels; a large positive gap indicates overfitting."""
         return self.test.rmse_px - self.train.rmse_px
 
     def describe(self) -> str:
@@ -144,10 +134,10 @@ def evaluate_trained_model(
     *,
     shuffle: int = 1,
     training_set_index: int = 0,
-    modelprefix: str = "",
+    model_prefix: str = "",
     snapshot_index: int | str = "best",
     detector_snapshot_index: int = -1,
-    pcutoff: float | None = None,
+    confidence_cutoff: float | None = None,
     batch_size: int = 16,
     device: str | None = None,
     write_provenance: bool = True,
@@ -157,21 +147,28 @@ def evaluate_trained_model(
     The snapshot's predictions on the train and test frames are compared to the human labels using DeepLabCut's own
     scorer and matching, so the headline metrics agree with ``deeplabcut.evaluate_network``. The per-frame,
     per-keypoint comparison is written as a polars feather and the metric summary and run provenance as a YAML sidecar,
-    both into the shuffle's evaluation-results folder.
+    both into the shuffle's evaluation-results directory.
+
+    Notes:
+        Evaluation is a single float32 forward pass over the small labeled train and test set on one device. Mixed
+        precision is deliberately not used, because the canonical error metrics are defined at float32 and the labeled
+        set is too small for throughput to matter.
 
     Args:
         config: The path of the DeepLabCut project configuration file.
         shuffle: The shuffle index to evaluate.
         training_set_index: The training-set fraction index.
-        modelprefix: The model subdirectory prefix, matching the trained shuffle.
+        model_prefix: The model subdirectory prefix, matching the trained shuffle.
         snapshot_index: The snapshot to score: ``"best"`` (falling back to the last snapshot when no best snapshot was
             saved), an integer index, or ``-1`` for the last snapshot.
         detector_snapshot_index: The detector snapshot index for top-down models; ignored for bottom-up models and
             when no detector was trained, in which case ground-truth bounding boxes are used.
-        pcutoff: The confidence cutoff for the cutoff-filtered metrics and the ``above_pcutoff`` column, or None to
-            fall back to the project configuration's ``pcutoff`` (0.6 when unset), matching
+        confidence_cutoff: The confidence cutoff for the cutoff-filtered metrics and the ``above_pcutoff`` column, or
+            None to fall back to the project configuration's ``pcutoff`` (0.6 when unset), matching
             ``deeplabcut.evaluate_network``.
-        batch_size: The number of frames scored per forward pass; larger batches use the device more fully.
+        batch_size: The number of frames scored per forward pass; larger batches use the device more fully. It is
+            reduced to one automatically when the labeled frames span more than one resolution, which DeepLabCut cannot
+            stack into a single batch.
         device: The device to evaluate on (for example ``"cuda:0"`` or ``"cpu"``), or None to resolve it from the
             model configuration.
         write_provenance: Whether to write the ``<snapshot>_evaluation.yaml`` sidecar beside the feather.
@@ -183,10 +180,11 @@ def evaluate_trained_model(
         ValueError: When the requested snapshot cannot be resolved.
     """
     config = Path(config)
-    loader = DLCLoader(config=config, shuffle=shuffle, trainset_index=training_set_index, modelprefix=modelprefix)
+    loader = DLCLoader(config=config, shuffle=shuffle, trainset_index=training_set_index, modelprefix=model_prefix)
     parameters = loader.get_dataset_parameters()
     single_animal = parameters.max_num_animals == 1
-    cutoff = float(loader.project_cfg.get("pcutoff", 0.6)) if pcutoff is None else float(pcutoff)
+    cutoff = float(loader.project_cfg.get("pcutoff", 0.6)) if confidence_cutoff is None else float(confidence_cutoff)
+    batch_size = _resolve_evaluation_batch_size(loader, batch_size)
 
     pose_snapshot = _resolve_snapshot(loader, snapshot_index, loader.pose_task)
     detector_snapshot = None
@@ -205,6 +203,12 @@ def evaluate_trained_model(
         detector_batch_size=batch_size,
         device=device,
     )
+
+    # The inference runners above are built for the network's own output space. A memory-replay model still predicts
+    # the full SuperAnimal bodypart set. But evaluate() down-converts predictions (and the loader returns ground truth)
+    # in the smaller project bodypart space. So the parameters used for scoring and row accumulation must be realigned
+    # to the project bodyparts to keep the per-keypoint loop in range.
+    parameters = _realign_memory_replay_parameters(loader, parameters)
 
     snapshot_name = pose_snapshot.path.stem
     columns: dict[str, list[Any]] = {name: [] for name in _FEATHER_SCHEMA}
@@ -233,7 +237,7 @@ def evaluate_trained_model(
             bodyparts=parameters.bodyparts,
             individuals=parameters.individuals,
             single_animal=single_animal,
-            pcutoff=cutoff,
+            confidence_cutoff=cutoff,
         )
         if parameters.num_unique_bpts > 0:
             _accumulate_split_rows(
@@ -246,7 +250,7 @@ def evaluate_trained_model(
                 bodyparts=parameters.unique_bpts,
                 individuals=["unique"],
                 single_animal=True,
-                pcutoff=cutoff,
+                confidence_cutoff=cutoff,
                 prediction_key="unique_bodyparts",
             )
         split_metrics[split] = SplitMetrics(
@@ -258,13 +262,13 @@ def evaluate_trained_model(
             unmatched_images=unmatched,
         )
 
-    evaluation_folder = Path(loader.evaluation_folder)
-    evaluation_folder.mkdir(parents=True, exist_ok=True)
-    feather_path = evaluation_folder / f"{snapshot_name}_evaluation.feather"
+    evaluation_directory = Path(loader.evaluation_folder)
+    evaluation_directory.mkdir(parents=True, exist_ok=True)
+    feather_path = evaluation_directory / f"{snapshot_name}_evaluation.feather"
     frame = pl.DataFrame(columns, schema=_FEATHER_SCHEMA)
     frame.write_ipc(file=feather_path, compression="uncompressed")
 
-    provenance_path = evaluation_folder / f"{snapshot_name}_evaluation.yaml"
+    provenance_path = evaluation_directory / f"{snapshot_name}_evaluation.yaml"
     if write_provenance:
         try:
             _write_provenance(
@@ -276,7 +280,7 @@ def evaluate_trained_model(
                 detector_snapshot=detector_snapshot,
                 device=device,
                 batch_size=batch_size,
-                pcutoff=cutoff,
+                confidence_cutoff=cutoff,
                 single_animal=single_animal,
                 split_metrics=split_metrics,
                 feather_path=feather_path,
@@ -299,11 +303,49 @@ def evaluate_trained_model(
     )
 
 
+def _resolve_evaluation_batch_size(loader: DLCLoader, requested: int) -> int:
+    """Reduces the evaluation batch size to one unless every labeled frame shares a single native resolution.
+
+    DeepLabCut's inference runner stacks each forward-pass batch into one tensor, and its evaluation transforms do not
+    resize every frame to a single common size. The HRNet and DEKR backbones pad each frame up to a multiple of 32, and
+    a detector consumes frames at their native resolution. Labeled frames extracted at more than one native resolution
+    therefore cannot share a batch, so this returns one whenever the frames differ in size and the requested size only
+    when they are uniform. Comparing native resolutions is a safe over-approximation: frames of one native resolution
+    always stack to one size, while distinct resolutions can produce distinct sizes. A top-down pose stage that crops
+    each detection to a fixed size would in fact batch regardless, so treating its frames as unbatchable only costs
+    speed and does not affect correctness. The frame dimensions are read from the loader's already-parsed annotations
+    (populated from image headers), so no pixels are decoded.
+
+    Args:
+        loader: The loader for the evaluated shuffle, holding the labeled train and test frames.
+        requested: The batch size requested for the forward pass.
+
+    Returns:
+        The requested batch size when every labeled frame shares one native resolution, or one otherwise.
+    """
+    if requested <= 1:
+        return 1
+    resolutions: set[tuple[int, int]] = set()
+    for split in _SPLITS:
+        for image in loader.load_data(split)["images"]:
+            height, width = image.get("height"), image.get("width")
+            if height is None or width is None:
+                return 1
+            resolutions.add((int(height), int(width)))
+            if len(resolutions) > 1:
+                _logger.info(
+                    "The labeled frames span multiple resolutions, which DeepLabCut cannot stack into one batch; "
+                    "scoring one frame at a time (batch size 1)."
+                )
+                return 1
+    return requested
+
+
 def _resolve_snapshot(loader: DLCLoader, index: int | str, task: Task, *, required: bool = True) -> Any:
     """Resolves a snapshot to score, falling back to the last snapshot when a best snapshot is requested but absent.
 
     Args:
-        loader: The loader holding the model folder the snapshots live in.
+        loader: The loader holding the model directory the snapshots live in.
         index: The requested snapshot index (``"best"``, an integer, or ``-1``).
         task: The task whose snapshots to search (pose or detector).
         required: Whether to raise when no snapshot is found; when False, returns None instead.
@@ -315,11 +357,11 @@ def _resolve_snapshot(loader: DLCLoader, index: int | str, task: Task, *, requir
         ValueError: When no snapshot can be resolved and ``required`` is True.
     """
     try:
-        snapshots = get_model_snapshots(index, loader.model_folder, task)
+        snapshots = get_model_snapshots(index=index, model_folder=loader.model_folder, task=task)
     except (ValueError, IndexError):
         if index == "best":
             try:
-                snapshots = get_model_snapshots(-1, loader.model_folder, task)
+                snapshots = get_model_snapshots(index=-1, model_folder=loader.model_folder, task=task)
             except (ValueError, IndexError):
                 snapshots = []
         else:
@@ -332,18 +374,50 @@ def _resolve_snapshot(loader: DLCLoader, index: int | str, task: Task, *, requir
     return snapshots[0]
 
 
+def _realign_memory_replay_parameters(loader: DLCLoader, parameters: PoseDatasetParameters) -> PoseDatasetParameters:
+    """Realigns evaluation parameters to the project bodyparts for SuperAnimal memory-replay models.
+
+    A memory-replay model keeps predicting the full SuperAnimal bodypart set, so ``get_dataset_parameters`` reports
+    that full set, but DeepLabCut's ``evaluate`` down-converts predictions to the project's bodypart subset (and the
+    loader returns ground truth in that subset). This rebuilds the parameters in the project bodypart space so the
+    per-keypoint accumulation aligns with the scored predictions, mirroring DeepLabCut's ``evaluate_snapshot``. For all
+    other models the parameters are returned unchanged.
+
+    Args:
+        loader: The loader for the evaluated shuffle.
+        parameters: The dataset parameters reported for the model.
+
+    Returns:
+        The parameters to use for scoring, realigned to the project bodyparts when the shuffle used memory replay.
+    """
+    weight_init_config = loader.model_cfg["train_settings"].get("weight_init")
+    if not weight_init_config:
+        return parameters
+    weight_init = WeightInitialization.from_dict(weight_init_config)
+    if not weight_init.memory_replay:
+        return parameters
+    bodyparts = weight_init.bodyparts
+    if bodyparts is None:
+        bodyparts = auxiliaryfunctions.get_bodyparts(loader.project_cfg)
+    return PoseDatasetParameters(
+        bodyparts=bodyparts,
+        unique_bpts=parameters.unique_bpts,
+        individuals=parameters.individuals,
+    )
+
+
 def _accumulate_split_rows(
     columns: dict[str, list[Any]],
     *,
     snapshot_name: str,
     split: str,
     image_paths: list[str],
-    predictions: dict[str, dict[str, np.ndarray]],
-    ground_truth: dict[str, np.ndarray],
+    predictions: dict[str, dict[str, NDArray[np.float32]]],
+    ground_truth: dict[str, NDArray[np.float32]],
     bodyparts: list[str],
     individuals: list[str],
     single_animal: bool,
-    pcutoff: float,
+    confidence_cutoff: float,
     prediction_key: str = "bodyparts",
 ) -> int:
     """Appends one row per predicted keypoint for a partition, matching predictions to ground truth as DeepLabCut does.
@@ -363,7 +437,7 @@ def _accumulate_split_rows(
         bodyparts: The ordered bodypart names to write rows for.
         individuals: The ordered individual names; the first labels rows for single-animal projects.
         single_animal: Whether these keypoints are matched as a single individual.
-        pcutoff: The confidence cutoff used to fill the ``above_pcutoff`` column.
+        confidence_cutoff: The confidence cutoff used to fill the ``above_pcutoff`` column.
         prediction_key: The per-image prediction head to read (``"bodyparts"`` or ``"unique_bodyparts"``).
 
     Returns:
@@ -375,9 +449,9 @@ def _accumulate_split_rows(
             continue
         gt = ground_truth[image]
         pred = predictions[image][prediction_key]
-        prepared = prepare_evaluation_data({image: gt}, {image: pred})
+        prepared = prepare_evaluation_data(ground_truth={image: gt}, predictions={image: pred})
         prepared_gt = prepared[0][0]
-        matches = match_predictions_for_rmse(prepared, single_animal, 0.0)
+        matches = match_predictions_for_rmse(data=prepared, single_animal=single_animal, oks_bbox_margin=0.0)
         surviving = None if single_animal else _surviving_individual_indices(gt)
         video, relative_image = _derive_relative_image_path(image)
 
@@ -405,16 +479,18 @@ def _accumulate_split_rows(
                 columns["gt_x"].append(float(match.gt[keypoint, 0]) if matched else float("nan"))
                 columns["gt_y"].append(float(match.gt[keypoint, 1]) if matched else float("nan"))
                 columns["error_px"].append(float(errors[keypoint]))
-                columns["above_pcutoff"].append(likelihood >= pcutoff)
+                columns["above_pcutoff"].append(likelihood >= confidence_cutoff)
                 columns["matched"].append(matched)
-                columns["oks"].append(float(match.oks))
+                # OKS is only meaningful for a matched prediction; an unmatched prediction keeps the match object's
+                # default 0.0, so store NaN instead to honor the "populated only for matched predictions" contract.
+                columns["oks"].append(float(match.oks) if matched else float("nan"))
         if not matched_any:
             unmatched_images += 1
 
     return unmatched_images
 
 
-def _surviving_individual_indices(ground_truth: np.ndarray) -> np.ndarray:
+def _surviving_individual_indices(ground_truth: NDArray[np.float32]) -> NDArray[np.intp]:
     """Returns the original individual indices that survive DeepLabCut's ground-truth preparation, in order.
 
     ``prepare_evaluation_data`` sets keypoints with visibility at or below zero to NaN and then drops individuals with
@@ -427,7 +503,7 @@ def _surviving_individual_indices(ground_truth: np.ndarray) -> np.ndarray:
     Returns:
         The original indices of the individuals that survive preparation, in prepared-row order.
     """
-    visible = ground_truth.astype(float).copy()
+    visible = ground_truth.astype(float)
     visible[visible[..., 2] <= 0] = np.nan
     kept = np.any(np.all(~np.isnan(visible), axis=-1), axis=-1)
     return np.nonzero(kept)[0]
@@ -435,8 +511,8 @@ def _surviving_individual_indices(ground_truth: np.ndarray) -> np.ndarray:
 
 def _matched_individual(
     match: Any,
-    prepared_ground_truth: np.ndarray,
-    surviving: np.ndarray | None,
+    prepared_ground_truth: NDArray[np.float32],
+    surviving: NDArray[np.intp] | None,
     individuals: list[str],
     instance: int,
 ) -> str:
@@ -459,7 +535,7 @@ def _matched_individual(
     if match.gt is None or surviving is None:
         return f"instance_{instance}"
     for row in range(len(prepared_ground_truth)):
-        if np.array_equal(prepared_ground_truth[row], match.gt, equal_nan=True):
+        if np.array_equal(a1=prepared_ground_truth[row], a2=match.gt, equal_nan=True):
             original = int(surviving[row])
             if 0 <= original < len(individuals):
                 return individuals[original]
@@ -474,8 +550,8 @@ def _derive_relative_image_path(image: str) -> tuple[str, str]:
         image: The absolute path of a labeled image.
 
     Returns:
-        A tuple of the containing video (folder) name and the project-relative image path, anchored at the
-        ``labeled-data`` component when present and falling back to the parent folder and file name otherwise.
+        A tuple of the containing video (directory) name and the project-relative image path, anchored at the
+        ``labeled-data`` component when present and falling back to the parent directory and file name otherwise.
     """
     path = Path(image)
     parts = path.parts
@@ -483,7 +559,7 @@ def _derive_relative_image_path(image: str) -> tuple[str, str]:
         relative = parts[parts.index(_LABELED_DATA_DIR) :]
         _anchor, *tail = relative
         video = tail[0] if tail else ""
-        return video, "/".join(relative)
+        return video, Path(*relative).as_posix()
     return path.parent.name, path.name
 
 
@@ -519,7 +595,7 @@ def _write_provenance(
     detector_snapshot: Any,
     device: str | None,
     batch_size: int,
-    pcutoff: float,
+    confidence_cutoff: float,
     single_animal: bool,
     split_metrics: dict[str, SplitMetrics],
     feather_path: Path,
@@ -536,7 +612,7 @@ def _write_provenance(
         detector_snapshot: The scored detector snapshot, or None.
         device: The evaluation device, or None when resolved from the configuration.
         batch_size: The forward-pass batch size used.
-        pcutoff: The confidence cutoff applied.
+        confidence_cutoff: The confidence cutoff applied.
         single_animal: Whether the project tracks a single individual.
         split_metrics: The canonical metrics for each partition.
         feather_path: The feather written beside this sidecar.
@@ -552,7 +628,7 @@ def _write_provenance(
         "detector_snapshot": (detector_snapshot.path.stem if detector_snapshot is not None else None),
         "device": device,
         "batch_size": int(batch_size),
-        "pcutoff": float(pcutoff),
+        "pcutoff": float(confidence_cutoff),
         "single_animal": bool(single_animal),
         "bodyparts": list(parameters.bodyparts),
         "individuals": list(parameters.individuals),

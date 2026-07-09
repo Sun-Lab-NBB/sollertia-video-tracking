@@ -4,7 +4,14 @@ from pathlib import Path
 
 import click
 
-from ..inference import Toggle, AmpMode, run_inference, resolve_inference_profile
+from ..inference import (
+    Toggle,
+    AmpMode,
+    run_inference,
+    resolve_project_videos,
+    detect_fixed_input_size,
+    resolve_inference_profile,
+)
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the lab standard."""
@@ -12,79 +19,83 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 
 @click.command("infer", context_settings=_CONTEXT_SETTINGS)
 @click.argument("config", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@click.argument("videos", nargs=-1, required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("videos", nargs=-1, required=False, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "-pv",
+    "--project-videos",
+    is_flag=True,
+    help="Also analyze every video registered in the project, in addition to any VIDEOS given explicitly. Registered "
+    "videos that no longer exist on disk are skipped.",
+)
 @click.option(
     "-d",
-    "--dest",
-    "dest",
+    "--destination",
     type=click.Path(file_okay=False, path_type=Path),
     default=None,
     help="The directory prediction files are written to. Omit to write each video's predictions beside the video "
-    "itself, matching DeepLabCut and the location the 'extract-outliers' step reads.",
+    "itself, where the 'extract outliers' step reads them.",
 )
 @click.option("-s", "--shuffle", default=1, show_default=True, help="The shuffle index whose trained model is used.")
 @click.option(
+    "-si",
     "--snapshot-index",
-    "snapshot_index",
     type=int,
     default=None,
-    help="The pose snapshot index to use. Omit to use the snapshot selected by the model configuration.",
+    help="The trained pose snapshot to use. Omit to use the configured default.",
 )
 @click.option(
+    "-dsi",
     "--detector-snapshot-index",
-    "detector_snapshot_index",
     type=int,
     default=None,
-    help="The detector snapshot index to use, for top-down models. Omit to use the configured default.",
+    help="The detector snapshot to use, for top-down models. Omit to use the configured default.",
 )
 @click.option(
     "-b",
     "--batch-size",
-    "batch_size",
     type=int,
     default=None,
-    help="The pose-model inference batch size. Omit to use the configured value.",
+    help="The pose model batch size. Omit to use the configured value.",
 )
 @click.option(
+    "-dbs",
     "--detector-batch-size",
-    "detector_batch_size",
     type=int,
     default=None,
-    help="The detector inference batch size, for top-down models. Omit to use the configured value.",
+    help="The detector batch size, for top-down models. Omit to use the configured value.",
 )
 @click.option(
+    "-tp",
     "--to-polars/--no-to-polars",
-    "to_polars",
     default=False,
     show_default=True,
-    help="Whether to convert each video's predictions in-flight to a wide polars feather file. Off by default so the "
-    "command behaves like DeepLabCut's own analyze and preserves the native prediction files the refinement loop "
-    "(evaluation, outlier extraction) reads; the feather output is deferred to the deployment path.",
+    help="Also convert each video's predictions to a single wide table file. Off by default so the native prediction "
+    "files that the refinement loop (evaluation and outlier extraction) reads are preserved.",
 )
 @click.option(
+    "-lt",
     "--likelihood-threshold",
-    "likelihood_threshold",
     type=float,
     default=0.0,
     show_default=True,
-    help="The likelihood below which keypoint positions are masked to NaN in the feather output.",
+    help="The confidence below which keypoint positions are cleared in the converted table output.",
 )
 @click.option(
+    "-sc",
     "--save-csv",
-    "save_as_csv",
     is_flag=True,
-    help="Also write a DeepLabCut CSV alongside each prediction file.",
+    help="Also write a CSV copy of the predictions alongside each prediction file.",
 )
 @click.option(
+    "-kdo",
     "--keep-dlc-outputs/--no-keep-dlc-outputs",
-    "keep_dlc_outputs",
     default=True,
     show_default=True,
-    help="Whether to keep DeepLabCut's own prediction files (HDF5, pickles, and tracker files) in the destination. "
-    "Kept by default so all DeepLabCut data survives; only takes effect with --to-polars, since conversion is what "
-    "would otherwise remove them.",
+    help="Keep the original per-video prediction files in the destination. Kept by default so no prediction data is "
+    "lost; only takes effect with --to-polars, since conversion is what would otherwise remove them.",
 )
 @click.option(
+    "-dv",
     "--device",
     default="auto",
     show_default=True,
@@ -92,14 +103,15 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "the CPU.",
 )
 @click.option(
+    "-g",
     "--gpus",
     default=None,
     metavar="INDICES",
     help="The comma-separated CUDA device indices to use (e.g. '0,1'). Omit to use every visible GPU.",
 )
 @click.option(
+    "-gp",
     "--gpu-processes",
-    "gpu_processes",
     type=int,
     default=-1,
     show_default=True,
@@ -107,22 +119,23 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "decode gaps. Set to -1 for the default of one video per GPU.",
 )
 @click.option(
+    "-cw",
     "--cpu-workers",
-    "cpu_workers",
     type=int,
     default=-1,
     show_default=True,
     help="The number of CPU worker processes, each pinned to a disjoint core block. Set to -1 to choose automatically.",
 )
 @click.option(
+    "-ctpw",
     "--cpu-threads-per-worker",
-    "cpu_threads_per_worker",
     type=int,
     default=-1,
     show_default=True,
-    help="The number of intra-op threads (and cores) per CPU worker. Set to -1 to choose automatically.",
+    help="The number of CPU threads (and cores) per worker. Set to -1 to choose automatically.",
 )
 @click.option(
+    "-a",
     "--amp",
     type=click.Choice(["auto", "off", "bf16", "fp16"]),
     default="auto",
@@ -131,6 +144,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "capable CPU.",
 )
 @click.option(
+    "-t",
     "--tf32",
     type=click.Choice(["auto", "on", "off"]),
     default="auto",
@@ -138,63 +152,50 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     help="TF32 acceleration for float32 matmuls and convolutions (CUDA only). 'auto' enables it on Ampere or newer.",
 )
 @click.option(
+    "-cb",
     "--cudnn-benchmark",
-    "cudnn_benchmark",
     type=click.Choice(["auto", "on", "off"]),
     default="auto",
     show_default=True,
-    help="The cuDNN convolution autotuner (CUDA only). Best with --fixed-input-size, since videos of differing "
-    "resolutions re-tune it.",
+    help="The convolution autotuner (CUDA only). 'auto' enables it when the run is detected to use a single fixed "
+    "input size (a shared project crop, or one shared video resolution), where it pays off rather than re-tuning per "
+    "size.",
 )
 @click.option(
+    "-cl",
     "--channels-last",
-    "channels_last",
     type=click.Choice(["auto", "on", "off"]),
     default="auto",
     show_default=True,
     help="The channels-last memory format, which accelerates convolutions. 'auto' enables it on CUDA.",
 )
 @click.option(
-    "--compile",
-    "torch_compile",
+    "-cm",
+    "--compile-model",
     type=click.Choice(["auto", "on", "off"]),
     default="auto",
     show_default=True,
-    help="Whether to compile the model with torch.compile. Off by default because of its warm-up cost.",
+    help="Whether to compile the model for faster inference. Off by default because of its warm-up cost.",
 )
 @click.option(
+    "-pm",
     "--pin-memory",
-    "pin_memory",
     type=click.Choice(["auto", "on", "off"]),
     default="auto",
     show_default=True,
     help="Whether to use a non-blocking host-to-device transfer (CUDA only). 'auto' enables it on CUDA.",
 )
 @click.option(
-    "--fixed-input-size",
-    "fixed_input_size",
-    is_flag=True,
-    help="Declares that every video is analyzed at a single fixed resolution, which makes the cuDNN autotuner safe.",
-)
-@click.option(
-    "--heartbeat",
-    default=30.0,
-    show_default=True,
-    metavar="SECONDS",
-    help="The minimum interval, in seconds, between progress lines when the output is not a TTY.",
-)
-@click.option(
+    "-p",
     "--progress/--no-progress",
-    "display_progress",
     default=True,
     show_default=True,
-    help="Determines whether to render the live aggregate progress bar and route DeepLabCut's own output off the "
-    "console.",
+    help="Whether to show the live aggregate progress bar during analysis.",
 )
 def infer_command(
     config: Path,
     videos: tuple[Path, ...],
-    dest: Path | None,
+    destination: Path | None,
     shuffle: int,
     snapshot_index: int | None,
     detector_snapshot_index: int | None,
@@ -210,24 +211,24 @@ def infer_command(
     tf32: Toggle,
     cudnn_benchmark: Toggle,
     channels_last: Toggle,
-    torch_compile: Toggle,
+    compile_model: Toggle,
     pin_memory: Toggle,
-    heartbeat: float,
     *,
+    project_videos: bool,
     to_polars: bool,
-    save_as_csv: bool,
+    save_csv: bool,
     keep_dlc_outputs: bool,
-    fixed_input_size: bool,
-    display_progress: bool,
+    progress: bool,
 ) -> None:
     """Analyzes videos with a trained DeepLabCut model, distributing whole videos across GPU or CPU worker slots.
 
-    CONFIG is the path to the DeepLabCut project's config.yaml, and VIDEOS are the video files to analyze. Each worker
-    analyzes whole videos pulled from a shared queue, so the work is balanced without splitting any video, and every
-    forward pass runs with the mixed precision and memory format chosen for the detected hardware. By default it writes
-    DeepLabCut's native prediction files (preserving them for the evaluation and outlier-extraction steps of the
-    refinement loop); pass ``--to-polars`` to also convert them to wide polars feather files. The same command runs on
-    multiple GPUs, one GPU, or a CPU-only machine.
+    CONFIG is the path to the DeepLabCut project's config.yaml, and VIDEOS are the video files to analyze. VIDEOS may be
+    omitted when ``--project-videos`` is passed, which analyzes every existing video registered in the project
+    configuration. Each worker analyzes whole videos pulled from a shared queue, so the work is balanced without
+    splitting any video, and every forward pass runs with the mixed precision and memory format chosen for the detected
+    hardware. By default it writes DeepLabCut's native prediction files (preserving them for the evaluation and
+    outlier-extraction steps of the refinement loop); pass ``--to-polars`` to also convert them to wide polars feather
+    files. The same command runs on multiple GPUs, one GPU, or a CPU-only machine.
     """
     try:
         gpu_indices = tuple(int(part) for part in gpus.split(",")) if gpus else None
@@ -237,6 +238,29 @@ def infer_command(
         )
         raise click.ClickException(message=message) from error
 
+    resolved_videos = list(videos)
+    if project_videos:
+        resolved_videos.extend(resolve_project_videos(config))
+    seen: set[str] = set()
+    unique_videos: list[str | Path] = []
+    for video in resolved_videos:
+        key = str(video.resolve())
+        if key not in seen:
+            seen.add(key)
+            unique_videos.append(video)
+    if not unique_videos:
+        message = (
+            "No videos to analyze. Provide one or more VIDEOS, or pass --project-videos to analyze the videos "
+            "registered in the project configuration."
+        )
+        raise click.UsageError(message=message)
+    if project_videos:
+        click.echo(message=f"analyzing {len(unique_videos)} videos from the project configuration")
+
+    # Detect whether the run feeds the network one fixed input size so the cuDNN autotuner's 'auto' default can enable
+    # itself only when it pays off, replacing the operator-declared flag this used to require.
+    fixed_input_size = detect_fixed_input_size(config, unique_videos)
+
     try:
         profile = resolve_inference_profile(
             device=device,
@@ -245,7 +269,7 @@ def infer_command(
             tf32=tf32,
             cudnn_benchmark=cudnn_benchmark,
             channels_last=channels_last,
-            torch_compile=torch_compile,
+            torch_compile=compile_model,
             gpu_processes=gpu_processes,
             cpu_workers=cpu_workers,
             cpu_threads_per_worker=cpu_threads_per_worker,
@@ -254,8 +278,8 @@ def infer_command(
         )
         summary = run_inference(
             config=config,
-            videos=list(videos),
-            destination=dest,
+            videos=unique_videos,
+            destination=destination,
             profile=profile,
             shuffle=shuffle,
             snapshot_index=snapshot_index,
@@ -264,10 +288,9 @@ def infer_command(
             detector_batch_size=detector_batch_size,
             to_polars=to_polars,
             likelihood_threshold=likelihood_threshold,
-            save_as_csv=save_as_csv,
+            save_as_csv=save_csv,
             keep_dlc_outputs=keep_dlc_outputs,
-            heartbeat=heartbeat,
-            display_progress=display_progress,
+            display_progress=progress,
         )
     except (ValueError, FileNotFoundError) as error:
         raise click.ClickException(str(error)) from error
