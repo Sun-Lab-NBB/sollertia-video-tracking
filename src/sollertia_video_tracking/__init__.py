@@ -65,9 +65,12 @@ from .frame_extraction import (  # noqa: E402 - after thread-limit setup
     OutlierAlgorithm,
     ExtractionAlgorithm,
     FrameExtractionSummary,
+    RefinementFolderStatus,
+    RefinementStatusSummary,
     OutlierExtractionSummary,
     purge_labeled_data,
     extract_frames_kmeans,
+    summarize_refinement_status,
     extract_outlier_frames_parallel,
 )
 
@@ -87,6 +90,8 @@ __all__ = [
     "PredictionJob",
     "PredictionSummary",
     "PurgeSummary",
+    "RefinementFolderStatus",
+    "RefinementStatusSummary",
     "TrackingMethod",
     "TrainingDatasetSummary",
     "TrainingSummary",
@@ -106,5 +111,6 @@ __all__ = [
     "resolve_optimization_profile",
     "run_inference",
     "run_predictions",
+    "summarize_refinement_status",
     "train_model",
 ]

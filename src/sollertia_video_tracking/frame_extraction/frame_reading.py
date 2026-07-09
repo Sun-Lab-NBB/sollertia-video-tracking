@@ -25,7 +25,9 @@ Measured as the crossover on long-GOP (~250) HEVC video. It affects only speed, 
 because the seek and stream paths read and cluster the identical candidate frames."""
 
 
-def make_fast_kmeans_selector(*, progress: Callable[..., Iterable[Any]] | None = None) -> Callable[..., list[int]]:
+def make_fast_kmeans_selector(
+    *, progress: Callable[..., Iterable[Any]] | None = None, frame_count: int | None = None
+) -> Callable[..., list[int]]:
     """Builds a drop-in replacement for DeepLabCut's ``KmeansbasedFrameselectioncv2`` that avoids per-candidate seeks.
 
     DeepLabCut's reader seeks to every flagged candidate, which rewinds to a keyframe on long-GOP video and collapses
@@ -42,6 +44,9 @@ def make_fast_kmeans_selector(*, progress: Callable[..., Iterable[Any]] | None =
     Args:
         progress: A ``tqdm``-compatible callable that wraps the per-candidate iteration to report progress, or None to
             fall back to a plain ``tqdm`` bar, matching DeepLabCut's own default.
+        frame_count: The number of frames to select, overriding the count DeepLabCut derives from ``numframes2pick``.
+            Set to None to keep DeepLabCut's count. A worker sets it to top a video up to its per-video ceiling without
+            rewriting the shared configuration.
 
     Returns:
         A callable mirroring ``KmeansbasedFrameselectioncv2`` that returns the frame indices to extract.
@@ -64,7 +69,7 @@ def make_fast_kmeans_selector(*, progress: Callable[..., Iterable[Any]] | None =
         """
         return _select_kmeans_frames(
             video_reader=video_reader,
-            cluster_count=cluster_count,
+            cluster_count=cluster_count if frame_count is None else frame_count,
             window_start=window_start,
             window_stop=window_stop,
             frame_indices=frame_indices,

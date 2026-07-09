@@ -62,8 +62,8 @@ class FrameExtractionSummary:
     """The total number of CPU cores available on the machine."""
     clustering_frame_count: int
     """The total number of frames scheduled to be read and clustered across the videos selected for extraction this
-    pass, estimated from the video headers before extraction. Videos skipped on a resumable re-run (already
-    extracted, or left untouched) are excluded from this count."""
+    pass, estimated from the video headers before extraction. Videos already at the per-video ceiling, and videos
+    already in outlier refinement, are excluded from this count."""
     existing_frame_count: int = 0
     """The number of frames already extracted across the selection before this run, reported in sampling mode."""
     target_frame_count: int = -1
@@ -106,17 +106,21 @@ def extract_frames_kmeans(
     """Runs DeepLabCut k-means frame extraction across a project's videos in parallel and reports the outcome.
 
     Reads the run parameters from the project's config.yaml, plans the CPU-core allocation, and clusters every
-    selected video in its own pinned worker process. Extraction is additive and grows coverage across passes: a video
-    that already holds extracted frames is skipped, so each run only bootstraps videos that have none yet. ``overwrite``
-    and ``reset`` opt a video back in by first clearing its unlabeled bootstrap frames so the run re-rolls them,
-    always preserving every human-labeled and outlier-extracted frame. Frame extraction is the bootstrap step that
-    precedes outlier refinement, so a video already in refinement is off-limits: ``overwrite`` refuses it and ``reset``
-    leaves it untouched. A single bad video is recorded in the returned summary rather than aborting the run.
+    selected video in its own pinned worker process. ``numframes2pick`` is a per-video ceiling: each selected video is
+    topped up to it, so a not-yet-extracted video gains a full set while a partly-extracted one gains only the frames
+    that reach the ceiling, and a video already at the ceiling is skipped. ``overwrite`` and ``reset`` instead clear a
+    video's unlabeled bootstrap frames first so it is re-rolled from scratch, always preserving every human-labeled and
+    outlier-extracted frame. Frame extraction is the bootstrap step that precedes outlier refinement, so a video already
+    in refinement is off-limits: it is dropped from the candidate pool, and an explicit refined ``requested_videos``
+    target is refused under ``overwrite``. A single bad video is recorded in the returned summary rather than aborting
+    the run.
 
-    When ``total_frame_budget`` is set, the run samples a random subset of not-yet-extracted videos sized to reach that
-    project-wide frame budget. This means that the full project's video set can be added once and extraction grows
-    coverage across repeated passes without manual selection. When the existing frames already meet the budget, the
-    run extracts nothing and warns; raising ``total_frame_budget`` or using ``reset`` grows the set further.
+    When ``total_frame_budget`` is set, the run selects just enough videos to reach that project-wide frame total,
+    preferring not-yet-extracted videos and falling back to below-ceiling ones, so coverage grows before existing videos
+    are deepened. The full project's video set can be added once and repeated passes grow it toward the budget without
+    manual selection. When the existing frames already meet the budget, the run extracts nothing and warns; if even
+    topping every eligible video to the ceiling cannot reach the budget in one pass, the run reports the shortfall and
+    raises rather than extracting a partial set.
 
     Notes:
         The pipeline uses the spawn multiprocessing start method on every platform for reproducible behavior, so a
@@ -127,9 +131,10 @@ def extract_frames_kmeans(
         ``overwrite`` and ``reset`` remove only a video's bare bootstrap frames: the extracted images that carry no
         human label and belong to no outlier-refinement iteration. Frames the human has annotated (a finite
         ``CollectedData`` coordinate) and machine-labeled outlier frames are always kept, so re-rolling the diverse
-        bootstrap set never disturbs labeling or outlier work. ``overwrite`` clears exactly the ``requested_videos`` (it
-        requires them and refuses any already in outlier refinement), while ``reset`` clears every registered project
-        video except those in refinement, which it leaves untouched. The video subset is drawn fresh each run, and
+        bootstrap set never disturbs labeling or outlier work. ``overwrite`` clears the videos this run selects to
+        process (refusing any already in outlier refinement), while ``reset`` clears every non-refined project video,
+        so the run re-rolls its whole selection or the whole project respectively. The video subset is drawn fresh each
+        run, and
         k-means picks the frames within a video, so a re-rolled selection differs each run. To reproduce a specific
         selection, name the videos explicitly with ``requested_videos``. To instead discard a video's labels and start
         its ``labeled-data`` folder over from scratch, use ``purge_labeled_data``.
@@ -144,11 +149,11 @@ def extract_frames_kmeans(
         worker_count: The number of videos to decode in parallel. Set to -1 to fill the usable cores automatically.
         cores_per_worker: The number of CPU cores pinned to each worker. Set to -1 to spread the usable cores evenly.
         reserved_core_count: The number of CPU cores to leave free for other tasks.
-        frames_per_video: The number of frames to keep per video, overriding ``numframes2pick`` in config.yaml. Set to
-            -1 to use the value already stored in the configuration file.
-        total_frame_budget: The total number of frames the project should hold, reached by randomly sampling not-yet-
-            extracted videos. Set to -1 to extract every not-yet-extracted selected video instead of sampling toward a
-            budget.
+        frames_per_video: The per-video frame ceiling, overriding ``numframes2pick`` in config.yaml. Each selected
+            video is topped up to this many frames. Set to -1 to use the value already stored in the configuration file.
+        total_frame_budget: The total number of frames the project should hold, reached by topping up videos toward
+            their per-video ceiling, preferring not-yet-extracted videos over below-ceiling ones. Set to -1 to top up
+            every below-ceiling selected video instead of sampling toward a budget.
         balance_groups: Determines whether the budgeted sampling is balanced across groups rather than drawn
             uniformly, so every group is represented and coverage evens out across repeated passes. The group of each
             video is inferred from its file name, with videos that share their non-date name components grouped
@@ -158,19 +163,19 @@ def extract_frames_kmeans(
             ``balance_groups``.
         requested_videos: The specific project video files this run targets, matched against the project's registered
             videos by resolved path. In budgeted mode they are the always-included pins, selected before the remaining
-            budget is filled from the project's other videos. With ``exclusive`` they are the whole set to extract. With
-            ``overwrite`` they are the videos cleared and re-extracted. Ignored when none of those modes apply.
-        exclusive: Determines whether to restrict the run to exactly the ``requested_videos`` and extract
-            ``frames_per_video`` frames from each, bypassing the total-frame budget and group balancing. Requires
-            ``requested_videos`` to be non-empty. Already-extracted requested videos are still skipped unless
-            ``overwrite`` clears them first.
+            budget is filled from the project's other videos. With ``exclusive`` they are the whole set to top up.
+            Ignored when neither a budget, ``exclusive``, nor ``overwrite`` applies.
+        exclusive: Determines whether to restrict the run to exactly the ``requested_videos``, topping each up to
+            ``frames_per_video`` frames and bypassing the total-frame budget and group balancing. Requires
+            ``requested_videos`` to be non-empty. A requested video already at the ceiling is skipped unless
+            ``overwrite`` clears it first.
         clustering_resize_width: The downsample width applied before clustering, passed to DeepLabCut as
             ``cluster_resizewidth``.
         cluster_in_color: Determines whether to cluster on color channels instead of grayscale.
-        overwrite: Determines whether to clear the ``requested_videos`` of their unlabeled bootstrap frames before
-            re-extracting, so the run re-rolls the diverse selection for exactly those videos rather than adding to it.
-            Requires ``requested_videos`` and is refused when any of them is already in outlier refinement. Human labels
-            and outlier-extracted frames are preserved. Mutually exclusive with ``reset``.
+        overwrite: Determines whether to clear the selected videos' unlabeled bootstrap frames before re-extracting, so
+            the run re-rolls the diverse selection for every video it processes rather than topping it up. Any
+            ``requested_videos`` already in outlier refinement are refused. Human labels and outlier-extracted frames
+            are preserved. Mutually exclusive with ``reset``.
         reset: Determines whether to clear every registered project video of its unlabeled bootstrap frames before
             re-extracting, re-rolling the diverse selection project-wide. Videos already in outlier refinement are left
             untouched. Human labels and outlier-extracted frames are preserved. Mutually exclusive with ``overwrite``.
@@ -185,13 +190,14 @@ def extract_frames_kmeans(
     Raises:
         FileNotFoundError: If ``config_path`` does not point to an existing file.
         ValueError: Raised when the options conflict: ``overwrite`` and ``reset`` are both set, ``exclusive`` and
-            ``reset`` are both set, or ``exclusive`` or ``overwrite`` is set without any ``requested_videos``. Raised
-            when ``overwrite`` targets a video already in outlier refinement. Raised when a value is out of range:
-            ``clustering_stride`` is below one, or ``frames_per_video`` or ``total_frame_budget`` (other than the -1
-            sentinel) is below one. Raised when budgeted sampling is requested without a valid ``numframes2pick``, when
-            config.yaml defines no ``video_sets``, or when an exclusive run's requested videos match no registered
-            project video. Raised when two selected videos share a file-name stem and would collide in the labeled-data
-            tree.
+            ``reset`` are both set, or ``exclusive`` is set without any ``requested_videos``. Raised when ``overwrite``
+            targets a video already in outlier refinement. Raised when a value is out of range: ``clustering_stride`` is
+            below one, or ``frames_per_video`` or ``total_frame_budget`` (other than the -1 sentinel) is below one.
+            Raised when the project's ``numframes2pick`` is not a positive integer, when config.yaml defines no
+            ``video_sets``, or when an exclusive run's requested videos match no eligible registered project video.
+            Raised when a budgeted run cannot reach ``total_frame_budget`` in one pass even after topping every eligible
+            video to its ceiling. Raised when two selected videos share a file-name stem and would collide in the
+            labeled-data tree.
     """
     config_path = config_path.resolve()
     if overwrite and reset:
@@ -206,9 +212,6 @@ def extract_frames_kmeans(
             "project, while exclusive restricts extraction to the requested videos. Use overwrite to re-extract only "
             "the requested videos."
         )
-        raise ValueError(message)
-    if overwrite and not requested_videos:
-        message = "Unable to extract frames. The overwrite option requires at least one --videos file to re-extract."
         raise ValueError(message)
     if total_frame_budget != -1 and total_frame_budget < 1:
         message = (
@@ -241,10 +244,10 @@ def extract_frames_kmeans(
     project_directory_path = config_path.parent
     labeled_data_directory = project_directory_path / "labeled-data"
 
-    # The requested videos are resolved whenever they are honored: as always-included pins over the full project pool
-    # in budgeted mode, as the whole pool with exclusive, or as the videos to clear and re-extract with overwrite.
-    # Without a budget and without exclusive or overwrite, --videos is ignored (warned below), so resolving it here
-    # would only emit a misleading per-video warning.
+    # The requested videos are matched against the registered project videos whenever they are honored: as
+    # always-included pins over the full project pool in budgeted mode, as the whole set with exclusive, or as the
+    # explicit targets otherwise. Without a budget and without exclusive or overwrite, --videos is ignored (warned
+    # below), so matching it there would only emit a misleading per-video warning.
     requested_matched: list[str] = []
     if requested_videos and (exclusive or overwrite or total_frame_budget != -1):
         matched_videos, unmatched_videos = select_registered_videos(
@@ -254,79 +257,65 @@ def extract_frames_kmeans(
             sys.stderr.write(f"WARNING: {video} is not registered in the project's config.yaml and was skipped.\n")
         sys.stderr.flush()
         requested_matched = list(matched_videos)
-        if exclusive:
-            videos = list(requested_matched)
-            if not videos:
-                message = (
-                    "Unable to extract frames. None of the requested videos matched a registered project video, so "
-                    "the exclusive run has nothing to extract."
-                )
-                raise ValueError(message)
-    # Exclusive extracts the requested videos directly, so they are not pins. In every other mode they are the pins
-    # the budgeted draw always includes first.
+
+    # Frame extraction is the pre-refinement bootstrap step, so it never touches a video already in outlier refinement.
+    # Refined videos are dropped from the candidate pool, and an explicit refined --videos target is refused under
+    # overwrite and skipped with a warning otherwise.
+    def _is_in_refinement(video: str) -> bool:
+        """Reports whether a candidate video's labeled-data folder already holds outlier-refinement tables."""
+        return has_outlier_refinement_data(labeled_data_directory / Path(video).stem)
+
+    refined_requested = [video for video in requested_matched if _is_in_refinement(video)]
+    if refined_requested and overwrite:
+        listed_videos = ", ".join(refined_requested)
+        message = (
+            "Unable to extract frames. These --videos are already in outlier refinement and cannot be re-extracted "
+            f"with --overwrite: {listed_videos}. They belong to the refinement workflow ('extract outliers')."
+        )
+        raise ValueError(message)
+    for video in refined_requested:
+        sys.stderr.write(f"WARNING: {video} is already in outlier refinement and was skipped.\n")
+    sys.stderr.flush()
+    requested_matched = [video for video in requested_matched if not _is_in_refinement(video)]
+
+    if exclusive:
+        videos = list(requested_matched)
+        if not videos:
+            message = (
+                "Unable to extract frames. None of the requested videos matched an eligible registered project video, "
+                "so the exclusive run has nothing to extract."
+            )
+            raise ValueError(message)
+    else:
+        videos = [video for video in videos if not _is_in_refinement(video)]
+
+    # Exclusive tops up the requested videos directly, so they are not pins. In every other mode they are the pins the
+    # budgeted draw always includes first.
     pinned_videos: tuple[str, ...] = () if exclusive else tuple(requested_matched)
     # Two videos that share a stem would map to one labeled-data folder, so their frame counts and writes collide;
     # this is checked before sampling, whose per-video accounting reads those same stem-keyed folders.
     ensure_unique_video_stems(videos=videos, error_context="Unable to extract frames.")
 
-    # Frame extraction is the bootstrap step that runs before outlier refinement, so it never re-extracts a video that
-    # has already entered refinement. Additive runs simply skip such videos (they already hold frames), and the
-    # re-extraction options honor the same boundary: --overwrite refuses an explicit refined target, and --reset leaves
-    # refined videos untouched.
-    def _is_in_refinement(video: str) -> bool:
-        """Reports whether a candidate video's labeled-data folder already holds outlier-refinement tables."""
-        return has_outlier_refinement_data(labeled_data_directory / Path(video).stem)
+    # numframes2pick is the per-video ceiling every selected video is topped up to; it is resolved once here and used
+    # both to size the budgeted selection and to derive each worker's per-video pick count.
+    frames_per_video_count = configuration.get("numframes2pick")
+    if not isinstance(frames_per_video_count, int) or frames_per_video_count < 1:
+        message = (
+            "Unable to extract frames. The project's numframes2pick must be a positive integer, but got "
+            f"{frames_per_video_count!r}. Pass frames_per_video to set it."
+        )
+        raise ValueError(message)
 
     cleared_frame_count = 0
-    # Videos whose bare frames --reset cleared but whose surviving human labels keep their image count positive: they
-    # cannot re-enter the eligibility draw on their own, so they are force-included below to actually re-roll them.
-    reset_forced_videos: list[str] = []
     if reset:
-        # Reset re-rolls the whole bootstrap: it clears every not-yet-refined registered video's unlabeled frames before
-        # sampling, so the cleared frames do not count toward the budget and their videos re-enter the draw. Videos
-        # already in outlier refinement are left entirely alone.
-        registered_videos = list(configuration["video_sets"])
-        resettable_videos = [video for video in registered_videos if not _is_in_refinement(video)]
-        refined_video_count = len(registered_videos) - len(resettable_videos)
-        if refined_video_count:
-            sys.stderr.write(
-                f"WARNING: --reset left {refined_video_count} video(s) already in outlier refinement untouched. Frame "
-                f"extraction does not re-extract refined videos.\n"
-            )
-            sys.stderr.flush()
-        removed_frame_count, cleared_stems = _clear_bare_frames(
-            project_directory=project_directory_path,
-            video_stems=[Path(video).stem for video in resettable_videos],
-            scorer=scorer,
-            scope_label="--reset",
-        )
-        cleared_frame_count += removed_frame_count
-        # A cleared video that still holds frames on disk is partially labeled: its bare bootstrap frames were
-        # deleted but its human labels keep it out of the not-yet-extracted pool, so force it back in to re-roll it.
-        # A video cleared to zero re-enters the draw naturally, and a fully-labeled video that lost nothing is left
-        # untouched, so neither is forced here.
-        reset_forced_videos = [
-            video
-            for video in resettable_videos
-            if Path(video).stem in cleared_stems and extracted_frame_paths(labeled_data_directory / Path(video).stem)
-        ]
-    if overwrite:
-        # Overwrite re-rolls exactly the requested videos: it clears their unlabeled frames before sampling so they
-        # re-cluster from scratch and re-enter the not-yet-extracted pool. A video already in refinement cannot be
-        # re-extracted, so overwriting one is refused outright rather than silently skipped.
-        refined_targets = [video for video in requested_matched if _is_in_refinement(video)]
-        if refined_targets:
-            listed_videos = ", ".join(refined_targets)
-            message = (
-                "Unable to extract frames. These --videos are already in outlier refinement and cannot be re-extracted "
-                f"with --overwrite: {listed_videos}. They belong to the refinement workflow ('extract outliers')."
-            )
-            raise ValueError(message)
+        # Reset re-rolls the whole bootstrap: it clears every candidate video's unlabeled frames before selection, so
+        # the cleared frames no longer count toward the per-video ceiling and each video is topped back up from its
+        # surviving human labels. Videos already in outlier refinement were excluded from the candidate pool above.
         removed_frame_count, _ = _clear_bare_frames(
             project_directory=project_directory_path,
-            video_stems=[Path(video).stem for video in requested_matched],
+            video_stems=[Path(video).stem for video in videos],
             scorer=scorer,
-            scope_label="--overwrite",
+            scope_label="--reset",
         )
         cleared_frame_count += removed_frame_count
 
@@ -347,38 +336,29 @@ def extract_frames_kmeans(
             target_frame_count=target_frames,
         )
 
-    # --overwrite honors --videos even without a budget (it clears and re-extracts exactly them), so the "ignored"
-    # warning is suppressed in that case. Balance-groups and group-regex still only apply to budgeted sampling.
+    if exclusive and (balance_groups or group_by_pattern is not None):
+        sys.stderr.write(
+            "WARNING: --balance-groups and --group-regex are ignored with --exclusive, which tops up each requested "
+            "video to --frames-per-video directly.\n"
+        )
+        sys.stderr.flush()
     budgetless_options_ignored = (
         total_frame_budget == -1
-        and not overwrite
+        and not exclusive
         and (balance_groups or group_by_pattern is not None or requested_videos)
     )
-    if exclusive:
-        if balance_groups or group_by_pattern is not None:
-            sys.stderr.write(
-                "WARNING: --balance-groups and --group-regex are ignored with --exclusive, which extracts "
-                "--frames-per-video frames from each requested video directly.\n"
-            )
-            sys.stderr.flush()
-    elif budgetless_options_ignored:
+    if budgetless_options_ignored:
         sys.stderr.write(
             "WARNING: --balance-groups, --group-regex, and --videos only apply when sampling toward a frame budget. "
             "Pass --total-frames to enable budgeted sampling (or --exclusive to extract only the requested videos), "
-            "otherwise every not-yet-extracted project video is extracted.\n"
+            "otherwise every below-ceiling project video is topped up.\n"
         )
         sys.stderr.flush()
 
     existing_frame_count = 0
     target_frame_count = -1
+    extracted_counts = _count_extracted_frames(videos=videos, project_directory=project_directory_path)
     if total_frame_budget != -1 and not exclusive:
-        frames_per_video_count = configuration.get("numframes2pick")
-        if not isinstance(frames_per_video_count, int) or frames_per_video_count < 1:
-            message = (
-                "Unable to sample videos for a frame budget. The project's numframes2pick must be a positive "
-                f"integer, but got {frames_per_video_count!r}. Pass frames_per_video to set it."
-            )
-            raise ValueError(message)
         groups = (
             group_videos(videos=videos, group_by_pattern=group_by_pattern)
             if (balance_groups or group_by_pattern is not None)
@@ -386,76 +366,51 @@ def extract_frames_kmeans(
         )
         plan = plan_video_sampling(
             videos=videos,
-            extracted_frame_counts=_count_extracted_frames(videos=videos, project_directory=project_directory_path),
+            extracted_frame_counts=extracted_counts,
             frames_per_video_count=frames_per_video_count,
             total_frame_budget=total_frame_budget,
             groups=groups,
             pinned_videos=pinned_videos,
         )
-        _report_sampling_plan(plan=plan)
-        selected_videos = list(plan.selected_videos)
-        selected_video_set = set(selected_videos)
-        # Overwrite targets were explicitly cleared and must be re-rolled even when surviving human labels keep their
-        # image count above zero, which the eligibility filter would otherwise read as "already extracted". Reset
-        # targets that survived clearing with human labels are dropped by the draw for the same reason, so force those
-        # back too; without it their cleared bootstrap frames would be deleted but never re-rolled. The two options are
-        # mutually exclusive, so at most one list is non-empty. Maintaining the set makes the extend and the
-        # skipped-pin check linear rather than rebuilding the set per candidate.
-        forced_reroll_videos = requested_matched if overwrite else reset_forced_videos
-        for video in forced_reroll_videos:
-            if video not in selected_video_set:
-                selected_videos.append(video)
-                selected_video_set.add(video)
-        # A pin that still holds frames and was not force-included is dropped by the draw to skip already-extracted
-        # videos. Tell the caller how to force it, unless the pass extracts nothing, which the budget report explains.
-        skipped_pins = [video for video in requested_matched if video not in selected_video_set]
-        if selected_videos and skipped_pins:
-            sys.stderr.write(
-                f"WARNING: {len(skipped_pins)} of the --videos already have extracted frames and were skipped. Pass "
-                f"--overwrite to re-extract them.\n"
+        if plan.target_unreachable:
+            message = (
+                f"Unable to reach the requested total of {total_frame_budget:,} frames in one pass. Topping every "
+                f"eligible video up to {frames_per_video_count} frames yields at most {plan.projected_frame_count:,} "
+                "frames. Lower --total-frames, raise --frames-per-video, or register more videos."
             )
-            sys.stderr.flush()
-        if not selected_videos:
+            raise ValueError(message)
+        _report_sampling_plan(plan=plan)
+        if not plan.selected_videos:
             return _nothing_to_extract(existing_frames=plan.existing_frame_count, target_frames=plan.target_frame_count)
-        videos = selected_videos
+        selected_videos = list(plan.selected_videos)
         existing_frame_count = plan.existing_frame_count
         target_frame_count = plan.target_frame_count
+    elif exclusive:
+        selected_videos = list(videos)
     else:
-        # Exclusive or unbudgeted (-1) extraction visits every selected video, but honors the skip rule. A video that
-        # still holds extracted frames — one that overwrite or reset did not just clear — is left untouched, so a re-run
-        # never re-clusters already-bootstrapped or refined videos.
-        extracted_counts = _count_extracted_frames(videos=videos, project_directory=project_directory_path)
-        # Overwrite targets are re-extracted even when surviving human labels keep their image count above zero. Reset
-        # forces back exactly the cleared videos that still hold human labels, for the same reason.
-        if overwrite:
-            forced_videos = set(requested_matched)
-        elif reset:
-            forced_videos = set(reset_forced_videos)
-        else:
-            forced_videos = set()
-        already_extracted_videos = [
-            video for video in videos if extracted_counts.get(video, 0) > 0 and video not in forced_videos
-        ]
-        videos = [video for video in videos if extracted_counts.get(video, 0) == 0 or video in forced_videos]
-        if already_extracted_videos:
-            if reset:
-                # Under reset the only videos still skipped are fully-labeled ones (no bootstrap frames to re-roll)
-                # and any already in outlier refinement, reported above; do not advise passing --reset again.
-                reextract_hint = (
-                    "They are fully labeled or already in outlier refinement, so they hold no unlabeled bootstrap "
-                    "frames to re-roll."
-                )
-            elif overwrite:
-                reextract_hint = "Pass --reset to also re-extract project videos beyond the requested --videos."
-            else:
-                reextract_hint = "Pass --overwrite (with --videos) or --reset to re-extract."
-            sys.stderr.write(
-                f"WARNING: {len(already_extracted_videos)} video(s) already have extracted frames and were skipped. "
-                f"{reextract_hint}\n"
-            )
-            sys.stderr.flush()
-        if not videos:
-            return _nothing_to_extract(existing_frames=existing_frame_count, target_frames=target_frame_count)
+        # Unbudgeted: top up every below-ceiling candidate video to its per-video ceiling.
+        selected_videos = [video for video in videos if extracted_counts.get(video, 0) < frames_per_video_count]
+
+    # Overwrite re-rolls the whole selected set: each selected video's unlabeled frames are cleared here, after the
+    # selection, so re-extraction re-clusters from the surviving human labels rather than adding to them. Reset already
+    # cleared the candidate pool above, and the two options are mutually exclusive.
+    if overwrite and selected_videos:
+        removed_frame_count, _ = _clear_bare_frames(
+            project_directory=project_directory_path,
+            video_stems=[Path(video).stem for video in selected_videos],
+            scorer=scorer,
+            scope_label="--overwrite",
+        )
+        cleared_frame_count += removed_frame_count
+
+    # Each selected video is topped up to the per-video ceiling: it picks the frames that reach the ceiling from
+    # whatever it holds after any clearing (its surviving human labels, or nothing). A video already at the ceiling
+    # picks nothing and is dropped, so a re-run never overshoots the ceiling.
+    post_clear_counts = _count_extracted_frames(videos=selected_videos, project_directory=project_directory_path)
+    pick_counts = {video: max(0, frames_per_video_count - post_clear_counts.get(video, 0)) for video in selected_videos}
+    videos = [video for video in selected_videos if pick_counts[video] > 0]
+    if not videos:
+        return _nothing_to_extract(existing_frames=existing_frame_count, target_frames=target_frame_count)
 
     total_core_count = os.cpu_count() or 1
     worker_count, core_sets = plan_core_allocation(
@@ -502,6 +457,7 @@ def extract_frames_kmeans(
                 cluster_in_color,
                 video_index,
                 frame_totals[video_index],
+                pick_counts[video],
                 reporting_queue,
                 crop_frames,
             )
@@ -590,16 +546,6 @@ def _report_sampling_plan(plan: VideoSamplingPlan) -> None:
             f"of {plan.target_frame_count:,}. Nothing will be extracted. Raise the total frame budget to grow the set, "
             f"or use reset to start over.\n"
         )
-    elif not plan.selected_videos:
-        sys.stderr.write(
-            "WARNING: every selected video already has extracted frames, so none remain to sample. Use overwrite "
-            "or reset to re-extract from existing videos.\n"
-        )
-    elif plan.target_unreachable:
-        sys.stderr.write(
-            f"WARNING: too few un-extracted videos remain to reach {plan.target_frame_count:,} frames. Sampling all "
-            f"{len(plan.selected_videos)} remaining video(s) for a projected {plan.projected_frame_count:,} frames.\n"
-        )
     else:
         sys.stderr.write(
             f"sampling {len(plan.selected_videos)} video(s) | {plan.existing_frame_count:,} existing -> "
@@ -617,14 +563,14 @@ def _report_sampling_plan(plan: VideoSamplingPlan) -> None:
             if added > 0
         )
         sys.stderr.write(f"group balancing: {sampled}/{group_count} groups sampled this pass | {distribution}\n")
-        # A group with no un-extracted videos left is fully done, not starved for budget, so only the groups that still
+        # A group with no below-ceiling videos left is fully done, not starved for budget, so only the groups that still
         # had eligible videos but received none are flagged as needing a larger budget.
         starved = sum(
             1 for (_group, _existing, added, _projected, available) in plan.per_group if added == 0 and available > 0
         )
         if starved:
             sys.stderr.write(
-                f"WARNING: {starved} group(s) had un-extracted videos but received none this pass because the budget "
+                f"WARNING: {starved} group(s) had below-ceiling videos but received none this pass because the budget "
                 f"is too small. Raise the total frame budget to include them.\n"
             )
     if plan.always_included_overshoot:
@@ -668,8 +614,7 @@ def _clear_bare_frames(
 
     Returns:
         A tuple of the total number of bare frames removed across the named videos and the set of video stems that
-        had at least one bare frame removed, which the caller uses to force those videos back into the re-extraction
-        set even when surviving human labels would otherwise mark them already-extracted.
+        had at least one bare frame removed.
     """
     labeled_data_directory = project_directory / "labeled-data"
     removed_frame_count = 0
@@ -797,7 +742,8 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
 
     Args:
         task: The packed work item carrying the video path, the config path, the clustering parameters, the video
-            index, the per-video frame total, the progress queue (or None when progress is off), and the crop flag.
+            index, the per-video frame total, the per-video pick count, the progress queue (or None when progress is
+            off), and the crop flag.
 
     Returns:
         A tuple of the video path, the number of frames freshly written, and a status string (``"ok"``, ``"empty"``,
@@ -811,6 +757,7 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
         cluster_in_color,
         video_index,
         frame_total,
+        pick_count,
         progress_queue,
         crop_frames,
     ) = task
@@ -831,7 +778,9 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
             if progress_queue is not None
             else None
         )
-        frame_selection_tools.KmeansbasedFrameselectioncv2 = make_fast_kmeans_selector(progress=progress_reporter)
+        frame_selection_tools.KmeansbasedFrameselectioncv2 = make_fast_kmeans_selector(
+            progress=progress_reporter, frame_count=pick_count
+        )
 
         with (
             Path(os.devnull).open("w") as null_stream,

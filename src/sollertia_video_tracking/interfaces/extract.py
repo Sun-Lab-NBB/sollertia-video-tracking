@@ -1,4 +1,4 @@
-"""Provides the ``slvt extract`` command group with its ``frames``, ``outliers``, and ``purge`` subcommands."""
+"""Provides the ``slvt extract`` group and its ``frames``, ``outliers``, ``purge``, and ``pending`` subcommands."""
 
 from pathlib import Path
 from dataclasses import dataclass
@@ -11,6 +11,7 @@ from ..frame_extraction import (
     ExtractionAlgorithm,
     purge_labeled_data,
     extract_frames_kmeans,
+    summarize_refinement_status,
     extract_outlier_frames_parallel,
 )
 
@@ -18,21 +19,21 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the lab standard."""
 
 
-@dataclass(frozen=True)
-class SharedExtractionParameters:
-    """Bundles the options parsed on the ``extract`` group and shared across its ``frames``, ``outliers``, and ``purge``
-    subcommands.
+@dataclass(frozen=True, slots=True)
+class _SharedExtractionParameters:
+    """Bundles the options parsed on the ``extract`` group and shared across its ``frames``, ``outliers``, ``purge``,
+    and ``pending`` subcommands.
 
     The ``extract`` group callback builds one of these from its options and stores it on the Click context, and each
-    subcommand reads it back through the ``pass_shared_parameters`` decorator. ``purge`` uses only ``config_path`` and
-    ``videos``. The clustering and parallelism fields apply to ``frames`` and ``outliers``.
+    subcommand reads it back through the ``_pass_shared_parameters`` decorator. ``purge`` and ``pending`` use only
+    ``config_path`` and ``videos``. The clustering and parallelism fields apply to ``frames`` and ``outliers``.
     """
 
     config_path: Path | None
     """The path to the DeepLabCut project's config.yaml every subcommand operates on.
 
     ``--config-path`` cannot be marked required on the group without also blocking ``slvt extract SUBCOMMAND --help``,
-    so it is validated per subcommand through `require_config_path` instead of at parse time, leaving it None
+    so it is validated per subcommand through ``require_config_path`` instead of at parse time, leaving it None
     here when it was omitted.
     """
 
@@ -40,7 +41,8 @@ class SharedExtractionParameters:
     """How many videos to process at the same time; -1 uses the available CPU cores automatically."""
 
     cores_per_worker: int
-    """How many CPU cores to devote to each processed video; -1 shares the available cores evenly."""
+    """How many CPU cores to devote to each processed video; -1 gives each worker a saturating block when --workers is
+    automatic, or splits the usable cores evenly across an explicit --workers count."""
 
     frames_per_video: int
     """How many frames to keep from each processed video; -1 uses the project's configured amount."""
@@ -53,20 +55,21 @@ class SharedExtractionParameters:
     """The width, in pixels, frames are shrunk to before they are compared for similarity."""
 
     cluster_in_color: bool
-    """Whether frames are compared in color instead of grayscale when selecting them."""
+    """Determines whether frames are compared in color instead of grayscale when selecting them."""
 
     display_progress: bool
-    """Whether the aggregate progress bar is shown during extraction."""
+    """Determines whether the aggregate progress bar is shown during extraction."""
 
     videos: tuple[Path, ...]
     """The project video files the subcommand targets. How they are used depends on the subcommand. An empty tuple
     means the whole project wherever that is allowed."""
 
     overwrite: bool
-    """Whether to re-extract exactly the targeted ``videos``, clearing their existing frames first instead of adding."""
+    """Determines whether to re-roll the selected videos, clearing their removable frames first instead of topping
+    them up."""
 
     reset: bool
-    """Whether to re-extract across the whole project, clearing existing frames first instead of adding."""
+    """Determines whether to re-roll across the whole project, clearing removable frames first instead of topping up."""
 
     def require_config_path(self) -> Path:
         """Returns the config.yaml path, raising a Click usage error when ``--config-path`` was not supplied.
@@ -76,12 +79,12 @@ class SharedExtractionParameters:
         """
         if self.config_path is None:
             message = "Missing option '-cfg' / '--config-path'."
-            raise click.UsageError(message)
+            raise click.UsageError(message=message)
         return self.config_path
 
 
-pass_shared_parameters = click.make_pass_decorator(SharedExtractionParameters)
-"""Injects the ``extract`` group's ``SharedExtractionParameters`` as each subcommand's first argument."""
+_pass_shared_parameters = click.make_pass_decorator(_SharedExtractionParameters)
+"""Injects the ``extract`` group's ``_SharedExtractionParameters`` as each subcommand's first argument."""
 
 
 @click.group("extract", context_settings=_CONTEXT_SETTINGS)
@@ -98,8 +101,8 @@ pass_shared_parameters = click.make_pass_decorator(SharedExtractionParameters)
     type=int,
     default=-1,
     show_default=True,
-    help="How many videos to process at the same time. Set to -1 to use enough workers to saturate all available CPU "
-    "cores.",
+    help="How many videos to process at the same time. Set to -1 to launch about one worker per four usable cores, "
+    "capped at the number of videos.",
 )
 @click.option(
     "-c",
@@ -107,9 +110,10 @@ pass_shared_parameters = click.make_pass_decorator(SharedExtractionParameters)
     type=int,
     default=-1,
     show_default=True,
-    help="How many CPU cores to devote to each video being processed. Set to -1 to share the available cores evenly. "
-    "Each video keeps about four cores busy while it decodes, so larger values mostly idle cores and smaller values "
-    "slow each video worker down.",
+    help="How many CPU cores to devote to each video being processed. Set to -1 to give each worker a saturating block "
+    "(about four cores) when --workers is automatic, or split the usable cores evenly across an explicit --workers "
+    "count. Each video keeps about four cores busy while it decodes, so larger values mostly idle cores and smaller "
+    "values slow each video worker down.",
 )
 @click.option(
     "-fpv",
@@ -126,9 +130,9 @@ pass_shared_parameters = click.make_pass_decorator(SharedExtractionParameters)
     default=1,
     show_default=True,
     metavar="N",
-    help="How far apart, in frames, to sample before clustering. The default of 1 uses every frame, matching "
-    "DeepLabCut. For 'frames' this strides the whole video; for 'outliers' it strides the flagged candidate frames. "
-    "Raise it to cluster fewer frames and lower memory use, trading coverage for speed.",
+    help="How far apart, in frames, to sample before clustering. The default of 1 uses every frame. For 'frames' this "
+    "strides the whole video; for 'outliers' it strides the flagged candidate frames. Raise it to cluster fewer frames "
+    "trading coverage for processing speed.",
 )
 @click.option(
     "-crw",
@@ -139,18 +143,18 @@ pass_shared_parameters = click.make_pass_decorator(SharedExtractionParameters)
     "faster but compare more coarsely.",
 )
 @click.option(
-    "-cl",
+    "-co",
     "--color/--grayscale",
     default=False,
     show_default=True,
-    help="Compare frames in color instead of grayscale when selecting them.",
+    help="Determines whether frames are compared in color instead of grayscale when selecting them.",
 )
 @click.option(
-    "-pg",
+    "-p",
     "--progress/--no-progress",
     default=True,
     show_default=True,
-    help="Show the aggregate progress bar during extraction.",
+    help="Determines whether the aggregate progress bar is shown during extraction.",
 )
 @click.option(
     "-v",
@@ -158,29 +162,29 @@ pass_shared_parameters = click.make_pass_decorator(SharedExtractionParameters)
     multiple=True,
     type=click.Path(dir_okay=False, path_type=Path),
     metavar="PATH",
-    help="A project video, registered in config.yaml, that the subcommand targets. For 'frames' it is included in the "
-    "sample first, or the only videos with --exclusive or --overwrite. For 'outliers' it is a video to refine. For "
-    "'purge' its labeled-data folder is removed. Provide the option several times for several videos. Omit --videos to "
-    "target the whole project: every video for 'frames' and 'purge', and every video the current model analyzed for "
-    "'outliers'.",
+    help="A project video, registered in config.yaml, that the subcommand targets. For 'frames' it is included in "
+    "the sample first, or is one of the only videos processed with --exclusive. For 'outliers' it is a video to "
+    "refine. For 'purge' its labeled-data folder is removed, and for 'pending' its folder is inspected. Provide the "
+    "option several times for several videos. Omit --videos to target the whole project: every video for 'frames', "
+    "'purge', and 'pending', and every video the current iteration model has analyzed for 'outliers'.",
 )
 @click.option(
     "-o",
     "--overwrite",
     is_flag=True,
-    help="Re-extract the --videos instead of adding to them, replacing whatever removable frames each one holds. For "
-    "'frames' this clears each video's unlabeled bootstrap frames and is refused for any video already in outlier "
-    "refinement. For 'outliers' it clears the current refinement iteration's outlier frames. Requires --videos. "
-    "Mutually exclusive with --reset.",
+    help="Re-roll the videos this run processes instead of topping them up, clearing each one's removable frames "
+    "first. For 'frames' it clears each selected video's unlabeled bootstrap frames, refused for any already in "
+    "outlier refinement. For 'outliers' it clears the current refinement iteration's outlier frames for the videos "
+    "being refined. Mutually exclusive with --reset.",
 )
 @click.option(
     "-r",
     "--reset",
     is_flag=True,
-    help="Re-extract across the whole project instead of adding, clearing the relevant frames first. For 'frames' this "
-    "clears every not-yet-refined video's unlabeled bootstrap frames and leaves videos already in outlier refinement "
-    "untouched. For 'outliers' it clears the current iteration's outlier frames for every video. Mutually exclusive "
-    "with --overwrite.",
+    help="Re-roll across the whole project instead of topping up, clearing the relevant frames first. For 'frames' "
+    "this clears every not-yet-refined video's unlabeled bootstrap frames and leaves videos already in outlier "
+    "refinement untouched. For 'outliers' it clears the current iteration's outlier frames for every video. Mutually "
+    "exclusive with --overwrite.",
 )
 @click.pass_context
 def extract_group(
@@ -203,14 +207,14 @@ def extract_group(
     ``--config-path`` names the DeepLabCut project's config.yaml every subcommand operates on. Use ``frames`` to
     bootstrap a project's training frames by clustering raw video, ``outliers`` to extract a trained model's
     likely-wrong frames for refinement, or ``purge`` to delete a video's entire labeled-data folder for a clean start.
-    The parallelism and clustering options apply to ``frames`` and ``outliers``, while ``--videos``, ``--overwrite``,
-    and ``--reset`` are shared by the subcommands that accept them. All of these shared options must be given before the
-    subcommand name.
+    Use ``pending`` to list the folders whose machine-labeled frames still await your refinement. The parallelism and
+    clustering options apply to ``frames`` and ``outliers``, while ``--videos``, ``--overwrite``, and ``--reset`` are
+    shared by the subcommands that accept them. All of these shared options must be given before the subcommand name.
     """
     if overwrite and reset:
         message = "The --overwrite and --reset options are mutually exclusive."
-        raise click.UsageError(message)
-    ctx.obj = SharedExtractionParameters(
+        raise click.UsageError(message=message)
+    ctx.obj = _SharedExtractionParameters(
         config_path=config_path,
         worker_count=workers,
         cores_per_worker=cores,
@@ -232,9 +236,10 @@ def extract_group(
     type=int,
     default=200,
     show_default=True,
-    help="The total number of extracted frames you want across the whole project. When set, not-yet-processed videos "
-    "are sampled at random until this many frames are reached, so coverage grows over repeated runs (each sampled "
-    "video contributes --frames-per-video frames). Set to -1 to process every selected video instead.",
+    help="The total number of extracted frames you want across the whole project. When set, videos are selected until "
+    "this many frames are reached, preferring not-yet-extracted videos and falling back to below-ceiling ones; each "
+    "is topped up to --frames-per-video frames (a fresh video by a full set, a partly-extracted one by its remainder). "
+    "Set to -1 to top up every below-ceiling selected video instead.",
 )
 @click.option(
     "-bg",
@@ -245,44 +250,47 @@ def extract_group(
     "together with --total-frames.",
 )
 @click.option(
-    "-gb",
-    "--group-by",
+    "-gr",
+    "--group-regex",
     default=None,
     metavar="REGEX",
-    help="A regular expression whose first capturing group names the group for each video, for naming schemes the "
+    help="A regular expression used to derive group names for each video, for naming schemes the "
     "automatic grouping does not recognize (for example '(Grp\\d+)' for names like D1_Grp2). Implies --balance-groups.",
 )
 @click.option(
-    "-x",
+    "-e",
     "--exclusive",
     is_flag=True,
-    help="Restrict the run to exactly the --videos files, extracting --frames-per-video frames from each and "
-    "ignoring the --total-frames budget and group balancing. Requires --videos.",
+    help="Restrict the run to exactly the --videos files, topping each up to --frames-per-video frames and ignoring "
+    "the --total-frames budget and group balancing. A video already at that count is skipped unless --overwrite "
+    "re-rolls it. Requires --videos.",
 )
-@pass_shared_parameters
+@_pass_shared_parameters
 def frames_command(
-    shared: SharedExtractionParameters,
+    shared: _SharedExtractionParameters,
     total_frames: int,
-    group_by: str | None,
+    group_regex: str | None,
     *,
     balance_groups: bool,
     exclusive: bool,
 ) -> None:
     """Selects initial training frames from a subset of the project's videos by clustering them in parallel.
 
-    Each video is clustered in its own worker process pinned to a disjoint block of CPU cores. Extraction is additive:
-    a run adds freshly clustered frames only to videos that have none yet, skipping any that already hold extracted
-    frames. Passing ``--overwrite`` re-rolls the selection for exactly the named ``--videos``, refused for any already
-    in outlier refinement. Passing ``--reset`` re-rolls it across every not-yet-refined project video. Both clear the
-    targeted videos' unlabeled frames first and keep already-labeled and outlier frames. Passing ``--total-frames``
-    samples a random subset of not-yet-extracted videos sized to reach that project-wide frame budget, growing coverage
-    across repeated runs. Any videos named with ``--videos`` are included first, and the remaining budget fills from the
-    project's other videos. Passing ``--exclusive`` with ``--videos`` instead restricts the run to exactly those files,
-    extracting ``--frames-per-video`` frames from each and ignoring the budget and group balancing.
+    Each video is clustered in its own worker process pinned to a disjoint block of CPU cores. ``--frames-per-video``
+    is a per-video ceiling: each selected video is topped up to it, so a not-yet-extracted video gains a full set and a
+    partly-extracted one gains only the frames that reach the ceiling. Passing ``--total-frames`` selects just enough
+    videos to reach that project-wide total, preferring not-yet-extracted videos and falling back to below-ceiling
+    ones; any videos named with ``--videos`` are included first. If even topping every eligible video to the ceiling
+    cannot reach the total in one pass, the run reports the shortfall and stops, so raise ``--frames-per-video``, lower
+    ``--total-frames``, or register more videos. Passing ``--exclusive`` with ``--videos`` instead restricts the run to
+    exactly those files, topping each up to ``--frames-per-video`` and ignoring the budget and group balancing. Passing
+    ``--overwrite`` clears the selected videos' unlabeled frames first so they are re-rolled from scratch (refused for
+    any already in outlier refinement), and ``--reset`` does the same across every not-yet-refined project video; both
+    keep already-labeled and outlier frames.
     """
     if exclusive and not shared.videos:
         message = "The --exclusive flag requires at least one --videos file to restrict the run to."
-        raise click.UsageError(message)
+        raise click.UsageError(message=message)
     try:
         summary = extract_frames_kmeans(
             config_path=shared.require_config_path(),
@@ -294,7 +302,7 @@ def frames_command(
             frames_per_video=shared.frames_per_video,
             total_frame_budget=total_frames,
             balance_groups=balance_groups,
-            group_by_pattern=group_by,
+            group_by_pattern=group_regex,
             clustering_resize_width=shared.clustering_resize_width,
             cluster_in_color=shared.cluster_in_color,
             overwrite=shared.overwrite,
@@ -336,13 +344,12 @@ def frames_command(
     help="How the frames to keep are chosen from the identified candidates.",
 )
 @click.option(
-    "-sh",
+    "-s",
     "--shuffle",
     default=1,
     show_default=True,
-    help="The shuffle index identifying which trained model produced the predictions. As in the DeepLabCut GUI, this "
-    "is the only model-selection option: the training fraction, model prefix, and snapshots are read from the "
-    "project's config.yaml.",
+    help="The shuffle index whose trained model produced the predictions. It is the only model-selection option; "
+    "everything else is taken from the project configuration.",
 )
 @click.option(
     "-pdt",
@@ -357,8 +364,8 @@ def frames_command(
     "--minimum-confidence",
     default=0.01,
     show_default=True,
-    help="The confidence below which a prediction is treated as unreliable, used by the 'uncertain' and 'fitting' "
-    "detectors.",
+    help="The confidence below which a prediction is treated as unreliable: 'uncertain' flags a frame holding one, and "
+    "'fitting' excludes it from driving the fitted trajectory.",
 )
 @click.option(
     "-cb",
@@ -385,17 +392,17 @@ def frames_command(
     help="How many past frames the 'fitting' detector's motion model uses to predict the next position.",
 )
 @click.option(
-    "-ma",
+    "-mad",
     "--moving-average-degree",
     default=1,
     show_default=True,
     help="How many past prediction errors the 'fitting' detector's motion model smooths over.",
 )
 @click.option(
-    "-sv",
+    "-sl",
     "--save-labeled",
     is_flag=True,
-    help="Also save a copy of each extracted frame with the model's predictions drawn on it.",
+    help="Determines whether to also save a copy of each extracted frame with the model's predictions drawn on it.",
 )
 @click.option(
     "-tm",
@@ -410,12 +417,12 @@ def frames_command(
     type=int,
     default=-1,
     show_default=True,
-    help="How many videos to flag in parallel during 'fitting' detection, the most expensive step. Set to -1 to use "
-    "every available core.",
+    help="How many SARIMAX keypoint-trajectory fits to run in parallel during 'fitting' detection, the most expensive "
+    "step. Set to -1 to use every available core.",
 )
-@pass_shared_parameters
+@_pass_shared_parameters
 def outliers_command(
-    shared: SharedExtractionParameters,
+    shared: _SharedExtractionParameters,
     outlier_algorithm: str,
     extraction_algorithm: str,
     shuffle: int,
@@ -438,8 +445,8 @@ def outliers_command(
     re-running the model. Requested paths that are not registered project videos are skipped with a warning. The flagged
     outlier frames are clustered in parallel, one video per worker pinned to a disjoint block of CPU cores, and added to
     each video's labeled-data directory alongside the model's predictions as machine pre-labels. Outlier extraction is
-    additive by default, so repeated passes grow the refinement set. Pass ``--overwrite`` with ``--videos`` to replace
-    those videos' outlier frames for the current iteration, or ``--reset`` to clear the whole iteration's outlier frames
+    additive by default, so repeated passes grow the refinement set. Pass ``--overwrite`` to replace the refined
+    videos' outlier frames for the current iteration, or ``--reset`` to clear the whole iteration's outlier frames
     before re-extracting. Both preserve every already-labeled training frame.
     """
     try:
@@ -488,9 +495,9 @@ def outliers_command(
     help="Actually delete the folders. Without this flag the command only previews what it would remove, deleting "
     "nothing.",
 )
-@pass_shared_parameters
+@_pass_shared_parameters
 def purge_command(
-    shared: SharedExtractionParameters,
+    shared: _SharedExtractionParameters,
     *,
     yes: bool,
 ) -> None:
@@ -532,3 +539,39 @@ def purge_command(
                 f"({summary.labeled_directory_count} contain labels). Re-run with --yes to delete."
             )
         )
+
+
+@extract_group.command("pending", context_settings=_CONTEXT_SETTINGS)
+@_pass_shared_parameters
+def pending_command(shared: _SharedExtractionParameters) -> None:
+    """Lists the video folders that still hold machine-labeled frames you have not refined for the current iteration.
+
+    After ``outliers`` extracts a trained model's likely-wrong frames, each is saved as a machine pre-label that you
+    refine in the labeling GUI. This reports each video folder that still has unrefined machine frames, and how many,
+    so you know which folders to open next. It only reads the project, changing nothing. Target specific videos with
+    ``--videos``, or omit ``--videos`` to scan the whole project.
+    """
+    try:
+        summary = summarize_refinement_status(
+            config_path=shared.require_config_path(),
+            videos=tuple(shared.videos),
+        )
+    except (ValueError, FileNotFoundError) as error:
+        raise click.ClickException(message=str(error)) from error
+
+    for video in summary.unmatched_videos:
+        click.echo(message=f"skipped (not a registered project video): {video}", err=True)
+    for directory, detail in summary.unreadable:
+        click.echo(message=f"warning: could not read {directory}: {detail}", err=True)
+
+    project_directory = summary.config_path.parent
+    for folder in sorted(summary.pending_folders, key=lambda status: status.directory):
+        location = (
+            folder.directory.relative_to(project_directory)
+            if folder.directory.is_relative_to(project_directory)
+            else folder.directory
+        )
+        click.echo(message=f"{location}   {folder.unrefined_frame_count} frame(s) to refine")
+    click.echo(message=summary.describe())
+    if not summary.successful:
+        raise SystemExit(1)

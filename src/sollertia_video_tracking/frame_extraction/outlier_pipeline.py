@@ -223,11 +223,11 @@ def extract_outlier_frames_parallel(
         reserved_core_count: The number of CPU cores to leave free for other tasks.
         fitting_worker_count: The number of processes fitting SARIMAX models during ``fitting`` detection. Set to -1 to
             use every usable core.
-        overwrite: Determines whether to re-extract the named ``videos``, first discarding this refinement iteration's
-            already-extracted outlier frames for those videos, along with their machine labels and any manual
-            refinement of them, so the frames are replaced rather than added to. Other videos' outlier frames are left
-            intact, and every frame already carried in the human ``CollectedData`` labels is preserved. Requires at
-            least one entry in ``videos``. Mutually exclusive with ``reset``.
+        overwrite: Determines whether to re-extract the videos this run refines, first discarding this refinement
+            iteration's already-extracted outlier frames for those videos, along with their machine labels and any
+            manual refinement of them, so the frames are replaced rather than added to. Other videos' outlier frames are
+            left intact, and every frame already carried in the human ``CollectedData`` labels is preserved. Mutually
+            exclusive with ``reset``.
         reset: Determines whether to discard this refinement iteration's extracted outlier frames across every project
             video, along with their machine labels and any manual refinement, before re-extracting the selected videos,
             giving the whole iteration a clean slate. Every frame already carried in the human ``CollectedData`` labels
@@ -240,8 +240,8 @@ def extract_outlier_frames_parallel(
 
     Raises:
         FileNotFoundError: If ``config_path`` does not point to an existing file.
-        ValueError: Raised when the options conflict: ``overwrite`` and ``reset`` are both set, or ``overwrite`` is set
-            without any ``videos``. Raised when an argument is invalid: ``outlier_algorithm`` or
+        ValueError: Raised when the options conflict: ``overwrite`` and ``reset`` are both set. Raised when an argument
+            is invalid: ``outlier_algorithm`` or
             ``extraction_algorithm`` is unknown, ``frames_per_video`` (other than the -1 sentinel) or ``candidate_step``
             is below one, or ``outlier_algorithm`` is ``"list"`` without ``explicit_frame_indices``. Raised when the
             comparison bodyparts resolve to none. Raised when no videos can be refined: the project lists none in
@@ -256,9 +256,6 @@ def extract_outlier_frames_parallel(
         raise FileNotFoundError(message)
     if overwrite and reset:
         message = "Unable to extract outlier frames. The overwrite and reset options are mutually exclusive."
-        raise ValueError(message)
-    if overwrite and not videos:
-        message = "Unable to extract outlier frames. The overwrite option requires at least one video to re-extract."
         raise ValueError(message)
     try:
         outlier_algorithm = OutlierAlgorithm(outlier_algorithm)

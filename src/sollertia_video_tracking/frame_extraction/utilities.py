@@ -54,6 +54,64 @@ class PurgeSummary:
         return len(self.labeled_directories)
 
 
+@dataclass(frozen=True, slots=True)
+class RefinementFolderStatus:
+    """Summarizes one video folder's machine-labeled frames still awaiting refinement for the current iteration."""
+
+    directory: Path
+    """The ``labeled-data/<stem>`` folder that still holds unrefined machine frames."""
+    unrefined_frame_count: int
+    """The number of the folder's current-iteration machine frames the human has not refined yet."""
+
+
+@dataclass(frozen=True, slots=True)
+class RefinementStatusSummary:
+    """Summarizes which of a project's video folders still hold machine-labeled frames awaiting refinement.
+
+    Notes:
+        Only folders that still hold unrefined machine frames for the project's current refinement iteration are
+        recorded in ``pending_folders``; folders that are already fully refined, purely human-labeled, or still
+        bootstrapping are left out because they need no attention this round. This is what ``extract pending`` lists.
+    """
+
+    config_path: Path
+    """The path to the DeepLabCut project's config.yaml the status was computed from."""
+    iteration: int
+    """The project's current refinement iteration, whose machine-label tables were inspected."""
+    pending_folders: tuple[RefinementFolderStatus, ...]
+    """The folders that still hold current-iteration machine frames the human has not refined."""
+    unmatched_videos: tuple[str, ...] = ()
+    """The requested videos that matched no registered project video and were skipped."""
+    unreadable: tuple[tuple[Path, str], ...] = ()
+    """The ``(directory, detail)`` pairs for folders whose label tables could not be read and were skipped."""
+
+    @property
+    def pending_folder_count(self) -> int:
+        """Returns the number of folders that still need refinement."""
+        return len(self.pending_folders)
+
+    @property
+    def pending_frame_count(self) -> int:
+        """Returns the total number of unrefined machine frames across all pending folders."""
+        return sum(folder.unrefined_frame_count for folder in self.pending_folders)
+
+    @property
+    def successful(self) -> bool:
+        """Returns whether every scanned folder's label tables were read without error."""
+        return not self.unreadable
+
+    def describe(self) -> str:
+        """Builds a one-line human-readable summary of the pending refinement work for the CLI.
+
+        Returns:
+            A compact description of how many folders and frames still need refinement.
+        """
+        return (
+            f"{self.pending_folder_count} folder(s) need refining "
+            f"({self.pending_frame_count} frame(s)) at iteration {self.iteration}"
+        )
+
+
 def normalize_project_config(config_path: Path, *, frames_per_video: int, error_context: str) -> Any:
     """Persists a normalized project_path and optional numframes2pick before any worker reads the configuration.
 
@@ -427,4 +485,95 @@ def purge_labeled_data(
         labeled_directories=labeled_directories,
         frame_count=frame_count,
         unmatched_videos=unmatched_videos,
+    )
+
+
+def summarize_refinement_status(config_path: Path, *, videos: tuple[str | Path, ...] = ()) -> RefinementStatusSummary:
+    """Reports which video folders still hold machine-labeled outlier frames the human has not refined.
+
+    Outlier extraction writes a trained model's likely-wrong frames into each video's ``machinelabels-iter<N>.h5``
+    table for the project's current iteration, and the human refines them in the labeling GUI, which saves the
+    corrected coordinates into the folder's human ``CollectedData`` labels. A machine frame therefore counts as
+    refined once it carries a finite human coordinate; an all-NaN placeholder row the GUI writes for an
+    opened-but-untouched frame does not count. This scans the project's labeled-data tree and reports, per folder, how
+    many of the current iteration's machine frames remain unrefined, so the human knows which folders to open next. It
+    only reads the project, mutating nothing.
+
+    Args:
+        config_path: The path to the DeepLabCut project's config.yaml, whose parent holds the ``labeled-data`` tree.
+        videos: The specific project video files to inspect, matched to the project's registered videos by resolved
+            path. Leave empty to inspect every folder in the project's ``labeled-data`` tree.
+
+    Returns:
+        A RefinementStatusSummary listing the folders that still hold unrefined current-iteration machine frames, any
+        requested videos that matched no registered project video, and any folders whose label tables could not be
+        read.
+
+    Raises:
+        FileNotFoundError: If ``config_path`` does not point to an existing file.
+    """
+    config_path = config_path.resolve()
+    if not config_path.is_file():
+        message = f"Unable to summarize refinement status. The config path '{config_path}' does not point to a file."
+        raise FileNotFoundError(message)
+
+    configuration = YAML().load(config_path.read_text())
+    scorer = str(configuration.get("scorer", ""))
+    iteration = int(configuration.get("iteration", 0))
+    labeled_data_directory = config_path.parent / "labeled-data"
+
+    unmatched_videos: tuple[str, ...] = ()
+    if not videos:
+        # Scan the folders present on disk, mirroring purge_labeled_data: skip rendered '_labeled' overlays,
+        # temporary dot-prefixed entries, and symlinks so only real per-video folders are inspected.
+        target_directories = (
+            sorted(
+                path
+                for path in labeled_data_directory.iterdir()
+                if path.is_dir()
+                and not path.is_symlink()
+                and not path.name.startswith(".")
+                and not path.name.endswith("_labeled")
+            )
+            if labeled_data_directory.exists()
+            else []
+        )
+    else:
+        registered_videos = list(configuration.get("video_sets") or {})
+        matched_videos, unmatched = select_registered_videos(
+            registered_videos=registered_videos, requested_videos=tuple(videos)
+        )
+        unmatched_videos = tuple(unmatched)
+        target_directories = [labeled_data_directory / Path(video).stem for video in matched_videos]
+
+    machine_labels_name = f"machinelabels-iter{iteration}.h5"
+    pending_folders: list[RefinementFolderStatus] = []
+    unreadable: list[tuple[Path, str]] = []
+    for directory in target_directories:
+        machine_labels_path = directory / machine_labels_name
+        if not machine_labels_path.is_file():
+            # A folder without a current-iteration machine-label table has nothing to refine this round; skip it.
+            continue
+        try:
+            machine_frame_names = frame_names_from_index(pd.read_hdf(machine_labels_path, key="df_with_missing").index)
+            # A machine frame is refined only once it carries a finite human coordinate: the labeling GUI writes
+            # all-NaN placeholder rows for opened-but-untouched frames, so index presence alone is not enough. The
+            # MachineLabelsRefine table covers the legacy refine flow and is absent under the napari labeler.
+            refined_frame_names = finite_labeled_frame_names(directory / f"CollectedData_{scorer}.h5")
+            refined_frame_names |= finite_labeled_frame_names(directory / "MachineLabelsRefine.h5")
+        except Exception as error:  # noqa: BLE001 -- a folder whose tables cannot be read is reported, not fatal.
+            unreadable.append((directory, str(error)))
+            continue
+        unrefined_frame_names = machine_frame_names - refined_frame_names
+        if unrefined_frame_names:
+            pending_folders.append(
+                RefinementFolderStatus(directory=directory, unrefined_frame_count=len(unrefined_frame_names))
+            )
+
+    return RefinementStatusSummary(
+        config_path=config_path,
+        iteration=iteration,
+        pending_folders=tuple(pending_folders),
+        unmatched_videos=unmatched_videos,
+        unreadable=tuple(unreadable),
     )
