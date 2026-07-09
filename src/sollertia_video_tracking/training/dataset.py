@@ -2,6 +2,7 @@
 
 import re
 import sys
+from enum import StrEnum
 from typing import Any, TextIO
 from pathlib import Path
 import contextlib
@@ -38,6 +39,23 @@ _CONDITION_SNAPSHOT_SUFFIX: str = ".pt"
 _UNANNOTATED_VIDEO_NOTICE: str = "not found (perhaps not annotated)"
 """The substring DeepLabCut prints once per registered video that lacks an annotation file, filtered from the
 training-dataset creation output because projects routinely register many more videos than any one shuffle labels."""
+
+
+class WeightInitializationMethod(StrEnum):
+    """Defines how a shuffle's model weights are initialized before training.
+
+    ``imagenet`` transfers from a stock ImageNet backbone and needs no external model, while ``transfer`` and
+    ``fine-tune`` both start from a SuperAnimal model, so they require a SuperAnimal dataset and a pose-model
+    architecture to be named. Fine-tuning additionally loads the SuperAnimal decoder head and is the only method that
+    can enable memory replay.
+    """
+
+    IMAGENET = "imagenet"
+    """Initializes the backbone from ImageNet transfer learning, the default that needs no SuperAnimal model."""
+    TRANSFER = "transfer"
+    """Initializes from a SuperAnimal model with a fresh decoder head (transfer learning)."""
+    FINE_TUNE = "fine-tune"
+    """Initializes from a SuperAnimal model including its decoder head (fine-tuning), the only memory-replay method."""
 
 
 @dataclass(frozen=True, slots=True)

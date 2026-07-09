@@ -30,7 +30,8 @@ class _OptimizedTrainingRunnerMixin(TrainingRunner):
 
     The mixin is placed before a concrete DeepLabCut runner in the method resolution order so its ``fit``, ``_epoch``,
     and ``state_dict`` overrides take precedence while ``super().__init__`` still builds the stock runner. Each
-    concrete subclass overrides only ``step`` to wrap its forward pass and loss in autocast. It derives from the
+    concrete subclass overrides ``step`` to wrap its forward pass and loss in autocast (the detector subclass also
+    overrides the ``_ddp_static_graph`` class attribute). It derives from the
     (untyped) ``TrainingRunner`` base so the shared runner attributes and helpers it relies on resolve without stubs;
     it is never instantiated directly, so its own ``step`` remains abstract.
 

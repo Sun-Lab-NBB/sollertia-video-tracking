@@ -83,7 +83,7 @@ class OptimizationProfile:
 
     @property
     def amp_device_type(self) -> str:
-        """Returns the device type string passed to ``torch.autocast`` for this run."""
+        """Returns the ``torch.autocast`` device-type string for this run's base device."""
         return "cuda" if self.device == "cuda" else self.device
 
     def describe(self) -> str:
@@ -126,7 +126,9 @@ def resolve_optimization_profile(
     automatic defaults. ``"auto"`` selects a capability-detected default suited to the chosen device. An explicit
     request is honored where it applies to the chosen device. A forced AMP dtype the device cannot support (bfloat16 on
     MPS, float16 off CUDA) is disabled with a warning, while the CUDA-only toggles (``tf32``, ``cudnn_benchmark``,
-    ``pin_memory``) are forced off on non-CUDA devices.
+    ``pin_memory``) are forced off on non-CUDA devices. Mixed precision is additionally disabled with a warning when
+    the DataParallel (``"dp"``) strategy is selected, because autocast does not reach DataParallel's per-GPU replica
+    threads; use DDP to combine mixed precision with multi-GPU training.
 
     Args:
         device: The requested device (``"auto"``, ``"cpu"``, ``"mps"``, ``"cuda"``, or ``"cuda:N"``), or None to

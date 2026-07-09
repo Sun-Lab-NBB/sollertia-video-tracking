@@ -2,6 +2,7 @@
 
 from .dataset import (
     TrainingDatasetSummary,
+    WeightInitializationMethod,
     create_training_dataset,
     get_available_augmenters,
     get_available_pose_models,
@@ -29,6 +30,7 @@ __all__ = [
     "Toggle",
     "TrainingDatasetSummary",
     "TrainingSummary",
+    "WeightInitializationMethod",
     "apply_runtime_optimizations",
     "build_conditional_top_down_conditions",
     "build_superanimal_weight_init",

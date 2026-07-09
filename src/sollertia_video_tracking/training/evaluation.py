@@ -56,8 +56,9 @@ Notes:
     and for matched multi-animal predictions; an unmatched multi-animal prediction (a false positive, ``matched`` is
     False) is labeled ``instance_<order>`` by its per-image match order and carries no stable identity across images.
     ``error_px`` is the Euclidean pixel distance to the matched label, and is NaN when the keypoint is unmatched or its
-    label is occluded. ``oks`` is populated only for matched multi-animal predictions; it is NaN for single-animal and
-    unique-bodypart rows, which DeepLabCut scores by direct correspondence rather than OKS.
+    label is occluded. ``oks`` is NaN for an unmatched prediction and otherwise holds the match's OKS; for matched
+    single-animal and unique-bodypart rows, which DeepLabCut scores by direct correspondence rather than OKS, that
+    value is the matcher's default rather than a computed OKS.
 """
 
 
@@ -104,7 +105,8 @@ class EvaluationSummary:
     feather_path: Path
     """The tidy evaluation feather that was written."""
     provenance_path: Path
-    """The YAML provenance-and-summary sidecar that was written."""
+    """The path of the YAML provenance-and-summary sidecar; it is written beside the feather only when
+    ``write_provenance`` is True, otherwise this path names a file that was not created."""
     pcutoff: float
     """The confidence cutoff applied when computing the cutoff-filtered metrics and the ``above_pcutoff`` column."""
     train: SplitMetrics
@@ -178,6 +180,8 @@ def evaluate_trained_model(
 
     Raises:
         ValueError: When the requested snapshot cannot be resolved.
+        OSError: When the provenance sidecar cannot be written; the feather written earlier is removed first so a
+            feather is never left without its provenance sidecar.
     """
     config = Path(config)
     loader = DLCLoader(config=config, shuffle=shuffle, trainset_index=training_set_index, modelprefix=model_prefix)
