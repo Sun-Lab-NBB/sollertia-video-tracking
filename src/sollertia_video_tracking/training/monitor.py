@@ -23,6 +23,10 @@ class QueueTrainingLogger(BaseLogger):
         It receives one call per training phase per epoch (train every epoch, evaluation on evaluation epochs) and
         forwards each as a small JSON-serializable message. A dropped message only skips a redraw, so a full or
         broken queue never disrupts training.
+
+    Attributes:
+        _progress_queue: The shared queue the monitor thread consumes progress messages from.
+        _task_name: The training task label forwarded to the monitor.
     """
 
     def __init__(self, progress_queue: Any, task_name: str = "pose") -> None:

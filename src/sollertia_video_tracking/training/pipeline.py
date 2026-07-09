@@ -274,8 +274,8 @@ def train_model(
     evaluation = None
     if evaluate and "pose" in tasks_trained:
         evaluation = _evaluate_after_training(
-            config,
-            profile,
+            config=config,
+            profile=profile,
             shuffle=shuffle,
             training_set_index=training_set_index,
             model_prefix=model_prefix,
