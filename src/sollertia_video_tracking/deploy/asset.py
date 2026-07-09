@@ -114,7 +114,7 @@ class ModelManifest:
     config_relpath: str
     """The archive-relative path of the project configuration inside the model shell."""
     model_relpath: str
-    """The project-relative path of the shuffle's model folder inside the model shell."""
+    """The project-relative path of the shuffle's model directory inside the model shell."""
     pose_snapshot: str
     """The file name of the bundled pose snapshot."""
     detector_snapshot: str | None
@@ -410,7 +410,7 @@ def _resolve_snapshot(loader: DLCLoader, index: int | None, task: Task, *, requi
     """Resolves the single snapshot to bundle, falling back to the configured or best snapshot when none is requested.
 
     Args:
-        loader: The loader holding the model folder the snapshots live in.
+        loader: The loader holding the model directory the snapshots live in.
         index: The requested snapshot index, or None to use the project's configured snapshot.
         task: The task whose snapshots to search (pose or detector).
         required: Determines whether to raise when no snapshot is found; when False, returns None instead.
@@ -538,7 +538,7 @@ def _build_manifest(
         shuffle: The exported shuffle index.
         pose_snapshot: The resolved pose snapshot bundled in the asset.
         detector_snapshot: The resolved detector snapshot bundled in the asset, or None.
-        model_relpath: The project-relative path of the shuffle's model folder inside the shell.
+        model_relpath: The project-relative path of the shuffle's model directory inside the shell.
         likelihood_threshold: The default likelihood floor baked into the asset.
         source_config: The original project configuration path, kept as provenance.
         payload: The per-file checksums of the model shell.

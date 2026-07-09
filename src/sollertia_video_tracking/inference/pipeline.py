@@ -69,7 +69,7 @@ class InferenceSummary:
         where = f"{self.device} x{self.workers}"
         output_format = "feather" if self.converted else "h5"
         tail = f", {len(self.failures)} failed" if self.failures else ""
-        written_to = self.destination if self.destination is not None else "each video's folder"
+        written_to = self.destination if self.destination is not None else "each video's directory"
         return (
             f"analyzed {ok}/{self.video_count} videos on {where} in {self.precision} -> "
             f"{output_format} in {written_to}{tail}"
@@ -596,7 +596,7 @@ def _analyze_one_video(
             from the video stem.
     """
     index, video, total, cropping, output_feather = item
-    output_folder = launch.destination if launch.destination is not None else Path(video).parent
+    output_directory = launch.destination if launch.destination is not None else Path(video).parent
     original_tqdm = dlc_videos.tqdm
     if launch.display_progress:
         dlc_videos.tqdm = make_progress_reporter(launch.progress_queue, index, total)
@@ -607,7 +607,7 @@ def _analyze_one_video(
                 videos=[video],
                 shuffle=launch.shuffle,
                 device=slot.device,
-                destfolder=str(output_folder),
+                destfolder=str(output_directory),
                 # Analyze the same region the frames were extracted from; None analyzes the full frame.
                 cropping=cropping,
                 snapshot_index=launch.snapshot_index,
@@ -622,7 +622,7 @@ def _analyze_one_video(
                 inference_cfg=_STOCK_ACCELERATION_DISABLED,
             )
         output = _resolve_output(
-            launch=launch, video=video, scorer=scorer, destination=output_folder, feather_override=output_feather
+            launch=launch, video=video, scorer=scorer, destination=output_directory, feather_override=output_feather
         )
         launch.results_queue.put((index, str(output) if output is not None else None, None))
     except Exception as error:  # noqa: BLE001 - report the per-video failure and keep draining the queue.
@@ -665,8 +665,8 @@ def _resolve_output(
         launch: The bundle of per-run parameters, providing the conversion settings.
         video: The analyzed video path.
         scorer: The DeepLabCut scorer string returned by ``analyze_videos``, which names the output file.
-        destination: The folder this video's predictions were written to, which is the video's own folder when the run
-            configured no destination.
+        destination: The directory this video's predictions were written to, which is the video's own directory when the
+            run configured no destination.
         feather_override: The explicit feather path to write for this video, or None to name it from the video stem
             inside ``destination``.
 

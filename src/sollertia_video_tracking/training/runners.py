@@ -486,7 +486,7 @@ def build_optimized_training_runner(
 
     Args:
         runner_config: The ``runner`` section of the pose or detector configuration.
-        model_folder: The folder in which snapshots and training statistics are written.
+        model_folder: The directory in which snapshots and training statistics are written.
         task: The task the runner performs, selecting the pose or detector runner subclass.
         model: The model to train.
         device: The device to train on for this process, such as a CUDA index or the CPU.

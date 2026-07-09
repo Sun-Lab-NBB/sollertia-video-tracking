@@ -191,7 +191,7 @@ disallow_untyped_defs = true # Enforces function annotation
 warn_unused_ignores = true   # Warns against using 'type: ignore' for packages with type stubs
 
 exclude = [
-    "sollertia-video-tracking-\\d+",  # Ignores temporary folder created by setuptools when building the sdist
+    "sollertia-video-tracking-\\d+",  # Ignores temporary directory created by setuptools when building the sdist
     "venv.*/",                        # Ignores virtual environments
     "build/",                         # Ignores the sdist directory
     "dist/",                          # Ignores the wheel directory

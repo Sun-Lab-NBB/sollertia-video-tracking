@@ -137,10 +137,10 @@ def extract_frames_kmeans(
         run, and
         k-means picks the frames within a video, so a re-rolled selection differs each run. To reproduce a specific
         selection, name the videos explicitly with ``requested_videos``. To instead discard a video's labels and start
-        its ``labeled-data`` folder over from scratch, use ``purge_labeled_data``.
+        its ``labeled-data`` directory over from scratch, use ``purge_labeled_data``.
 
-        Empty ``labeled-data`` folders left by videos that were registered but never extracted are removed after every
-        run, so the labeling GUI shows only the videos that have frames.
+        Empty ``labeled-data`` directories left by videos that were registered but never extracted are removed after
+        every run, so the labeling GUI shows only the videos that have frames.
 
     Args:
         config_path: The path to the DeepLabCut project's config.yaml.
@@ -262,7 +262,7 @@ def extract_frames_kmeans(
     # Refined videos are dropped from the candidate pool, and an explicit refined --videos target is refused under
     # overwrite and skipped with a warning otherwise.
     def _is_in_refinement(video: str) -> bool:
-        """Reports whether a candidate video's labeled-data folder already holds outlier-refinement tables."""
+        """Reports whether a candidate video's labeled-data directory already holds outlier-refinement tables."""
         return has_outlier_refinement_data(labeled_data_directory / Path(video).stem)
 
     refined_requested = [video for video in requested_matched if _is_in_refinement(video)]
@@ -292,8 +292,8 @@ def extract_frames_kmeans(
     # Exclusive tops up the requested videos directly, so they are not pins. In every other mode they are the pins the
     # budgeted draw always includes first.
     pinned_videos: tuple[str, ...] = () if exclusive else tuple(requested_matched)
-    # Two videos that share a stem would map to one labeled-data folder, so their frame counts and writes collide;
-    # this is checked before sampling, whose per-video accounting reads those same stem-keyed folders.
+    # Two videos that share a stem would map to one labeled-data directory, so their frame counts and writes collide;
+    # this is checked before sampling, whose per-video accounting reads those same stem-keyed directories.
     ensure_unique_video_stems(videos=videos, error_context="Unable to extract frames.")
 
     # numframes2pick is the per-video ceiling every selected video is topped up to; it is resolved once here and used
@@ -320,7 +320,9 @@ def extract_frames_kmeans(
         cleared_frame_count += removed_frame_count
 
     def _nothing_to_extract(existing_frames: int, target_frames: int) -> FrameExtractionSummary:
-        """Prunes the empty labeled-data folders and returns a do-nothing summary carrying the frames cleared so far."""
+        """Prunes the empty labeled-data directories and returns a do-nothing summary carrying the frames cleared so
+        far.
+        """
         prune_empty_labeled_data_directories(
             project_directory=project_directory_path, display_progress=display_progress
         )
@@ -603,7 +605,7 @@ def _clear_bare_frames(
     """Clears each named video's unlabeled bootstrap frames before re-extraction, reporting what was removed.
 
     Runs single-threaded before the workers start, so re-reading and rewriting the per-video label tables never races
-    against the concurrent extraction. A video folder that cannot be read is warned about and left untouched rather
+    against the concurrent extraction. A video directory that cannot be read is warned about and left untouched rather
     than aborting the run or risking an under-protective deletion.
 
     Args:
@@ -623,7 +625,7 @@ def _clear_bare_frames(
         directory = labeled_data_directory / stem
         try:
             removed_count = _clear_bare_frames_in_directory(directory=directory, scorer=scorer)
-        except Exception:  # noqa: BLE001 -- a folder that cannot be read is warned about, not fatal to the run.
+        except Exception:  # noqa: BLE001 -- a directory that cannot be read is warned about, not fatal to the run.
             sys.stderr.write(f"WARNING: {scope_label} could not clear the unlabeled frames in '{directory}'.\n")
             continue
         if removed_count:
@@ -632,7 +634,7 @@ def _clear_bare_frames(
 
     sys.stderr.write(
         f"{scope_label} cleared {removed_frame_count} unlabeled bootstrap frame(s) from {len(cleared_stems)} "
-        f"video folder(s) before re-extraction.\n"
+        f"video directory(ies) before re-extraction.\n"
     )
     sys.stderr.flush()
     return removed_frame_count, cleared_stems
@@ -670,10 +672,10 @@ def _clear_bare_frames_in_directory(*, directory: Path, scorer: str) -> int:
 def _drop_collected_data_rows(*, collected_data_path: Path, removed_frame_names: set[str]) -> None:
     """Drops any placeholder label rows for cleared bare frames from a video's ``CollectedData`` tables.
 
-    The labeling GUI reindexes ``CollectedData`` to every image in the folder, so a cleared bare frame may leave behind
-    an all-NaN row referencing the deleted image. Those rows are removed here so no label dangles; when that empties the
-    table, its ``.h5`` and ``.csv`` files are deleted outright. Only bare (unlabeled) frames are ever passed in, so no
-    finite human label is dropped.
+    The labeling GUI reindexes ``CollectedData`` to every image in the directory, so a cleared bare frame may leave
+    behind an all-NaN row referencing the deleted image. Those rows are removed here so no label dangles; when that
+    empties the table, its ``.h5`` and ``.csv`` files are deleted outright. Only bare (unlabeled) frames are ever
+    passed in, so no finite human label is dropped.
 
     Args:
         collected_data_path: The ``CollectedData_<scorer>.h5`` file to prune, alongside its ``.csv`` sibling.

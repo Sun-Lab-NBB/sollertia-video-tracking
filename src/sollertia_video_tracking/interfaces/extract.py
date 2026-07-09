@@ -164,8 +164,8 @@ _pass_shared_parameters = click.make_pass_decorator(_SharedExtractionParameters)
     metavar="PATH",
     help="A project video, registered in config.yaml, that the subcommand targets. For 'frames' it is included in "
     "the sample first, or is one of the only videos processed with --exclusive. For 'outliers' it is a video to "
-    "refine. For 'purge' its labeled-data folder is removed, and for 'pending' its folder is inspected. Provide the "
-    "option several times for several videos. Omit --videos to target the whole project: every video for 'frames', "
+    "refine. For 'purge' its labeled-data directory is removed, and for 'pending' its directory is inspected. Provide "
+    "the option several times for several videos. Omit --videos to target the whole project: every video for 'frames', "
     "'purge', and 'pending', and every video the current iteration model has analyzed for 'outliers'.",
 )
 @click.option(
@@ -206,10 +206,11 @@ def extract_group(
 
     ``--config-path`` names the DeepLabCut project's config.yaml every subcommand operates on. Use ``frames`` to
     bootstrap a project's training frames by clustering raw video, ``outliers`` to extract a trained model's
-    likely-wrong frames for refinement, or ``purge`` to delete a video's entire labeled-data folder for a clean start.
-    Use ``pending`` to list the folders whose machine-labeled frames still await your refinement. The parallelism and
-    clustering options apply to ``frames`` and ``outliers``, while ``--videos``, ``--overwrite``, and ``--reset`` are
-    shared by the subcommands that accept them. All of these shared options must be given before the subcommand name.
+    likely-wrong frames for refinement, or ``purge`` to delete a video's entire labeled-data directory for a clean
+    start. Use ``pending`` to list the directories whose machine-labeled frames still await your refinement. The
+    parallelism and clustering options apply to ``frames`` and ``outliers``, while ``--videos``, ``--overwrite``, and
+    ``--reset`` are shared by the subcommands that accept them. All of these shared options must be given before the
+    subcommand name.
     """
     if overwrite and reset:
         message = "The --overwrite and --reset options are mutually exclusive."
@@ -492,7 +493,7 @@ def outliers_command(
     "-y",
     "--yes",
     is_flag=True,
-    help="Actually delete the folders. Without this flag the command only previews what it would remove, deleting "
+    help="Actually delete the directories. Without this flag the command only previews what it would remove, deleting "
     "nothing.",
 )
 @_pass_shared_parameters
@@ -501,13 +502,13 @@ def purge_command(
     *,
     yes: bool,
 ) -> None:
-    """Deletes targeted videos' entire labeled-data folders, including their labels, after a dry-run preview.
+    """Deletes targeted videos' entire labeled-data directories, including their labels, after a dry-run preview.
 
     This is the wholesale reset the frame and outlier re-extraction options deliberately avoid: where ``--overwrite``
     and ``--reset`` clear only unlabeled or single-iteration frames and always keep the human labels, ``purge`` removes
-    each targeted ``labeled-data`` folder outright. It exists for the rare start-completely-over case, such as changing
-    the project crop, that the label-preserving options cannot serve. Target specific videos with ``--videos``, or omit
-    ``--videos`` to purge the whole project. The command previews what it would delete and removes nothing until
+    each targeted ``labeled-data`` directory outright. It exists for the rare start-completely-over case, such as
+    changing the project crop, that the label-preserving options cannot serve. Target specific videos with ``--videos``,
+    or omit ``--videos`` to purge the whole project. The command previews what it would delete and removes nothing until
     ``--yes`` is given.
     """
     try:
@@ -528,15 +529,15 @@ def purge_command(
     if summary.executed:
         click.echo(
             message=(
-                f"purged {summary.removed_directory_count} folder(s), {summary.frame_count} frame(s) "
+                f"purged {summary.removed_directory_count} directory(ies), {summary.frame_count} frame(s) "
                 f"({summary.labeled_directory_count} had labels)"
             )
         )
     else:
         click.echo(
             message=(
-                f"dry run: would purge {summary.removed_directory_count} folder(s), {summary.frame_count} frame(s) "
-                f"({summary.labeled_directory_count} contain labels). Re-run with --yes to delete."
+                f"dry run: would purge {summary.removed_directory_count} directory(ies), {summary.frame_count} "
+                f"frame(s) ({summary.labeled_directory_count} contain labels). Re-run with --yes to delete."
             )
         )
 
@@ -544,11 +545,12 @@ def purge_command(
 @extract_group.command("pending", context_settings=_CONTEXT_SETTINGS)
 @_pass_shared_parameters
 def pending_command(shared: _SharedExtractionParameters) -> None:
-    """Lists the video folders that still hold machine-labeled frames you have not refined for the current iteration.
+    """Lists the video directories that still hold machine-labeled frames you have not refined for the current
+    iteration.
 
     After ``outliers`` extracts a trained model's likely-wrong frames, each is saved as a machine pre-label that you
-    refine in the labeling GUI. This reports each video folder that still has unrefined machine frames, and how many,
-    so you know which folders to open next. It only reads the project, changing nothing. Target specific videos with
+    refine in the labeling GUI. This reports each video directory that still has unrefined machine frames, and how many,
+    so you know which directories to open next. It only reads the project, changing nothing. Target specific videos with
     ``--videos``, or omit ``--videos`` to scan the whole project.
     """
     try:
@@ -565,13 +567,13 @@ def pending_command(shared: _SharedExtractionParameters) -> None:
         click.echo(message=f"warning: could not read {directory}: {detail}", err=True)
 
     project_directory = summary.config_path.parent
-    for folder in sorted(summary.pending_folders, key=lambda status: status.directory):
+    for status in sorted(summary.pending_directories, key=lambda status: status.directory):
         location = (
-            folder.directory.relative_to(project_directory)
-            if folder.directory.is_relative_to(project_directory)
-            else folder.directory
+            status.directory.relative_to(project_directory)
+            if status.directory.is_relative_to(project_directory)
+            else status.directory
         )
-        click.echo(message=f"{location}   {folder.unrefined_frame_count} frame(s) to refine")
+        click.echo(message=f"{location}   {status.unrefined_frame_count} frame(s) to refine")
     click.echo(message=summary.describe())
     if not summary.successful:
         raise SystemExit(1)

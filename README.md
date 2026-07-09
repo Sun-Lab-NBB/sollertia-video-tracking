@@ -101,7 +101,7 @@ This library provides the `slvt` CLI that exposes the following commands:
 |---------------------------|------------------------------------------------------------------------------------------|
 | `extract frames`          | Selects DeepLabCut training frames by clustering every video in a project in parallel    |
 | `extract outliers`        | Extracts a trained model's likely-wrong frames from analyzed videos to refine the model  |
-| `extract purge`           | Deletes targeted videos' entire labeled-data folders, labels included, after a dry-run preview |
+| `extract purge`           | Deletes targeted videos' entire labeled-data directories, labels included, after a dry-run preview |
 | `prepare`                 | Creates a training-dataset shuffle with a chosen network architecture and train/test split |
 | `train`                   | Trains a shuffle with mixed precision and multi-GPU DistributedDataParallel               |
 | `infer`                   | Analyzes videos across multiple GPUs, a single GPU, or the CPU, with in-flight polars output |
@@ -115,7 +115,7 @@ always including any videos named with `--videos` and filling the remaining budg
 optionally balanced across groups of related videos with `--balance-groups`; the `outliers` subcommand extracts
 `--frames-per-video` outlier frames from each target video given with `--videos`. Both extract additively and re-roll
 their unlabeled frames on `--overwrite` or `--reset` while preserving labeled frames; the `purge` subcommand instead
-deletes a video's whole labeled-data folder, labels included, when a clean start is needed. Use `slvt --help`,
+deletes a video's whole labeled-data directory, labels included, when a clean start is needed. Use `slvt --help`,
 `slvt extract --help`, or `slvt COMMAND --help` for detailed usage information.
 
 For example, the following command extracts training frames from every video referenced by a project's config.yaml,

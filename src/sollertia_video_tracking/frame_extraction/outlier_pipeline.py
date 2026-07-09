@@ -185,8 +185,8 @@ def extract_outlier_frames_parallel(
         Both clear only this iteration's freshly extracted outlier frames (those recorded in the iteration's machine
         labels) and preserve every frame already carried in the human ``CollectedData`` labels.
 
-        Empty ``labeled-data`` folders left by videos that were registered but never extracted are removed after every
-        run, so the labeling GUI shows only the videos that have frames.
+        Empty ``labeled-data`` directories left by videos that were registered but never extracted are removed after
+        every run, so the labeling GUI shows only the videos that have frames.
 
     Args:
         config_path: The path to the DeepLabCut project's config.yaml.
@@ -339,7 +339,7 @@ def extract_outlier_frames_parallel(
                 f"(scorer '{scorer}'). Analyze videos with this model first, or name specific videos to refine."
             )
             raise ValueError(message)
-    # Two videos that share a stem would write into one labeled-data folder, racing in the parallel extraction pool.
+    # Two videos that share a stem would write into one labeled-data directory, racing in the parallel extraction pool.
     ensure_unique_video_stems(videos=video_paths, error_context="Unable to extract outlier frames.")
 
     # Clearing runs single-threaded here, before detection, so the concurrent extraction workers never race on reading
@@ -869,8 +869,8 @@ def _clear_iteration_outliers(
 ) -> None:
     """Discards this refinement iteration's extracted outlier frames before re-extraction, preserving labeled frames.
 
-    Outlier frames are written into the same ``labeled-data/<stem>`` folders as the human-labeled training frames, so
-    clearing cannot simply delete the images: only the frames this iteration extracted as outliers, recorded in the
+    Outlier frames are written into the same ``labeled-data/<stem>`` directories as the human-labeled training frames,
+    so clearing cannot simply delete the images: only the frames this iteration extracted as outliers, recorded in the
     iteration's ``machinelabels-iter<N>`` bookkeeping, are removed, and any of those that already appear in the human
     ``CollectedData`` labels are kept. ``reset`` wipes every project video's outlier set for the iteration, whereas
     ``overwrite`` (``reset`` False) wipes only the videos this run re-extracts, leaving the rest intact.
@@ -886,8 +886,8 @@ def _clear_iteration_outliers(
     scorer = str(configuration.get("scorer", ""))
     labeled_data_directory = config_path.parent / "labeled-data"
     if reset:
-        # Reset clears every folder holding an outlier set for this iteration, not just the videos being re-extracted,
-        # so the whole refinement iteration starts from a clean slate.
+        # Reset clears every directory holding an outlier set for this iteration, not just the videos being
+        # re-extracted, so the whole refinement iteration starts from a clean slate.
         machine_labels_name = f"machinelabels-iter{iteration}.h5"
         target_directories = (
             sorted(path.parent for path in labeled_data_directory.glob(f"*/{machine_labels_name}"))
@@ -907,7 +907,7 @@ def _clear_iteration_outliers(
             removed_count, had_refined_labels = _clear_video_iteration_outliers(
                 directory=directory, iteration=iteration, scorer=scorer
             )
-        except Exception:  # noqa: BLE001 -- a folder that cannot be read is warned about, not fatal to the run.
+        except Exception:  # noqa: BLE001 -- a directory that cannot be read is warned about, not fatal to the run.
             sys.stderr.write(f"WARNING: {scope_label} could not clear the outlier frames in '{directory}'.\n")
             continue
         if removed_count or had_refined_labels:
@@ -916,19 +916,19 @@ def _clear_iteration_outliers(
         refined_directory_count += 1 if had_refined_labels else 0
 
     sys.stderr.write(
-        f"{scope_label} removed {removed_frame_count} outlier frame(s) from {cleared_directory_count} video folder(s) "
-        f"for iteration {iteration} before re-extraction.\n"
+        f"{scope_label} removed {removed_frame_count} outlier frame(s) from {cleared_directory_count} video "
+        f"directory(ies) for iteration {iteration} before re-extraction.\n"
     )
     if refined_directory_count:
         sys.stderr.write(
-            f"WARNING: {scope_label} discarded manual outlier refinements in {refined_directory_count} folder(s); "
+            f"WARNING: {scope_label} discarded manual outlier refinements in {refined_directory_count} directory(ies); "
             f"those MachineLabelsRefine corrections must be redone.\n"
         )
     sys.stderr.flush()
 
 
 def _clear_video_iteration_outliers(*, directory: Path, iteration: int, scorer: str) -> tuple[int, bool]:
-    """Removes one video folder's outlier frames for a refinement iteration, keeping any already-labeled frames.
+    """Removes one video directory's outlier frames for a refinement iteration, keeping any already-labeled frames.
 
     The iteration's ``machinelabels-iter<N>.h5`` records exactly the frames extracted as outliers this iteration, keyed
     by their ``imgNNNN.png`` names. Those frames are deleted, except any that also appear in the human

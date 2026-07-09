@@ -39,7 +39,7 @@ class TrainingSummary:
     Notes:
         The summary is constructed once, after training returns, from the resolved run configuration and optimization
         profile. It reports what was trained and how, not per-epoch metrics, which are streamed to the monitor and
-        written to the model folder's per-model learning-statistics CSV (``learning_stats.csv`` for the pose model,
+        written to the model directory's per-model learning-statistics CSV (``learning_stats.csv`` for the pose model,
         ``learning_stats_detector.csv`` for the detector).
     """
 
@@ -48,7 +48,7 @@ class TrainingSummary:
     shuffle: int
     """The shuffle index that was trained."""
     model_folder: Path
-    """The folder containing the trained snapshots and training statistics."""
+    """The directory containing the trained snapshots and training statistics."""
     tasks_trained: tuple[str, ...]
     """The models that were trained, in order (e.g. ``("detector", "pose")`` for a top-down model)."""
     device: str
@@ -445,10 +445,10 @@ def _find_free_port() -> int:
 
 
 def _route_logging_to_file(model_folder: Path, *, quiet_console: bool) -> None:
-    """Sends DeepLabCut's training logs to the model folder's ``train.txt`` and optionally off the console.
+    """Sends DeepLabCut's training logs to the model directory's ``train.txt`` and optionally off the console.
 
     Args:
-        model_folder: The folder in which the ``train.txt`` log is written.
+        model_folder: The directory in which the ``train.txt`` log is written.
         quiet_console: Determines whether to detach the console handler so the progress monitor owns the terminal.
     """
     setup_file_logging(model_folder / "train.txt")
@@ -689,7 +689,7 @@ def _train_single_model(
     """Builds and fits one model (pose or detector) on this process with the configured optimizations.
 
     Args:
-        loader: The loader holding the datasets and model folder.
+        loader: The loader holding the datasets and model directory.
         run_config: The run configuration for the model being trained.
         task: The task the model performs.
         profile: The resolved optimization profile.

@@ -147,7 +147,7 @@ def evaluate_trained_model(
     The snapshot's predictions on the train and test frames are compared to the human labels using DeepLabCut's own
     scorer and matching, so the headline metrics agree with ``deeplabcut.evaluate_network``. The per-frame,
     per-keypoint comparison is written as a polars feather and the metric summary and run provenance as a YAML sidecar,
-    both into the shuffle's evaluation-results folder.
+    both into the shuffle's evaluation-results directory.
 
     Notes:
         Evaluation is a single float32 forward pass over the small labeled train and test set on one device. Mixed
@@ -262,13 +262,13 @@ def evaluate_trained_model(
             unmatched_images=unmatched,
         )
 
-    evaluation_folder = Path(loader.evaluation_folder)
-    evaluation_folder.mkdir(parents=True, exist_ok=True)
-    feather_path = evaluation_folder / f"{snapshot_name}_evaluation.feather"
+    evaluation_directory = Path(loader.evaluation_folder)
+    evaluation_directory.mkdir(parents=True, exist_ok=True)
+    feather_path = evaluation_directory / f"{snapshot_name}_evaluation.feather"
     frame = pl.DataFrame(columns, schema=_FEATHER_SCHEMA)
     frame.write_ipc(file=feather_path, compression="uncompressed")
 
-    provenance_path = evaluation_folder / f"{snapshot_name}_evaluation.yaml"
+    provenance_path = evaluation_directory / f"{snapshot_name}_evaluation.yaml"
     if write_provenance:
         try:
             _write_provenance(
@@ -345,7 +345,7 @@ def _resolve_snapshot(loader: DLCLoader, index: int | str, task: Task, *, requir
     """Resolves a snapshot to score, falling back to the last snapshot when a best snapshot is requested but absent.
 
     Args:
-        loader: The loader holding the model folder the snapshots live in.
+        loader: The loader holding the model directory the snapshots live in.
         index: The requested snapshot index (``"best"``, an integer, or ``-1``).
         task: The task whose snapshots to search (pose or detector).
         required: Whether to raise when no snapshot is found; when False, returns None instead.
@@ -550,8 +550,8 @@ def _derive_relative_image_path(image: str) -> tuple[str, str]:
         image: The absolute path of a labeled image.
 
     Returns:
-        A tuple of the containing video (folder) name and the project-relative image path, anchored at the
-        ``labeled-data`` component when present and falling back to the parent folder and file name otherwise.
+        A tuple of the containing video (directory) name and the project-relative image path, anchored at the
+        ``labeled-data`` component when present and falling back to the parent directory and file name otherwise.
     """
     path = Path(image)
     parts = path.parts

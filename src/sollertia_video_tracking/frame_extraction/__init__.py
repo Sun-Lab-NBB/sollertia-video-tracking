@@ -3,13 +3,12 @@
 from .progress import AggregateBar, make_progress_reporter
 from .utilities import (
     PurgeSummary,
-    RefinementFolderStatus,
     RefinementStatusSummary,
+    RefinementDirectoryStatus,
     purge_labeled_data,
     summarize_refinement_status,
 )
-from .cpu_allocation import DEFAULT_RESERVED_CORE_COUNT, plan_core_allocation
-from .video_grouping import group_videos
+from .cpu_allocation import plan_core_allocation
 from .outlier_pipeline import (
     TrackingMethod,
     ExtractionAlgorithm,
@@ -20,19 +19,17 @@ from .outlier_detection import OutlierAlgorithm
 from .extraction_pipeline import FrameExtractionSummary, extract_frames_kmeans
 
 __all__ = [
-    "DEFAULT_RESERVED_CORE_COUNT",
     "AggregateBar",
     "ExtractionAlgorithm",
     "FrameExtractionSummary",
     "OutlierAlgorithm",
     "OutlierExtractionSummary",
     "PurgeSummary",
-    "RefinementFolderStatus",
+    "RefinementDirectoryStatus",
     "RefinementStatusSummary",
     "TrackingMethod",
     "extract_frames_kmeans",
     "extract_outlier_frames_parallel",
-    "group_videos",
     "make_progress_reporter",
     "plan_core_allocation",
     "purge_labeled_data",
