@@ -176,8 +176,8 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "--evaluate/--no-evaluate",
     default=True,
     show_default=True,
-    help="Whether to score the trained snapshot against the labeled frames as a final step and write the evaluation "
-    "results.",
+    help="Determines whether to score the trained snapshot against the labeled frames as a final step and write the "
+    "evaluation results.",
 )
 @click.option(
     "-ebs",
@@ -237,7 +237,7 @@ def train_command(
     ``--config-path`` names the DeepLabCut project's config.yaml. The shuffle's model architecture and train/test split
     are fixed when the shuffle is created (see ``slvt prepare``); this command fits that shuffle. Every
     optimization is exposed as a flag: automatic defaults are chosen for the detected hardware and never run slower
-    than stock DeepLabCut, while explicit flags let you tune for silicon you know. Training runs as a
+    than stock DeepLabCut, while explicit flags allow tuning for known hardware. Training runs as a
     DistributedDataParallel process group across multiple GPUs, or a single process on one GPU, the CPU, or
     DataParallel across multiple GPUs via ``--multi-gpu dp``.
     """
@@ -251,7 +251,7 @@ def train_command(
 
     # Detect whether the shuffle's training transform feeds the network one fixed input size so the cuDNN autotuner's
     # 'auto' default can enable itself only when it pays off, replacing the operator-declared flag this used to require.
-    fixed_input_size = detect_fixed_input_size(config_path, shuffle=shuffle, model_prefix=model_prefix)
+    fixed_input_size = detect_fixed_input_size(config=config_path, shuffle=shuffle, model_prefix=model_prefix)
 
     try:
         profile = resolve_optimization_profile(
@@ -288,6 +288,6 @@ def train_command(
             display_progress=progress,
         )
     except (ValueError, FileNotFoundError) as error:
-        raise click.ClickException(str(error)) from error
+        raise click.ClickException(message=str(error)) from error
 
     click.echo(message=summary.describe())
