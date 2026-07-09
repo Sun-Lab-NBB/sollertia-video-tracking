@@ -102,7 +102,7 @@ This library provides the `slvt` CLI that exposes the following commands:
 | `extract frames`          | Selects DeepLabCut training frames by clustering every video in a project in parallel    |
 | `extract outliers`        | Extracts a trained model's likely-wrong frames from analyzed videos to refine the model  |
 | `extract purge`           | Deletes targeted videos' entire labeled-data folders, labels included, after a dry-run preview |
-| `create-training-dataset` | Creates a training-dataset shuffle with a chosen network architecture and train/test split |
+| `prepare`                 | Creates a training-dataset shuffle with a chosen network architecture and train/test split |
 | `train`                   | Trains a shuffle with mixed precision and multi-GPU DistributedDataParallel               |
 | `infer`                   | Analyzes videos across multiple GPUs, a single GPU, or the CPU, with in-flight polars output |
 | `export`                  | Serializes a trained model into a portable, self-contained asset that runs on another machine |

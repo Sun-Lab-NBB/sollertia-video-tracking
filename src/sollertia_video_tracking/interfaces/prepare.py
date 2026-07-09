@@ -1,4 +1,4 @@
-"""Provides the ``slvt create-training-dataset`` command that creates a DeepLabCut shuffle at parity with the GUI."""
+"""Provides the ``slvt prepare`` command that creates a DeepLabCut shuffle for the subsequent model training."""
 
 from pathlib import Path
 
@@ -21,7 +21,7 @@ _IMAGENET_WEIGHT_INIT: str = "imagenet"
 """The default weight-initialization choice that uses ImageNet transfer learning rather than a SuperAnimal model."""
 
 
-@click.command("create-training-dataset", context_settings=_CONTEXT_SETTINGS)
+@click.command("prepare", context_settings=_CONTEXT_SETTINGS)
 @click.argument("config", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("-s", "--shuffle", default=1, show_default=True, help="The shuffle index to create.")
 @click.option(
@@ -99,7 +99,7 @@ _IMAGENET_WEIGHT_INIT: str = "imagenet"
     help="Overwrite the shuffle if its index already exists. WARNING: this replaces the existing shuffle's "
     "training-dataset files.",
 )
-def create_training_dataset_command(
+def prepare_command(
     config: Path,
     shuffle: int,
     network_type: str | None,

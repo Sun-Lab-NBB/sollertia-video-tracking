@@ -237,7 +237,7 @@ def train_command(
     """Trains a DeepLabCut shuffle with hardware optimizations and a clean progress monitor.
 
     CONFIG is the path to the DeepLabCut project's config.yaml. The shuffle's model architecture and train/test split
-    are fixed when the shuffle is created (see ``slvt create-training-dataset``); this command fits that shuffle. Every
+    are fixed when the shuffle is created (see ``slvt prepare``); this command fits that shuffle. Every
     optimization is exposed as a flag: automatic defaults are chosen for the detected hardware and never run slower
     than stock DeepLabCut, while explicit flags let you tune for silicon you know. Training runs as a
     DistributedDataParallel process group across multiple GPUs, or a single process on one GPU, the CPU, or
