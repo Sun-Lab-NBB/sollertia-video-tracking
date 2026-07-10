@@ -18,15 +18,21 @@ from .conversion import convert_predictions_to_feather
 from .optimization import InferenceProfile, apply_runtime_optimizations
 from ..frame_extraction import AggregateBar, plan_core_allocation, make_progress_reporter
 
-# The inference-config overrides passed to analyze_videos: our runner wrappers own autocast and compilation, so
-# DeepLabCut's own autocast and compile are disabled while its async decode pipeline is left at its default.
 _STOCK_ACCELERATION_DISABLED: dict[str, dict[str, bool]] = {
     "autocast": {"enabled": False},
     "compile": {"enabled": False},
 }
+"""The inference-config overrides passed to analyze_videos: the runner wrappers own autocast and compilation, so
+DeepLabCut's own autocast and compile are disabled while its async decode pipeline is left at its default."""
 
 _CROP_FIELD_COUNT: int = 4
 """The number of comma-separated integers, ``x1,x2,y1,y2``, in a video's config.yaml crop specification."""
+
+_RESULT_POLL_TIMEOUT_SECONDS: float = 5.0
+"""The per-result wait when draining the worker results queue. A worker that misses this window is treated as dead."""
+
+_BAR_JOIN_TIMEOUT_SECONDS: int = 3
+"""The grace period to let the aggregate progress-bar thread finish its final render before the run returns."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,10 +236,10 @@ def run_inference(
         A summary of what was analyzed and the hardware configuration used.
 
     Raises:
-        ValueError: When no videos are provided; when per-video output paths are provided while ``to_polars`` is
-            disabled or their count does not match the videos; when the profile selects CUDA but resolves no GPU
-            indices to build worker slots from; or when an explicit CPU worker/thread configuration cannot be pinned
-            to disjoint core blocks.
+        ValueError: Raised when no videos are provided. Raised when per-video output paths are provided while
+            ``to_polars`` is disabled, or when their count does not match the videos. Raised when the profile selects
+            CUDA but resolves no GPU indices to build worker slots from. Raised when an explicit CPU worker/thread
+            configuration cannot be pinned to disjoint core blocks.
     """
     config = Path(config)
     destination = Path(destination) if destination is not None else None
@@ -260,7 +266,7 @@ def run_inference(
     totals = {index: _probe_frame_count(video) for index, video in enumerate(video_paths)}
     slots = _build_slots(profile=profile, video_count=len(video_paths))
 
-    # Resolve each video's crop once, in the parent, so every worker analyzes the same region the frames were
+    # Resolves each video's crop once, in the parent, so every worker analyzes the same region the frames were
     # extracted from when the project is configured to crop, keeping predictions in the model's coordinate space.
     project_config = read_config(str(config))
 
@@ -318,7 +324,7 @@ def run_inference(
     finally:
         if bar is not None:
             bar.stop()
-            bar.join(timeout=3)
+            bar.join(timeout=_BAR_JOIN_TIMEOUT_SECONDS)
         manager.shutdown()
 
     precision = _describe_precision(profile)
@@ -454,7 +460,7 @@ def _build_slots(profile: InferenceProfile, video_count: int) -> list[_Slot]:
         The list of worker slots to spawn.
     """
     if profile.on_cuda:
-        # Round-robin the device order (cuda:0, cuda:1, cuda:0, ...) rather than grouping by device
+        # Round-robins the device order (cuda:0, cuda:1, cuda:0, ...) rather than grouping by device
         # (cuda:0, cuda:0, cuda:1, ...). When there are fewer videos than slots, the list is truncated below, so this
         # ordering spreads the surviving workers across every GPU before oversubscribing any single one.
         slots = [
@@ -533,7 +539,7 @@ def _collect_results(
     reported: set[int] = set()
     for _ in video_paths:
         try:
-            index, path, error = results_queue.get(timeout=5.0)
+            index, path, error = results_queue.get(timeout=_RESULT_POLL_TIMEOUT_SECONDS)
         except Exception:  # noqa: BLE001 - a missing result means a worker died; report the remaining videos below.
             break
         reported.add(index)
@@ -594,9 +600,9 @@ def _analyze_one_video(
         slot: The device and optional CPU-core placement for this worker.
         launch: The bundle of picklable per-run parameters.
         item: The (video index, video path, frame total, crop rectangle, output feather path) work item pulled from the
-            queue, where the crop rectangle is the ``[x1, x2, y1, y2]`` region to analyze or None to analyze the full
-            frame, and the output feather path is the explicit destination for this video's feather or None to name it
-            from the video stem.
+            queue. The crop rectangle is the ``[x1, x2, y1, y2]`` region to analyze, or None to analyze the full frame.
+            The output feather path is the explicit destination for this video's feather, or None to name it from the
+            video stem.
     """
     index, video, total, cropping, output_feather = item
     output_directory = launch.destination if launch.destination is not None else Path(video).parent
@@ -611,14 +617,14 @@ def _analyze_one_video(
                 shuffle=launch.shuffle,
                 device=slot.device,
                 destfolder=str(output_directory),
-                # Analyze the same region the frames were extracted from; None analyzes the full frame.
+                # Analyzes the same region the frames were extracted from; None analyzes the full frame.
                 cropping=cropping,
                 snapshot_index=launch.snapshot_index,
                 detector_snapshot_index=launch.detector_snapshot_index,
                 batch_size=launch.batch_size,
                 detector_batch_size=launch.detector_batch_size,
                 save_as_csv=launch.save_as_csv,
-                # Always (re)analyze the submitted video. DeepLabCut otherwise skips any video whose companion
+                # The submitted video is always (re)analyzed. DeepLabCut otherwise skips any video whose companion
                 # ``_full.pickle`` already exists, which would silently skip re-runs (and, since the converted HDF5 is
                 # deleted, report every already-completed video as a failure) when a batch is resubmitted.
                 overwrite=True,
@@ -697,9 +703,9 @@ def _resolve_output(
         likelihood_threshold=launch.likelihood_threshold,
         write_provenance=launch.write_provenance,
     )
-    # Deployment leaves only the feather and its provenance sidecar: once conversion succeeds, remove DeepLabCut's own
-    # prediction artifacts for this video. Conversion runs just above, so a failed conversion raises before this point
-    # and leaves those artifacts in place as a fallback.
+    # Deployment leaves only the feather and its provenance sidecar: once conversion succeeds, DeepLabCut's own
+    # prediction artifacts for this video are removed. Conversion runs just above, so a failed conversion raises before
+    # this point and leaves those artifacts in place as a fallback.
     if not launch.keep_dlc_outputs:
         _cleanup_dlc_artifacts(destination=destination, stem=stem, scorer=scorer, keep_csv=launch.save_as_csv)
     return feather_path

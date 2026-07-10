@@ -98,14 +98,15 @@ def _optimize_inference_runner(runner: InferenceRunner, profile: InferenceProfil
         )
         return runner
 
-    # DeepLabCut's own autocast is disabled through the inference config passed to analyze_videos, but reassert it here
-    # so the stock forward path never double-applies autocast on top of ours even if a runner was built differently.
+    # DeepLabCut's own autocast is disabled through the inference config passed to analyze_videos; the disable is
+    # reasserted here so the stock forward path never double-applies autocast on top of the injected one even if a
+    # runner was built differently.
     runner.inference_cfg.autocast.enabled = False
 
     if profile.channels_last:
         runner.model = runner.model.to(memory_format=torch.channels_last)
     if profile.torch_compile:
-        # torch.compile can raise a range of backend errors; fall back to eager execution when it does.
+        # torch.compile can raise a range of backend errors; the wrapper falls back to eager execution when it does.
         try:
             runner.model = torch.compile(runner.model)
         except Exception as error:  # noqa: BLE001
@@ -151,7 +152,8 @@ def _build_pose_predict(
         move_inputs: A callable that moves a batch to the device with the configured memory format.
 
     Returns:
-        A ``predict(inputs, **kwargs)`` callable mirroring ``PoseInferenceRunner.predict`` with our autocast applied.
+        A ``predict(inputs, **kwargs)`` callable mirroring ``PoseInferenceRunner.predict`` with the injected
+        autocast applied.
     """
 
     def predict(inputs: torch.Tensor, **kwargs: Any) -> list[dict[str, dict[str, Any]]]:
@@ -163,7 +165,7 @@ def _build_pose_predict(
             raw_predictions = runner.model.get_predictions(outputs)
         if runner.dynamic is not None:
             raw_predictions["bodypart"]["poses"] = runner.dynamic.update(raw_predictions["bodypart"]["poses"])
-        # Copy each output tensor to host once, then index the resulting array per frame, rather than issuing a
+        # Copies each output tensor to host once, then indexes the resulting array per frame, rather than issuing a
         # separate device-to-host copy for every frame of every tensor.
         host_predictions = {
             head: {name: prediction.cpu().numpy() for name, prediction in head_outputs.items()}
@@ -193,7 +195,8 @@ def _build_detector_predict(
         move_inputs: A callable that moves a batch to the device with the configured memory format.
 
     Returns:
-        A ``predict(inputs, **kwargs)`` callable mirroring ``DetectorInferenceRunner.predict`` with our autocast.
+        A ``predict(inputs, **kwargs)`` callable mirroring ``DetectorInferenceRunner.predict`` with the injected
+        autocast.
     """
 
     def predict(inputs: torch.Tensor, **kwargs: Any) -> list[dict[str, dict[str, Any]]]:
