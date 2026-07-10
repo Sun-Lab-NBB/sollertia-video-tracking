@@ -2,6 +2,7 @@
 
 import click
 
+from .gui import gui_command
 from .infer import infer_command
 from .train import train_command
 from .export import export_command
@@ -19,6 +20,7 @@ def slvt_cli() -> None:
 
 
 slvt_cli.add_command(cmd=extract_group)
+slvt_cli.add_command(cmd=gui_command)
 slvt_cli.add_command(cmd=prepare_command)
 slvt_cli.add_command(cmd=train_command)
 slvt_cli.add_command(cmd=infer_command)
