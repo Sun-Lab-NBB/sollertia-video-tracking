@@ -63,11 +63,11 @@ def convert_predictions_to_feather(
     """Converts a DeepLabCut prediction HDF5 file into a wide polars feather file with an optional provenance sidecar.
 
     DeepLabCut writes predictions as a pandas HDF5 table whose columns are a ``scorer / [individuals] / bodyparts /
-    coords`` MultiIndex and whose rows are frames. This renders that table into a wide, snake-cased feather with one row
-    per frame (``frame``) and, per keypoint, ``[<individual>_]<bodypart>_x``, ``_y``, and ``_likelihood`` columns. The
-    rest of the Sollertia stack (numpy 2 / Python 3.14) reads the resulting uncompressed Apache Arrow feather directly.
-    The transcription is a direct, project-agnostic copy of DeepLabCut's own output; derived quantities are left to
-    downstream consumers.
+    coords`` MultiIndex and whose rows are frames. This renders that table into a wide, underscore-joined feather with
+    one row per frame (``frame``) and, per keypoint, ``[<individual>_]<bodypart>_x``, ``_y``, and ``_likelihood``
+    columns (the source names are joined with underscores, not otherwise re-cased). The rest of the Sollertia stack
+    (numpy 2 / Python 3.14) reads the resulting uncompressed Apache Arrow feather directly. The transcription is a
+    direct, project-agnostic copy of DeepLabCut's own output; derived quantities are left to downstream consumers.
 
     Args:
         h5_path: The path to the DeepLabCut prediction ``.h5`` file to convert.
@@ -153,7 +153,7 @@ def _flatten_predictions(
     *,
     likelihood_threshold: float,
 ) -> tuple[tuple[str, ...], dict[str, NDArray[np.float32]]]:
-    """Flattens the prediction MultiIndex columns into snake-cased per-keypoint float columns.
+    """Flattens the prediction MultiIndex columns into underscore-joined per-keypoint float columns.
 
     The leading ``scorer`` column level is dropped and the remaining levels above the coordinate are joined with
     underscores to form each keypoint prefix. A single-animal ``(scorer, snout, x)`` becomes ``snout_x`` and a

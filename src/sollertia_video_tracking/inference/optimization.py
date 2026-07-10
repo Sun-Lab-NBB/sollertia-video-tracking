@@ -93,7 +93,7 @@ class InferenceProfile:
 
     @property
     def total_workers(self) -> int:
-        """Returns the total number of worker processes the run spawns across all devices."""
+        """Returns the configured maximum number of worker processes; the run spawns fewer when videos are scarce."""
         if self.on_cuda:
             return len(self.gpus) * self.gpu_processes
         if self.device == "cpu":
@@ -147,10 +147,11 @@ def resolve_inference_profile(
 
     Every optimization is exposed as an explicit request so an operator who knows their silicon can override the
     automatic defaults. ``"auto"`` selects a capability-detected default suited to the chosen device. An explicit
-    ``"on"``/``"off"`` toggle is always honored; a forced AMP dtype is honored wherever the device can run it and is
-    otherwise disabled with a warning rather than a silent refusal (bfloat16 on MPS and float16 on any non-CUDA device
-    fall back to float32). The device selection cascades ``cuda`` -> ``cpu`` when no CUDA device is visible so the same
-    call works unchanged on a GPU server or a CPU-only server.
+    ``"on"``/``"off"`` toggle is honored wherever it applies, though the CUDA-only tf32, cuDNN-benchmark, and
+    pin-memory toggles are forced off on non-CUDA devices; a forced AMP dtype is honored wherever the device can run
+    it and is otherwise disabled with a warning rather than a silent refusal (bfloat16 on MPS and float16 on any
+    non-CUDA device fall back to float32). The device selection cascades ``cuda`` -> ``cpu`` when no CUDA device is
+    visible so the same call works unchanged on a GPU server or a CPU-only server.
 
     Args:
         device: The requested base device (``"auto"``, ``"cpu"``, ``"mps"``, or ``"cuda"``), or None to select

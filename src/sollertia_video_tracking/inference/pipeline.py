@@ -230,7 +230,10 @@ def run_inference(
         A summary of what was analyzed and the hardware configuration used.
 
     Raises:
-        ValueError: When no videos are provided, or when the per-video output paths do not match the videos.
+        ValueError: When no videos are provided; when per-video output paths are provided while ``to_polars`` is
+            disabled or their count does not match the videos; when the profile selects CUDA but resolves no GPU
+            indices to build worker slots from; or when an explicit CPU worker/thread configuration cannot be pinned
+            to disjoint core blocks.
     """
     config = Path(config)
     destination = Path(destination) if destination is not None else None
