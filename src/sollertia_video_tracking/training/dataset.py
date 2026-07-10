@@ -1,4 +1,4 @@
-"""Provides a wrapper over DeepLabCut training-dataset creation at parity with the GUI's create-dataset tab."""
+"""Provides a wrapper over DeepLabCut training-dataset creation at parity with the GUI's create-training-dataset tab."""
 
 import re
 import sys
@@ -211,7 +211,7 @@ def create_training_dataset(
     from_training_set_index: int = 0,
     overwrite: bool = False,
 ) -> TrainingDatasetSummary:
-    """Creates a training-dataset shuffle for a project, at parity with the DeepLabCut GUI's create-dataset tab.
+    """Creates a training-dataset shuffle for a project at parity with the DeepLabCut GUI's create-training-dataset tab.
 
     Wraps DeepLabCut's training-dataset creation for the PyTorch engine, which bakes the model architecture, weight
     initialization, and train/test split into the shuffle (training is run afterward with ``slvt train``).

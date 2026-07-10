@@ -192,7 +192,8 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "--evaluation-confidence-cutoff",
     type=float,
     default=None,
-    help="The confidence cutoff for the evaluation's cutoff-filtered metrics. Omit to use the default of 0.6.",
+    help="The confidence cutoff for the evaluation's cutoff-filtered metrics. Omit to fall back to the project "
+    "config's pcutoff (0.6 when unset).",
 )
 @click.option(
     "-p",
@@ -238,7 +239,7 @@ def train_command(
     are fixed when the shuffle is created (see ``slvt prepare``); this command fits that shuffle. Every
     optimization is exposed as a flag: automatic defaults are chosen for the detected hardware and never run slower
     than stock DeepLabCut, while explicit flags allow tuning for known hardware. Training runs as a
-    DistributedDataParallel process group across multiple GPUs, or a single process on one GPU, the CPU, or
+    DistributedDataParallel process group across multiple GPUs, or a single process on one GPU, the CPU, MPS, or
     DataParallel across multiple GPUs via ``--multi-gpu dp``.
     """
     try:
