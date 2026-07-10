@@ -10,6 +10,7 @@ from ..hardware import (
     DEFAULT_RESERVED_CPU_THREADS,
     Toggle,
     AmpMode,
+    DeviceType,
     warn,
     resolve_toggle,
     precision_label,
@@ -129,17 +130,17 @@ class InferenceProfile:
 
 def resolve_inference_profile(
     *,
-    device: str | None = None,
+    device: DeviceType | None = None,
     gpus: tuple[int, ...] | None = None,
-    amp: AmpMode = "auto",
-    tf32: Toggle = "auto",
-    cudnn_benchmark: Toggle = "auto",
-    channels_last: Toggle = "auto",
-    torch_compile: Toggle = "auto",
+    amp: AmpMode = AmpMode.AUTO,
+    tf32: Toggle = Toggle.AUTO,
+    cudnn_benchmark: Toggle = Toggle.AUTO,
+    channels_last: Toggle = Toggle.AUTO,
+    torch_compile: Toggle = Toggle.AUTO,
     gpu_processes: int = -1,
     cpu_workers: int = -1,
     cpu_threads_per_worker: int = -1,
-    pin_memory: Toggle = "auto",
+    pin_memory: Toggle = Toggle.AUTO,
     fixed_input_size: bool = False,
 ) -> InferenceProfile:
     """Reconciles the requested inference optimization flags with the available hardware into a concrete profile.
@@ -152,8 +153,8 @@ def resolve_inference_profile(
     call works unchanged on a GPU server or a CPU-only server.
 
     Args:
-        device: The requested device (``"auto"``, ``"cpu"``, ``"mps"``, ``"cuda"``, or ``"cuda:N"``), or None to
-            select automatically.
+        device: The requested base device (``"auto"``, ``"cpu"``, ``"mps"``, or ``"cuda"``), or None to select
+            automatically.
         gpus: The explicitly requested CUDA device indices, or None to use every visible device.
         amp: The requested mixed-precision mode; ``"auto"`` enables bfloat16 only where it is natively fast.
         tf32: The requested TF32 setting (CUDA only; a no-op on other devices).

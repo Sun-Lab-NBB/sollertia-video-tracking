@@ -6,8 +6,8 @@ from .infer import infer_command
 from .train import train_command
 from .export import export_command
 from .extract import extract_group
-from .prepare import prepare_command
 from .predict import predict_command
+from .prepare import prepare_command
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the lab standard."""

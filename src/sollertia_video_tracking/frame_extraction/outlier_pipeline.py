@@ -152,7 +152,6 @@ def extract_outlier_frames_parallel(
     clustering_resize_width: int = 30,
     cluster_in_color: bool = False,
     save_labeled_frames: bool = False,
-    model_prefix: str = "",
     tracking_method: TrackingMethod | None = None,
     pose_snapshot_index: int | None = None,
     detector_snapshot_index: int | None = None,
@@ -213,7 +212,6 @@ def extract_outlier_frames_parallel(
         cluster_in_color: Determines whether to cluster on color channels instead of grayscale.
         save_labeled_frames: Determines whether to also save each extracted frame with the model's predictions drawn on
             it.
-        model_prefix: The model subdirectory prefix, matching the trained shuffle.
         tracking_method: The multi-animal tracker that produced the predictions, or None to read it from the project
             configuration.
         pose_snapshot_index: The pose snapshot index whose scorer named the prediction files, or None for the default.
@@ -300,7 +298,7 @@ def extract_outlier_frames_parallel(
         cfg=configuration,
         shuffle=shuffle_index,
         trainFraction=configuration["TrainingFraction"][training_set_index],
-        modelprefix=model_prefix,
+        modelprefix="",
         snapshot_index=pose_snapshot_index,
         detector_snapshot_index=detector_snapshot_index,
     )

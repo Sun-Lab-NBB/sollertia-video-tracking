@@ -1,11 +1,18 @@
 """Provides the ``slvt train`` command that trains a DeepLabCut shuffle with mixed precision, DDP, and a monitor."""
 
-from typing import Literal
 from pathlib import Path
 
 import click
 
-from ..training import Toggle, AmpMode, train_model, detect_fixed_input_size, resolve_optimization_profile
+from ..training import (
+    Toggle,
+    AmpMode,
+    DeviceType,
+    MultiGpuStrategy,
+    train_model,
+    detect_fixed_input_size,
+    resolve_optimization_profile,
+)
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the lab standard."""
@@ -17,143 +24,167 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "--config-path",
     required=True,
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    help="The path to the DeepLabCut project's config.yaml whose shuffle to train.",
+    help="The path to the DeepLabCut project's config.yaml that owns the shuffle to train.",
 )
-@click.option("-s", "--shuffle", default=1, show_default=True, help="The shuffle index to train.")
 @click.option(
-    "-mp",
-    "--model-prefix",
-    default="",
-    help="The model subdirectory prefix, matching the one chosen when the shuffle was created.",
+    "-s",
+    "--shuffle",
+    default=1,
+    show_default=True,
+    help="The index of the shuffle to train. A shuffle pairs a train/test split with a model architecture, both fixed "
+    "when it was created by 'slvt prepare'. Change it to train a different prepared shuffle.",
 )
 @click.option(
     "-e",
     "--epochs",
     type=int,
     default=None,
-    help="The maximum number of pose-model training epochs. Omit to use the shuffle's configured value.",
+    help="The maximum number of passes over the training set for the pose model. Higher values train longer, but may "
+    "be necessary to achieve model convergence on complex datasets. Omit to use the model's default value.",
 )
 @click.option(
     "-b",
     "--batch-size",
     type=int,
     default=None,
-    help="The pose-model batch size. Omit to use the configured value; larger batches use more GPU memory.",
+    help="The number of frames the pose model processes per optimization step. Larger batches use more GPU memory and "
+    "can speed up training. Omit to use the model's default value.",
 )
-@click.option("-se", "--save-epochs", type=int, default=None, help="The number of epochs between saved snapshots.")
+@click.option(
+    "-se",
+    "--save-epochs",
+    type=int,
+    default=None,
+    help="The number of epochs between saved pose-model snapshots. Smaller values checkpoint more often at the cost of "
+    "disk space. Omit to use the model's default value.",
+)
 @click.option(
     "-di",
     "--display-iterations",
     type=int,
     default=None,
-    help="The number of iterations between loss updates shown during each epoch.",
+    help="The number of training iterations between loss readouts within each epoch. Omit to use the model's default "
+    "value.",
 )
 @click.option(
     "-ms",
     "--maximum-snapshots",
     type=int,
     default=None,
-    help="The maximum number of snapshots to keep per model. Omit to use the configured value.",
+    help="The maximum number of recent snapshots to retain per model. Older snapshots beyond this count are deleted. "
+    "Omit to use the model's default value.",
 )
 @click.option(
     "-sp",
     "--snapshot-path",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     default=None,
-    help="The pose snapshot to resume training from.",
+    help="The path to a pose-model snapshot to resume training from, instead of starting from the shuffle's initial "
+    "weights.",
 )
 @click.option(
     "-dp",
     "--detector-path",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     default=None,
-    help="The detector snapshot to resume training from, for top-down models.",
+    help="The path to a detector snapshot to resume training from. Applies to top-down models only.",
 )
 @click.option(
     "-dbs",
     "--detector-batch-size",
     type=int,
     default=None,
-    help="The detector batch size, for top-down models. Omit to use the configured value.",
+    help="The number of frames the object detector processes per step, for top-down models. Omit to use the model's "
+    "default value.",
 )
 @click.option(
     "-de",
     "--detector-epochs",
     type=int,
     default=None,
-    help="The maximum number of detector epochs, for top-down models. Set to 0 to skip detector training.",
+    help="The maximum number of training passes for the object detector, for top-down models. Set to 0 to skip "
+    "detector training and fit only the pose model.",
 )
 @click.option(
     "-dse",
     "--detector-save-epochs",
     type=int,
     default=None,
-    help="The number of epochs between detector snapshots, for top-down models.",
+    help="The number of epochs between saved detector snapshots, for top-down models. Omit to use the model's default "
+    "value.",
 )
 @click.option(
     "-lhw",
     "--load-head-weights/--no-load-head-weights",
     default=True,
     show_default=True,
-    help="Determines whether to restore head weights when resuming a pose model. Disable when changing bodyparts.",
+    help="Determines whether the pose model's head weights are restored when resuming from a snapshot. Disable this "
+    "when the bodypart set has changed, since the snapshot's head no longer matches.",
 )
 @click.option(
     "-d",
     "--device",
-    default="auto",
+    type=click.Choice([device.value for device in DeviceType]),
+    default=DeviceType.AUTO.value,
     show_default=True,
-    help="The device to train on: 'auto', 'cpu', 'mps', 'cuda', or 'cuda:N'. 'auto' selects every visible GPU.",
+    help="The base device to train on. 'auto' selects a CUDA GPU when one is visible and otherwise the CPU. 'cpu' and "
+    "'mps' (Apple Metal) force those devices. Choose specific GPUs with --gpus.",
 )
 @click.option(
     "-g",
     "--gpus",
     default=None,
     metavar="INDICES",
-    help="The comma-separated CUDA device indices to use (e.g. '0,1'). Omit to use every visible GPU.",
+    help="The comma-separated CUDA device indices to train on. Omit to train on GPU 0. List two or more indices (e.g. "
+    "'0,1') to train across them, with the strategy chosen by --multi-gpu. Only applicable when training device is a "
+    "CUDA-compatible GPU.",
 )
 @click.option(
     "-mg",
     "--multi-gpu",
-    type=click.Choice(["auto", "ddp", "dp", "single"]),
-    default="auto",
+    type=click.Choice([strategy.value for strategy in MultiGpuStrategy if strategy is not MultiGpuStrategy.SINGLE]),
+    default=MultiGpuStrategy.AUTO.value,
     show_default=True,
-    help="The multi-GPU strategy: DistributedDataParallel, the slower DataParallel, or a single device. 'auto' uses "
-    "DDP when two or more GPUs are selected.",
+    help="The strategy for training across the GPUs selected with --gpus. 'auto' uses DistributedDataParallel when two "
+    "or more GPUs are selected. 'ddp' forces it. 'dp' uses the slower DataParallel. Ignored when a single GPU is used.",
 )
 @click.option(
     "-a",
     "--amp",
-    type=click.Choice(["auto", "off", "bf16", "fp16"]),
-    default="auto",
+    type=click.Choice([mode.value for mode in AmpMode]),
+    default=AmpMode.AUTO.value,
     show_default=True,
-    help="The mixed-precision mode. 'auto' enables bfloat16 on Ampere or newer GPUs. Force 'fp16' for pre-Ampere "
-    "cards with float16 tensor cores.",
+    help="The mixed-precision compute mode, which trades some numerical precision for speed and lower memory use. "
+    "'auto' enables bfloat16 on Ampere or newer GPUs and stays in float32 elsewhere. 'off' forces float32. 'bf16' and "
+    "'fp16' force those dtypes.",
 )
 @click.option(
     "-t",
     "--tf32",
-    type=click.Choice(["auto", "on", "off"]),
-    default="auto",
+    type=click.Choice([toggle.value for toggle in Toggle]),
+    default=Toggle.AUTO.value,
     show_default=True,
-    help="TF32 acceleration for float32 matmuls and convolutions (CUDA only). 'auto' enables it on Ampere or newer.",
+    help="TF32 acceleration for float32 matmuls and convolutions on CUDA, which speeds up float32 math at slightly "
+    "reduced precision. 'auto' enables it on Ampere or newer GPUs. 'on' and 'off' force it. It is a no-op off CUDA.",
 )
 @click.option(
     "-cb",
     "--cudnn-benchmark",
-    type=click.Choice(["auto", "on", "off"]),
-    default="auto",
+    type=click.Choice([toggle.value for toggle in Toggle]),
+    default=Toggle.AUTO.value,
     show_default=True,
-    help="The cuDNN convolution autotuner. 'auto' enables it when the shuffle's training transform is detected to use "
-    "a single fixed input size, where it speeds up convolutions; it disables deterministic training and can slow "
-    "variable-size augmentation, so it stays off otherwise.",
+    help="The cuDNN convolution autotuner on CUDA. 'auto' enables it only when the shuffle's training transform is "
+    "detected to feed one fixed input size, where it speeds up convolutions. It disables deterministic training and "
+    "can slow variable-size augmentation, so it stays off otherwise. 'on' and 'off' force it.",
 )
 @click.option(
     "-cm",
     "--compile-model",
-    type=click.Choice(["auto", "on", "off"]),
-    default="auto",
+    type=click.Choice([toggle.value for toggle in Toggle]),
+    default=Toggle.AUTO.value,
     show_default=True,
-    help="Whether to compile the model for faster steps. Off by default because of its warm-up cost.",
+    help="Determines whether the model is compiled with torch.compile for faster steps. 'auto' leaves it off because "
+    "its one-time warm-up cost may not amortize. 'on' and 'off' force it.",
 )
 @click.option(
     "-dw",
@@ -161,52 +192,54 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     type=int,
     default=-1,
     show_default=True,
-    help="The number of dataloader workers per process. Set to -1 to choose automatically from the CPU count.",
+    help="The number of worker processes each training process uses to load and augment data. More workers feed the "
+    "GPU faster until the CPU saturates. Set to -1 to derive it from the CPU count, capped at 8 per process.",
 )
 @click.option(
     "-pm",
     "--pin-memory",
-    type=click.Choice(["auto", "on", "off"]),
-    default="auto",
+    type=click.Choice([toggle.value for toggle in Toggle]),
+    default=Toggle.AUTO.value,
     show_default=True,
-    help="Whether dataloaders pin host memory for faster transfers (CUDA only). 'auto' enables it on CUDA.",
+    help="Determines whether dataloaders pin host memory to speed up host-to-device transfers on CUDA. 'auto' enables "
+    "it on CUDA. 'on' and 'off' force it. It has no effect off CUDA.",
 )
 @click.option(
     "-ev",
     "--evaluate/--no-evaluate",
     default=True,
     show_default=True,
-    help="Determines whether to score the trained snapshot against the labeled frames as a final step and write the "
-    "evaluation results.",
+    help="Determines whether the trained snapshot is scored against the labeled frames as a final step, writing the "
+    "evaluation feather and its provenance sidecar. Disable to finish at the last snapshot without evaluating.",
 )
 @click.option(
     "-ebs",
     "--evaluation-batch-size",
     type=int,
-    default=16,
+    default=1,
     show_default=True,
-    help="The number of frames scored per forward pass during the post-training evaluation.",
+    help="The number of frames scored per forward pass during the post-training evaluation, which runs in float32 on "
+    "a single device. Larger values evaluate faster but use more GPU memory. Raise it on a capable GPU.",
 )
 @click.option(
     "-ecc",
     "--evaluation-confidence-cutoff",
     type=float,
     default=None,
-    help="The confidence cutoff for the evaluation's cutoff-filtered metrics. Omit to fall back to the project "
-    "config's pcutoff (0.6 when unset).",
+    help="The confidence cutoff for the evaluation's cutoff-filtered metrics. Predictions the model makes below this "
+    "confidence are excluded from the cutoff-filtered error, so it reflects accuracy on only the keypoints the model "
+    "is confident about. Omit to fall back to the project config's p-cutoff (0.6 when unset).",
 )
 @click.option(
     "-p",
     "--progress/--no-progress",
     default=True,
     show_default=True,
-    help="Determines whether to render the live progress monitor and keep the underlying training logs off the "
-    "console.",
+    help="Determines whether the aggregate progress bar is shown during training.",
 )
 def train_command(
     config_path: Path,
     shuffle: int,
-    model_prefix: str,
     epochs: int | None,
     batch_size: int | None,
     save_epochs: int | None,
@@ -219,13 +252,13 @@ def train_command(
     detector_save_epochs: int | None,
     device: str,
     gpus: str | None,
-    multi_gpu: Literal["auto", "ddp", "dp", "single"],
-    amp: AmpMode,
-    tf32: Toggle,
-    cudnn_benchmark: Toggle,
-    compile_model: Toggle,
+    multi_gpu: str,
+    amp: str,
+    tf32: str,
+    cudnn_benchmark: str,
+    compile_model: str,
     dataloader_workers: int,
-    pin_memory: Toggle,
+    pin_memory: str,
     evaluation_batch_size: int,
     evaluation_confidence_cutoff: float | None,
     *,
@@ -236,11 +269,12 @@ def train_command(
     """Trains a DeepLabCut shuffle with hardware optimizations and a clean progress monitor.
 
     ``--config-path`` names the DeepLabCut project's config.yaml. The shuffle's model architecture and train/test split
-    are fixed when the shuffle is created (see ``slvt prepare``); this command fits that shuffle. Every
-    optimization is exposed as a flag: automatic defaults are chosen for the detected hardware and never run slower
-    than stock DeepLabCut, while explicit flags allow tuning for known hardware. Training runs as a
-    DistributedDataParallel process group across multiple GPUs, or a single process on one GPU, the CPU, MPS, or
-    DataParallel across multiple GPUs via ``--multi-gpu dp``.
+    are fixed when the shuffle is created (see ``slvt prepare``) and this command fits that shuffle. Every optimization
+    is exposed as a flag: automatic defaults are chosen for the detected hardware and never run slower than stock
+    DeepLabCut, while explicit flags allow further tuning for known hardware. Training runs on a single GPU (index 0) by
+    default, since multi-GPU training is often slower for DeepLabCut workloads. Select two or more GPUs with ``--gpus``
+    to train across them, as a DistributedDataParallel process group (``--multi-gpu ddp``, the default for multiple
+    GPUs) or the slower DataParallel (``--multi-gpu dp``). Single-process training also covers the CPU and Apple MPS.
     """
     try:
         gpu_indices = tuple(int(part) for part in gpus.split(",")) if gpus else None
@@ -250,28 +284,27 @@ def train_command(
         )
         raise click.ClickException(message=message) from error
 
-    # Detect whether the shuffle's training transform feeds the network one fixed input size so the cuDNN autotuner's
+    # Detects whether the shuffle's training transform feeds the network one fixed input size so the cuDNN autotuner's
     # 'auto' default can enable itself only when it pays off, replacing the operator-declared flag this used to require.
-    fixed_input_size = detect_fixed_input_size(config=config_path, shuffle=shuffle, model_prefix=model_prefix)
+    fixed_input_size = detect_fixed_input_size(config=config_path, shuffle=shuffle)
 
     try:
         profile = resolve_optimization_profile(
-            device=device,
+            device=DeviceType(device),
             gpus=gpu_indices,
-            multi_gpu=multi_gpu,
-            amp=amp,
-            tf32=tf32,
-            cudnn_benchmark=cudnn_benchmark,
-            torch_compile=compile_model,
+            multi_gpu=MultiGpuStrategy(multi_gpu),
+            amp=AmpMode(amp),
+            tf32=Toggle(tf32),
+            cudnn_benchmark=Toggle(cudnn_benchmark),
+            torch_compile=Toggle(compile_model),
             dataloader_workers=dataloader_workers,
-            pin_memory=pin_memory,
+            pin_memory=Toggle(pin_memory),
             fixed_input_size=fixed_input_size,
         )
         summary = train_model(
             config=config_path,
             profile=profile,
             shuffle=shuffle,
-            model_prefix=model_prefix,
             epochs=epochs,
             batch_size=batch_size,
             save_epochs=save_epochs,

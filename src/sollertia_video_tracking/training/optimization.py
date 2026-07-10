@@ -1,7 +1,7 @@
 """Provides device capability detection and the resolved optimization profile that tunes DeepLabCut training."""
 
 import os
-from typing import Literal
+from enum import StrEnum
 from dataclasses import dataclass
 
 import torch
@@ -10,6 +10,7 @@ from ..hardware import (
     DEFAULT_RESERVED_CPU_THREADS,
     Toggle,
     AmpMode,
+    DeviceType,
     warn,
     resolve_toggle,
     precision_label,
@@ -19,8 +20,18 @@ from ..hardware import (
     resolve_target_device,
 )
 
-type MultiGpuStrategy = Literal["ddp", "dp", "single"]
-"""The resolved multi-GPU execution strategy: DistributedDataParallel, DataParallel, or a single device."""
+
+class MultiGpuStrategy(StrEnum):
+    """The multi-GPU execution strategy: automatic, DDP, DataParallel, or a single device."""
+
+    AUTO = "auto"
+    """Selects DistributedDataParallel when two or more GPUs are chosen, otherwise a single device. Request-only."""
+    DDP = "ddp"
+    """Trains with DistributedDataParallel, one process per GPU."""
+    DP = "dp"
+    """Trains with DataParallel in one process, which is slower and cannot combine with mixed precision."""
+    SINGLE = "single"
+    """Trains on a single device. This is the resolved outcome of selecting one GPU, not a user-selectable request."""
 
 _MIN_MULTI_GPU_COUNT: int = 2
 """The minimum number of selected GPUs required to run any multi-GPU strategy rather than a single device."""
@@ -74,7 +85,7 @@ class OptimizationProfile:
     @property
     def use_ddp(self) -> bool:
         """Returns whether the run trains with DistributedDataParallel across multiple processes."""
-        return self.multi_gpu_strategy == "ddp"
+        return self.multi_gpu_strategy == MultiGpuStrategy.DDP
 
     @property
     def world_size(self) -> int:
@@ -109,15 +120,15 @@ class OptimizationProfile:
 
 def resolve_optimization_profile(
     *,
-    device: str | None = None,
+    device: DeviceType | None = None,
     gpus: tuple[int, ...] | None = None,
-    multi_gpu: Literal["auto", "ddp", "dp", "single"] = "auto",
-    amp: AmpMode = "auto",
-    tf32: Toggle = "auto",
-    cudnn_benchmark: Toggle = "auto",
-    torch_compile: Toggle = "auto",
+    multi_gpu: MultiGpuStrategy = MultiGpuStrategy.AUTO,
+    amp: AmpMode = AmpMode.AUTO,
+    tf32: Toggle = Toggle.AUTO,
+    cudnn_benchmark: Toggle = Toggle.AUTO,
+    torch_compile: Toggle = Toggle.AUTO,
     dataloader_workers: int = -1,
-    pin_memory: Toggle = "auto",
+    pin_memory: Toggle = Toggle.AUTO,
     fixed_input_size: bool = False,
 ) -> OptimizationProfile:
     """Reconciles the requested optimization flags with the available hardware into a concrete profile.
@@ -131,10 +142,12 @@ def resolve_optimization_profile(
     threads; use DDP to combine mixed precision with multi-GPU training.
 
     Args:
-        device: The requested device (``"auto"``, ``"cpu"``, ``"mps"``, ``"cuda"``, or ``"cuda:N"``), or None to
-            select automatically.
-        gpus: The explicitly requested CUDA device indices, or None to use every visible device.
-        multi_gpu: The requested multi-GPU strategy, downgraded to a single device when fewer than two GPUs are used.
+        device: The requested base device (``"auto"``, ``"cpu"``, ``"mps"``, or ``"cuda"``), or None to select
+            automatically.
+        gpus: The explicitly requested CUDA device indices, or None to train on GPU 0. List two or more indices to
+            train across multiple GPUs.
+        multi_gpu: The requested multi-GPU strategy applied when two or more GPUs are selected. Resolves to a single
+            device when fewer than two GPUs are used.
         amp: The requested mixed-precision mode.
         tf32: The requested TF32 setting (CUDA only; a no-op on other devices).
         cudnn_benchmark: The requested cuDNN autotuner setting; its ``"auto"`` default follows ``fixed_input_size``,
@@ -150,11 +163,13 @@ def resolve_optimization_profile(
     Returns:
         The resolved ``OptimizationProfile`` describing exactly what to apply to the run.
     """
-    base_device, resolved_gpus = resolve_target_device(device=device, gpus=gpus, role="training")
+    base_device, resolved_gpus = resolve_target_device(
+        device=device, gpus=gpus, role="training", default_all_gpus=False
+    )
     strategy = _resolve_multi_gpu(multi_gpu=multi_gpu, gpus=resolved_gpus)
     amp_dtype = resolve_amp_dtype(amp=amp, device=base_device, gpus=resolved_gpus)
     use_gradient_scaler = amp_dtype is torch.float16
-    if strategy == "dp" and amp_dtype is not None:
+    if strategy == MultiGpuStrategy.DP and amp_dtype is not None:
         # Mixed precision cannot take effect under DataParallel: autocast state is thread-local and does not reach the
         # per-GPU replica threads DataParallel spawns, so the forward runs in float32 regardless. Disable it here so
         # the resolved profile reports the precision that actually runs and drops the then-pointless gradient scaler.
@@ -178,7 +193,7 @@ def resolve_optimization_profile(
 
     resolved_pin_memory = resolve_toggle(value=pin_memory, auto=on_cuda) if on_cuda else False
 
-    world_size = len(resolved_gpus) if strategy == "ddp" else 1
+    world_size = len(resolved_gpus) if strategy == MultiGpuStrategy.DDP else 1
     if dataloader_workers >= 0:
         workers = dataloader_workers
     elif base_device == "cpu":
@@ -238,26 +253,25 @@ def _choose_dataloader_worker_count(world_size: int) -> int:
     return max(0, min(_MAX_AUTO_DATALOADER_WORKERS, per_rank))
 
 
-def _resolve_multi_gpu(multi_gpu: Literal["auto", "ddp", "dp", "single"], gpus: tuple[int, ...]) -> MultiGpuStrategy:
+def _resolve_multi_gpu(multi_gpu: MultiGpuStrategy, gpus: tuple[int, ...]) -> MultiGpuStrategy:
     """Reconciles the requested multi-GPU strategy with the number of selected GPUs.
 
     Args:
-        multi_gpu: The requested strategy (``"auto"``, ``"ddp"``, ``"dp"``, or ``"single"``).
+        multi_gpu: The requested strategy (``"auto"``, ``"ddp"``, or ``"dp"``). Single-device training is not a request
+            here. It is the resolved outcome of selecting a single GPU.
         gpus: The resolved CUDA device indices.
 
     Returns:
-        The strategy to use, downgraded to ``"single"`` (with a warning only when ``"ddp"`` or ``"dp"`` was explicitly
-        requested) when fewer than two GPUs are selected.
+        The strategy to use. Resolves to ``"single"`` when fewer than two GPUs are selected, warning only when ``"ddp"``
+        or ``"dp"`` was explicitly requested against a single GPU.
     """
     if len(gpus) < _MIN_MULTI_GPU_COUNT:
-        if multi_gpu in ("ddp", "dp"):
+        if multi_gpu in (MultiGpuStrategy.DDP, MultiGpuStrategy.DP):
             warn(
                 f"Requested '{multi_gpu}' multi-GPU training but only {len(gpus)} GPU is selected. Using a single "
-                f"device."
+                f"device. Select two or more GPUs with the GPU-indices option to train across multiple GPUs."
             )
-        return "single"
-    if multi_gpu == "dp":
-        return "dp"
-    if multi_gpu == "single":
-        return "single"
-    return "ddp"
+        return MultiGpuStrategy.SINGLE
+    if multi_gpu == MultiGpuStrategy.DP:
+        return MultiGpuStrategy.DP
+    return MultiGpuStrategy.DDP

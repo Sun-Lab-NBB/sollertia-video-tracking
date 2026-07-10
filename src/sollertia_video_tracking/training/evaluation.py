@@ -140,11 +140,10 @@ def evaluate_trained_model(
     *,
     shuffle: int = 1,
     training_set_index: int = 0,
-    model_prefix: str = "",
     snapshot_index: int | str = "best",
     detector_snapshot_index: int = -1,
     confidence_cutoff: float | None = None,
-    batch_size: int = 16,
+    batch_size: int = 1,
     device: str | None = None,
     write_provenance: bool = True,
 ) -> EvaluationSummary:
@@ -164,7 +163,6 @@ def evaluate_trained_model(
         config: The path of the DeepLabCut project configuration file.
         shuffle: The shuffle index to evaluate.
         training_set_index: The training-set fraction index.
-        model_prefix: The model subdirectory prefix, matching the trained shuffle.
         snapshot_index: The snapshot to score: ``"best"`` (falling back to the last snapshot when no best snapshot was
             saved), an integer index, or ``-1`` for the last snapshot.
         detector_snapshot_index: The detector snapshot index for top-down models; ignored for bottom-up models and
@@ -188,7 +186,7 @@ def evaluate_trained_model(
             feather is never left without its provenance sidecar.
     """
     config = Path(config)
-    loader = DLCLoader(config=config, shuffle=shuffle, trainset_index=training_set_index, modelprefix=model_prefix)
+    loader = DLCLoader(config=config, shuffle=shuffle, trainset_index=training_set_index, modelprefix="")
     parameters = loader.get_dataset_parameters()
     single_animal = parameters.max_num_animals == 1
     cutoff = float(loader.project_cfg.get("pcutoff", 0.6)) if confidence_cutoff is None else float(confidence_cutoff)

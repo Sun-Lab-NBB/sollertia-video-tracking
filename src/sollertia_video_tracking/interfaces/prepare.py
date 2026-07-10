@@ -72,8 +72,8 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "-mr",
     "--memory-replay",
     is_flag=True,
-    help="Enable SuperAnimal memory replay (only valid with --weight-initialization 'fine-tune'). Note: 'slvt "
-    "train' cannot train memory-replay shuffles.",
+    help="Determines whether to enable SuperAnimal memory replay (only valid with --weight-initialization "
+    "'fine-tune'). Note: 'slvt train' cannot train memory-replay shuffles.",
 )
 @click.option(
     "-ctdc",
@@ -94,8 +94,8 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "-o",
     "--overwrite",
     is_flag=True,
-    help="Overwrite the shuffle if its index already exists. WARNING: this replaces the existing shuffle's "
-    "training-dataset files.",
+    help="Determines whether to overwrite the shuffle if its index already exists. WARNING: this replaces the existing "
+    "shuffle's training-dataset files.",
 )
 def prepare_command(
     config_path: Path,
@@ -114,7 +114,7 @@ def prepare_command(
     """Creates a training-dataset shuffle for a project, selecting the model, weights, augmentation, and split.
 
     ``--config-path`` names the DeepLabCut project's config.yaml. The shuffle bakes in the model architecture, weight
-    initialization, and a train/test split; training is run afterward with ``slvt train``. Multi-animal projects are
+    initialization, and a train/test split. Training is run afterward with ``slvt train``. Multi-animal projects are
     handled automatically. This mirrors the DeepLabCut GUI's create-training-dataset tab for headless and scripted
     use.
     """

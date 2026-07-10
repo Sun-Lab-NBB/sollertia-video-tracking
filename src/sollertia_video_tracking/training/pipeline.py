@@ -26,7 +26,7 @@ from deeplabcut.pose_estimation_pytorch.runners.logger import setup_file_logging
 from .monitor import TrainingMonitor, QueueTrainingLogger
 from .runners import build_optimized_training_runner
 from .evaluation import EvaluationSummary, evaluate_trained_model
-from .optimization import OptimizationProfile, apply_runtime_optimizations
+from .optimization import MultiGpuStrategy, OptimizationProfile, apply_runtime_optimizations
 
 _logger = logging.getLogger(__name__)
 """The module logger; its records propagate to DeepLabCut's root training-log handlers (``train.txt``)."""
@@ -90,8 +90,6 @@ class _TrainingLaunch:
     """The shuffle index to train."""
     training_set_index: int
     """The training-set fraction index the shuffle was created with."""
-    model_prefix: str
-    """The model subdirectory prefix."""
     profile: OptimizationProfile
     """The resolved optimization profile describing the device, precision, and parallelism to use."""
     snapshot_path: str | Path | None
@@ -119,7 +117,6 @@ def train_model(
     *,
     shuffle: int = 1,
     training_set_index: int = 0,
-    model_prefix: str = "",
     epochs: int | None = None,
     batch_size: int | None = None,
     save_epochs: int | None = None,
@@ -132,7 +129,7 @@ def train_model(
     maximum_snapshots_to_keep: int | None = None,
     load_head_weights: bool = True,
     evaluate: bool = True,
-    evaluation_batch_size: int = 16,
+    evaluation_batch_size: int = 1,
     evaluation_confidence_cutoff: float | None = None,
     display_progress: bool = True,
 ) -> TrainingSummary:
@@ -149,7 +146,6 @@ def train_model(
         profile: The resolved optimization profile describing the device, precision, and parallelism to use.
         shuffle: The shuffle index to train.
         training_set_index: The training-set fraction index.
-        model_prefix: The model subdirectory prefix.
         epochs: The maximum number of pose-model epochs, or None to use the configured value.
         batch_size: The pose-model batch size, or None to use the configured value.
         save_epochs: The number of epochs between pose-model snapshots, or None to use the configured value.
@@ -177,7 +173,7 @@ def train_model(
             support.
     """
     config = Path(config)
-    loader = DLCLoader(config=config, shuffle=shuffle, trainset_index=training_set_index, modelprefix=model_prefix)
+    loader = DLCLoader(config=config, shuffle=shuffle, trainset_index=training_set_index, modelprefix="")
 
     weight_init_config = loader.model_cfg["train_settings"].get("weight_init")
     if weight_init_config and WeightInitialization.from_dict(weight_init_config).memory_replay:
@@ -239,7 +235,6 @@ def train_model(
         config=config,
         shuffle=shuffle,
         training_set_index=training_set_index,
-        model_prefix=model_prefix,
         profile=profile,
         snapshot_path=snapshot_path,
         detector_path=detector_path,
@@ -278,7 +273,6 @@ def train_model(
             profile=profile,
             shuffle=shuffle,
             training_set_index=training_set_index,
-            model_prefix=model_prefix,
             batch_size=evaluation_batch_size,
             confidence_cutoff=evaluation_confidence_cutoff,
         )
@@ -303,7 +297,6 @@ def detect_fixed_input_size(
     *,
     shuffle: int = 1,
     training_set_index: int = 0,
-    model_prefix: str = "",
 ) -> bool:
     """Determines whether a shuffle's training transform feeds the network a single fixed input resolution.
 
@@ -317,7 +310,6 @@ def detect_fixed_input_size(
         config: The path of the DeepLabCut project configuration file.
         shuffle: The shuffle index that will be trained.
         training_set_index: The training-set fraction index the shuffle was created with.
-        model_prefix: The model subdirectory prefix.
 
     Returns:
         True when the training transform's spatial input size is constant across the whole run, False otherwise.
@@ -327,7 +319,7 @@ def detect_fixed_input_size(
             config=Path(config),
             shuffle=shuffle,
             trainset_index=training_set_index,
-            modelprefix=model_prefix,
+            modelprefix="",
         )
         model_cfg = loader.model_cfg
         detector = model_cfg.get("detector")
@@ -393,7 +385,6 @@ def _evaluate_after_training(
     *,
     shuffle: int,
     training_set_index: int,
-    model_prefix: str,
     batch_size: int,
     confidence_cutoff: float | None,
 ) -> EvaluationSummary | None:
@@ -408,7 +399,6 @@ def _evaluate_after_training(
         profile: The resolved optimization profile, used only to choose the evaluation device.
         shuffle: The shuffle index that was trained.
         training_set_index: The training-set fraction index.
-        model_prefix: The model subdirectory prefix.
         batch_size: The number of frames scored per forward pass.
         confidence_cutoff: The confidence cutoff for the cutoff-filtered metrics, or None for the default.
 
@@ -423,7 +413,6 @@ def _evaluate_after_training(
             config,
             shuffle=shuffle,
             training_set_index=training_set_index,
-            model_prefix=model_prefix,
             batch_size=batch_size,
             confidence_cutoff=confidence_cutoff,
             device=device,
@@ -568,10 +557,10 @@ def _resolve_process_placement(
         if profile.device == "mps" and task == Task.DETECT:
             return "cpu", None, False, 0
         return profile.device, None, False, 0
-    if profile.multi_gpu_strategy == "ddp":
+    if profile.multi_gpu_strategy == MultiGpuStrategy.DDP:
         gpu_index = profile.gpus[rank]
         return "cuda", [gpu_index], True, gpu_index
-    if profile.multi_gpu_strategy == "dp":
+    if profile.multi_gpu_strategy == MultiGpuStrategy.DP:
         return "cuda", list(profile.gpus), False, 0
     return "cuda", [profile.gpus[0]], False, 0
 
@@ -774,7 +763,7 @@ def _run_training_worker(rank: int, launch: _TrainingLaunch) -> None:
         config=launch.config,
         shuffle=launch.shuffle,
         trainset_index=launch.training_set_index,
-        modelprefix=launch.model_prefix,
+        modelprefix="",
     )
     # A spawned DDP worker is its own process, so redirecting its descriptors never touches the monitor in the parent.
     # The single-process path shares this process with the monitor, so it may only redirect once the monitor holds a

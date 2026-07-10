@@ -4,6 +4,7 @@ from .detection import (
     DEFAULT_RESERVED_CPU_THREADS,
     Toggle,
     AmpMode,
+    DeviceType,
     warn,
     resolve_toggle,
     precision_label,
@@ -17,6 +18,7 @@ from .detection import (
 __all__ = [
     "DEFAULT_RESERVED_CPU_THREADS",
     "AmpMode",
+    "DeviceType",
     "Toggle",
     "apply_backend_flags",
     "cuda_device_count",
