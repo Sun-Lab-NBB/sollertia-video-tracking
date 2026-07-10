@@ -1,6 +1,8 @@
 """Provides reproducible evaluation of a trained DeepLabCut shuffle as a clean, self-describing polars feather."""
 
-from typing import Any
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
 import logging
 from pathlib import Path
 from datetime import UTC, datetime
@@ -10,7 +12,6 @@ import numpy as np
 import polars as pl
 import deeplabcut
 from ruamel.yaml import YAML
-from numpy.typing import NDArray
 from deeplabcut.utils import auxiliaryfunctions
 from deeplabcut.core.metrics.api import prepare_evaluation_data
 from deeplabcut.core.weight_init import WeightInitialization
@@ -19,6 +20,9 @@ from deeplabcut.pose_estimation_pytorch.task import Task
 from deeplabcut.core.metrics.distance_metrics import match_predictions_for_rmse
 from deeplabcut.pose_estimation_pytorch.apis.utils import get_model_snapshots, get_inference_runners
 from deeplabcut.pose_estimation_pytorch.apis.evaluation import evaluate
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
 
 _logger = logging.getLogger(__name__)
 """The module logger; its records propagate to the root handlers configured for the training run."""
@@ -56,8 +60,9 @@ Notes:
     and for matched multi-animal predictions; an unmatched multi-animal prediction (a false positive, ``matched`` is
     False) is labeled ``instance_<order>`` by its per-image match order and carries no stable identity across images.
     ``error_px`` is the Euclidean pixel distance to the matched label, and is NaN when the keypoint is unmatched or its
-    label is occluded. ``oks`` is populated only for matched multi-animal predictions; it is NaN for single-animal and
-    unique-bodypart rows, which DeepLabCut scores by direct correspondence rather than OKS.
+    label is occluded. ``oks`` is NaN for an unmatched prediction and otherwise holds the match's OKS; for matched
+    single-animal and unique-bodypart rows, which DeepLabCut scores by direct correspondence rather than OKS, that
+    value is the matcher's default rather than a computed OKS.
 """
 
 
@@ -104,7 +109,8 @@ class EvaluationSummary:
     feather_path: Path
     """The tidy evaluation feather that was written."""
     provenance_path: Path
-    """The YAML provenance-and-summary sidecar that was written."""
+    """The path of the YAML provenance-and-summary sidecar; it is written beside the feather only when
+    ``write_provenance`` is True, otherwise this path names a file that was not created."""
     pcutoff: float
     """The confidence cutoff applied when computing the cutoff-filtered metrics and the ``above_pcutoff`` column."""
     train: SplitMetrics
@@ -134,11 +140,10 @@ def evaluate_trained_model(
     *,
     shuffle: int = 1,
     training_set_index: int = 0,
-    model_prefix: str = "",
     snapshot_index: int | str = "best",
     detector_snapshot_index: int = -1,
     confidence_cutoff: float | None = None,
-    batch_size: int = 16,
+    batch_size: int = 1,
     device: str | None = None,
     write_provenance: bool = True,
 ) -> EvaluationSummary:
@@ -158,7 +163,6 @@ def evaluate_trained_model(
         config: The path of the DeepLabCut project configuration file.
         shuffle: The shuffle index to evaluate.
         training_set_index: The training-set fraction index.
-        model_prefix: The model subdirectory prefix, matching the trained shuffle.
         snapshot_index: The snapshot to score: ``"best"`` (falling back to the last snapshot when no best snapshot was
             saved), an integer index, or ``-1`` for the last snapshot.
         detector_snapshot_index: The detector snapshot index for top-down models; ignored for bottom-up models and
@@ -171,25 +175,29 @@ def evaluate_trained_model(
             stack into a single batch.
         device: The device to evaluate on (for example ``"cuda:0"`` or ``"cpu"``), or None to resolve it from the
             model configuration.
-        write_provenance: Whether to write the ``<snapshot>_evaluation.yaml`` sidecar beside the feather.
+        write_provenance: Determines whether to write the ``<snapshot>_evaluation.yaml`` sidecar beside the feather.
 
     Returns:
         A summary describing what was evaluated and the resulting train and test accuracy.
 
     Raises:
         ValueError: When the requested snapshot cannot be resolved.
+        OSError: When the provenance sidecar cannot be written; the feather written earlier is removed first so a
+            feather is never left without its provenance sidecar.
     """
     config = Path(config)
-    loader = DLCLoader(config=config, shuffle=shuffle, trainset_index=training_set_index, modelprefix=model_prefix)
+    loader = DLCLoader(config=config, shuffle=shuffle, trainset_index=training_set_index, modelprefix="")
     parameters = loader.get_dataset_parameters()
     single_animal = parameters.max_num_animals == 1
     cutoff = float(loader.project_cfg.get("pcutoff", 0.6)) if confidence_cutoff is None else float(confidence_cutoff)
-    batch_size = _resolve_evaluation_batch_size(loader, batch_size)
+    batch_size = _resolve_evaluation_batch_size(loader=loader, requested=batch_size)
 
-    pose_snapshot = _resolve_snapshot(loader, snapshot_index, loader.pose_task)
+    pose_snapshot = _resolve_snapshot(loader=loader, index=snapshot_index, task=loader.pose_task)
     detector_snapshot = None
     if loader.pose_task == Task.TOP_DOWN and loader.model_cfg.get("detector") is not None:
-        detector_snapshot = _resolve_snapshot(loader, detector_snapshot_index, Task.DETECT, required=False)
+        detector_snapshot = _resolve_snapshot(
+            loader=loader, index=detector_snapshot_index, task=Task.DETECT, required=False
+        )
 
     pose_runner, detector_runner = get_inference_runners(
         model_config=loader.model_cfg,
@@ -208,7 +216,7 @@ def evaluate_trained_model(
     # the full SuperAnimal bodypart set. But evaluate() down-converts predictions (and the loader returns ground truth)
     # in the smaller project bodypart space. So the parameters used for scoring and row accumulation must be realigned
     # to the project bodyparts to keep the per-keypoint loop in range.
-    parameters = _realign_memory_replay_parameters(loader, parameters)
+    parameters = _realign_memory_replay_parameters(loader=loader, parameters=parameters)
 
     snapshot_name = pose_snapshot.path.stem
     columns: dict[str, list[Any]] = {name: [] for name in _FEATHER_SCHEMA}
@@ -284,7 +292,7 @@ def evaluate_trained_model(
                 single_animal=single_animal,
                 split_metrics=split_metrics,
                 feather_path=feather_path,
-                worst_keypoints=_rank_worst_keypoints(raw_metrics["test"], parameters.bodyparts),
+                worst_keypoints=_rank_worst_keypoints(metrics=raw_metrics["test"], bodyparts=parameters.bodyparts),
             )
         except OSError:
             # Keep the two-file convention consistent: never leave a feather without its provenance sidecar.
@@ -348,7 +356,7 @@ def _resolve_snapshot(loader: DLCLoader, index: int | str, task: Task, *, requir
         loader: The loader holding the model directory the snapshots live in.
         index: The requested snapshot index (``"best"``, an integer, or ``-1``).
         task: The task whose snapshots to search (pose or detector).
-        required: Whether to raise when no snapshot is found; when False, returns None instead.
+        required: Determines whether to raise when no snapshot is found; when False, returns None instead.
 
     Returns:
         The resolved DeepLabCut snapshot, or None when none is found and ``required`` is False.
@@ -436,7 +444,7 @@ def _accumulate_split_rows(
         ground_truth: The per-image ground-truth keypoints, keyed by image path.
         bodyparts: The ordered bodypart names to write rows for.
         individuals: The ordered individual names; the first labels rows for single-animal projects.
-        single_animal: Whether these keypoints are matched as a single individual.
+        single_animal: Determines whether these keypoints are matched as a single individual.
         confidence_cutoff: The confidence cutoff used to fill the ``above_pcutoff`` column.
         prediction_key: The per-image prediction head to read (``"bodyparts"`` or ``"unique_bodyparts"``).
 
@@ -447,12 +455,14 @@ def _accumulate_split_rows(
     for image in image_paths:
         if image not in ground_truth or image not in predictions or prediction_key not in predictions[image]:
             continue
-        gt = ground_truth[image]
-        pred = predictions[image][prediction_key]
-        prepared = prepare_evaluation_data(ground_truth={image: gt}, predictions={image: pred})
-        prepared_gt = prepared[0][0]
+        image_ground_truth = ground_truth[image]
+        image_predictions = predictions[image][prediction_key]
+        prepared = prepare_evaluation_data(
+            ground_truth={image: image_ground_truth}, predictions={image: image_predictions}
+        )
+        prepared_ground_truth = prepared[0][0]
         matches = match_predictions_for_rmse(data=prepared, single_animal=single_animal, oks_bbox_margin=0.0)
-        surviving = None if single_animal else _surviving_individual_indices(gt)
+        surviving = None if single_animal else _surviving_individual_indices(image_ground_truth)
         video, relative_image = _derive_relative_image_path(image)
 
         matched_any = False
@@ -464,7 +474,13 @@ def _accumulate_split_rows(
             if single_animal:
                 individual = individuals[0]
             else:
-                individual = _matched_individual(match, prepared_gt, surviving, individuals, instance)
+                individual = _matched_individual(
+                    match=match,
+                    prepared_ground_truth=prepared_ground_truth,
+                    surviving=surviving,
+                    individuals=individuals,
+                    instance=instance,
+                )
             for keypoint, bodypart in enumerate(bodyparts):
                 likelihood = float(pose[keypoint, 2])
                 columns["snapshot"].append(snapshot_name)
@@ -590,7 +606,7 @@ def _write_provenance(
     *,
     config: Path,
     loader: DLCLoader,
-    parameters: Any,
+    parameters: PoseDatasetParameters,
     snapshot: Any,
     detector_snapshot: Any,
     device: str | None,
@@ -613,7 +629,7 @@ def _write_provenance(
         device: The evaluation device, or None when resolved from the configuration.
         batch_size: The forward-pass batch size used.
         confidence_cutoff: The confidence cutoff applied.
-        single_animal: Whether the project tracks a single individual.
+        single_animal: Determines whether the project tracks a single individual.
         split_metrics: The canonical metrics for each partition.
         feather_path: The feather written beside this sidecar.
         worst_keypoints: The highest-error bodyparts on the test frames, worst first.
@@ -652,4 +668,4 @@ def _write_provenance(
     yaml = YAML()
     yaml.default_flow_style = False
     with provenance_path.open("w", encoding="utf-8") as stream:
-        yaml.dump(record, stream)
+        yaml.dump(data=record, stream=stream)

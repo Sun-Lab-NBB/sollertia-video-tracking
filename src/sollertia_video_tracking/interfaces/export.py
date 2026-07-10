@@ -7,7 +7,7 @@ import click
 from ..deploy import ArchiveCompression, export_model
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
-"""Ensures that displayed Click help messages are formatted according to the lab standard."""
+"""Widens displayed Click help messages to 120 columns so option descriptions wrap consistently."""
 
 
 @click.command("export", context_settings=_CONTEXT_SETTINGS)
@@ -36,14 +36,6 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     type=int,
     default=None,
     help="The detector snapshot to bundle, for top-down models. Omit to use the configured or best detector snapshot.",
-)
-@click.option(
-    "-ts",
-    "--training-set-index",
-    type=int,
-    default=0,
-    show_default=True,
-    help="The training-set fraction index the shuffle was created with.",
 )
 @click.option(
     "-lt",
@@ -83,7 +75,6 @@ def export_command(
     shuffle: int,
     snapshot_index: int | None,
     detector_snapshot_index: int | None,
-    training_set_index: int,
     likelihood_threshold: float,
     compression: str,
     *,
@@ -105,7 +96,6 @@ def export_command(
             shuffle=shuffle,
             snapshot_index=snapshot_index,
             detector_snapshot_index=detector_snapshot_index,
-            training_set_index=training_set_index,
             likelihood_threshold=likelihood_threshold,
             compression=ArchiveCompression(compression),
             crop=crop,

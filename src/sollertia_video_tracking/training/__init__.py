@@ -2,6 +2,7 @@
 
 from .dataset import (
     TrainingDatasetSummary,
+    WeightInitializationMethod,
     create_training_dataset,
     get_available_augmenters,
     get_available_pose_models,
@@ -11,7 +12,7 @@ from .dataset import (
     build_conditional_top_down_conditions,
 )
 from .pipeline import TrainingSummary, train_model, detect_fixed_input_size
-from ..hardware import Toggle, AmpMode
+from ..hardware import Toggle, AmpMode, DeviceType
 from .evaluation import SplitMetrics, EvaluationSummary, evaluate_trained_model
 from .optimization import (
     MultiGpuStrategy,
@@ -22,6 +23,7 @@ from .optimization import (
 
 __all__ = [
     "AmpMode",
+    "DeviceType",
     "EvaluationSummary",
     "MultiGpuStrategy",
     "OptimizationProfile",
@@ -29,6 +31,7 @@ __all__ = [
     "Toggle",
     "TrainingDatasetSummary",
     "TrainingSummary",
+    "WeightInitializationMethod",
     "apply_runtime_optimizations",
     "build_conditional_top_down_conditions",
     "build_superanimal_weight_init",

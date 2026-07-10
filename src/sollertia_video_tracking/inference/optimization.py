@@ -10,6 +10,7 @@ from ..hardware import (
     DEFAULT_RESERVED_CPU_THREADS,
     Toggle,
     AmpMode,
+    DeviceType,
     warn,
     resolve_toggle,
     precision_label,
@@ -92,7 +93,7 @@ class InferenceProfile:
 
     @property
     def total_workers(self) -> int:
-        """Returns the total number of worker processes the run spawns across all devices."""
+        """Returns the configured maximum number of worker processes; the run spawns fewer when videos are scarce."""
         if self.on_cuda:
             return len(self.gpus) * self.gpu_processes
         if self.device == "cpu":
@@ -129,31 +130,32 @@ class InferenceProfile:
 
 def resolve_inference_profile(
     *,
-    device: str | None = None,
+    device: DeviceType | None = None,
     gpus: tuple[int, ...] | None = None,
-    amp: AmpMode = "auto",
-    tf32: Toggle = "auto",
-    cudnn_benchmark: Toggle = "auto",
-    channels_last: Toggle = "auto",
-    torch_compile: Toggle = "auto",
+    amp: AmpMode = AmpMode.AUTO,
+    tf32: Toggle = Toggle.AUTO,
+    cudnn_benchmark: Toggle = Toggle.AUTO,
+    channels_last: Toggle = Toggle.AUTO,
+    torch_compile: Toggle = Toggle.AUTO,
     gpu_processes: int = -1,
     cpu_workers: int = -1,
     cpu_threads_per_worker: int = -1,
-    pin_memory: Toggle = "auto",
+    pin_memory: Toggle = Toggle.AUTO,
     fixed_input_size: bool = False,
 ) -> InferenceProfile:
     """Reconciles the requested inference optimization flags with the available hardware into a concrete profile.
 
     Every optimization is exposed as an explicit request so an operator who knows their silicon can override the
     automatic defaults. ``"auto"`` selects a capability-detected default suited to the chosen device. An explicit
-    ``"on"``/``"off"`` toggle is always honored; a forced AMP dtype is honored wherever the device can run it and is
-    otherwise disabled with a warning rather than a silent refusal (bfloat16 on MPS and float16 on any non-CUDA device
-    fall back to float32). The device selection cascades ``cuda`` -> ``cpu`` when no CUDA device is visible so the same
-    call works unchanged on a GPU server or a CPU-only server.
+    ``"on"``/``"off"`` toggle is honored wherever it applies, though the CUDA-only tf32, cuDNN-benchmark, and
+    pin-memory toggles are forced off on non-CUDA devices; a forced AMP dtype is honored wherever the device can run
+    it and is otherwise disabled with a warning rather than a silent refusal (bfloat16 on MPS and float16 on any
+    non-CUDA device fall back to float32). The device selection cascades ``cuda`` -> ``cpu`` when no CUDA device is
+    visible so the same call works unchanged on a GPU server or a CPU-only server.
 
     Args:
-        device: The requested device (``"auto"``, ``"cpu"``, ``"mps"``, ``"cuda"``, or ``"cuda:N"``), or None to
-            select automatically.
+        device: The requested base device (``"auto"``, ``"cpu"``, ``"mps"``, or ``"cuda"``), or None to select
+            automatically.
         gpus: The explicitly requested CUDA device indices, or None to use every visible device.
         amp: The requested mixed-precision mode; ``"auto"`` enables bfloat16 only where it is natively fast.
         tf32: The requested TF32 setting (CUDA only; a no-op on other devices).

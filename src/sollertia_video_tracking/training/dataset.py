@@ -1,7 +1,8 @@
-"""Provides a wrapper over DeepLabCut training-dataset creation at parity with the GUI's create-dataset tab."""
+"""Provides a wrapper over DeepLabCut training-dataset creation at parity with the GUI's create-training-dataset tab."""
 
 import re
 import sys
+from enum import StrEnum
 from typing import Any, TextIO
 from pathlib import Path
 import contextlib
@@ -38,6 +39,23 @@ _CONDITION_SNAPSHOT_SUFFIX: str = ".pt"
 _UNANNOTATED_VIDEO_NOTICE: str = "not found (perhaps not annotated)"
 """The substring DeepLabCut prints once per registered video that lacks an annotation file, filtered from the
 training-dataset creation output because projects routinely register many more videos than any one shuffle labels."""
+
+
+class WeightInitializationMethod(StrEnum):
+    """Defines how a shuffle's model weights are initialized before training.
+
+    ``imagenet`` transfers from a stock ImageNet backbone and needs no external model, while ``transfer`` and
+    ``fine-tune`` both start from a SuperAnimal model, so they require a SuperAnimal dataset and a pose-model
+    architecture to be named. Fine-tuning additionally loads the SuperAnimal decoder head and is the only method that
+    can enable memory replay.
+    """
+
+    IMAGENET = "imagenet"
+    """Initializes the backbone from ImageNet transfer learning, the default that needs no SuperAnimal model."""
+    TRANSFER = "transfer"
+    """Initializes from a SuperAnimal model with a fresh decoder head (transfer learning)."""
+    FINE_TUNE = "fine-tune"
+    """Initializes from a SuperAnimal model including its decoder head (fine-tuning), the only memory-replay method."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,9 +144,9 @@ def build_superanimal_weight_init(
         network_type: The project's pose-model architecture; a ``top_down_`` prefix is stripped to name the SuperAnimal
             pose model.
         detector_type: The project's detector architecture for top-down models, or None.
-        fine_tune: Whether to fine-tune, loading the SuperAnimal decoder head (requires a conversion table), rather
-            than transfer learning with a fresh head.
-        memory_replay: Whether to enable memory replay, which is only valid when fine-tuning.
+        fine_tune: Determines whether to fine-tune, loading the SuperAnimal decoder head (requires a conversion
+            table), rather than transfer learning with a fresh head.
+        memory_replay: Determines whether to enable memory replay, which is only valid when fine-tuning.
         customized_pose_checkpoint: A custom SuperAnimal pose checkpoint to use instead of the downloaded one.
         customized_detector_checkpoint: A custom SuperAnimal detector checkpoint to use instead of the downloaded one.
 
@@ -193,7 +211,7 @@ def create_training_dataset(
     from_training_set_index: int = 0,
     overwrite: bool = False,
 ) -> TrainingDatasetSummary:
-    """Creates a training-dataset shuffle for a project, at parity with the DeepLabCut GUI's create-dataset tab.
+    """Creates a training-dataset shuffle for a project at parity with the DeepLabCut GUI's create-training-dataset tab.
 
     Wraps DeepLabCut's training-dataset creation for the PyTorch engine, which bakes the model architecture, weight
     initialization, and train/test split into the shuffle (training is run afterward with ``slvt train``).
@@ -213,7 +231,7 @@ def create_training_dataset(
             ``build_conditional_top_down_conditions``, or None.
         from_shuffle: The existing shuffle whose train/test split to reuse, or None to draw a fresh split.
         from_training_set_index: The training-set fraction index of ``from_shuffle`` when reusing a split.
-        overwrite: Whether to overwrite the shuffle if the index already exists.
+        overwrite: Determines whether to overwrite the shuffle if the index already exists.
 
     Returns:
         A summary of the created shuffle.
@@ -307,6 +325,11 @@ class _UnannotatedNoticeFilter:
     commonly register many more videos than any single shuffle labels, so these notices flood the console without
     conveying anything actionable. This wrapper buffers writes until a line break, then forwards each completed line to
     the target stream unless that line contains the marker.
+
+    Attributes:
+        _target: The stream that surviving lines are written to.
+        _marker: The substring whose presence in a completed line drops that line.
+        _pending: The buffered tail of written text held until the next line break completes it.
     """
 
     def __init__(self, target: TextIO, marker: str) -> None:
@@ -316,9 +339,9 @@ class _UnannotatedNoticeFilter:
             target: The stream that surviving lines are written to.
             marker: The substring whose presence in a completed line drops that line.
         """
-        self._target = target
-        self._marker = marker
-        self._pending = ""
+        self._target: TextIO = target
+        self._marker: str = marker
+        self._pending: str = ""
 
     def write(self, text: str) -> int:
         """Buffers the text and forwards every newly completed line that does not contain the marker.

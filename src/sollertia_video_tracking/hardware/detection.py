@@ -1,7 +1,7 @@
 """Provides the device, capability, and mixed-precision detection shared by the training and inference optimizers."""
 
 import sys
-from typing import Literal
+from enum import StrEnum
 
 import torch
 
@@ -11,11 +11,41 @@ DEFAULT_RESERVED_CPU_THREADS: int = 2
 _AMPERE_CAPABILITY: tuple[int, int] = (8, 0)
 """The minimum CUDA compute capability (Ampere) that provides TF32 and native bfloat16 tensor-core acceleration."""
 
-type Toggle = Literal["auto", "on", "off"]
-"""The tri-state control for one optimization: use the capability-detected default, force it on, or force it off."""
+class Toggle(StrEnum):
+    """The tri-state control for one optimization: the capability-detected default, forced on, or forced off."""
 
-type AmpMode = Literal["auto", "off", "bf16", "fp16"]
-"""The automatic-mixed-precision selection: capability-detected default, disabled, or a forced compute dtype."""
+    AUTO = "auto"
+    """Uses the capability-detected default chosen for the selected device."""
+    ON = "on"
+    """Forces the optimization on wherever the device can run it."""
+    OFF = "off"
+    """Forces the optimization off."""
+
+
+class AmpMode(StrEnum):
+    """The automatic-mixed-precision selection: the capability default, disabled, or a forced compute dtype."""
+
+    AUTO = "auto"
+    """Enables bfloat16 only where it is natively fast, staying at full float32 otherwise."""
+    OFF = "off"
+    """Disables mixed precision and runs in full float32."""
+    BF16 = "bf16"
+    """Forces bfloat16 autocast, falling back with a warning on a device that cannot run it."""
+    FP16 = "fp16"
+    """Forces float16 autocast (CUDA only), falling back with a warning elsewhere."""
+
+
+class DeviceType(StrEnum):
+    """The base compute device to run on: automatic selection, the CPU, Apple MPS, or a CUDA GPU."""
+
+    AUTO = "auto"
+    """Selects CUDA when a GPU is visible, otherwise the CPU."""
+    CPU = "cpu"
+    """Runs on the CPU."""
+    MPS = "mps"
+    """Runs on the Apple Metal (MPS) backend."""
+    CUDA = "cuda"
+    """Runs on CUDA GPUs. Choose which indices with the GPU-indices option."""
 
 
 def warn(message: str) -> None:
@@ -63,15 +93,15 @@ def resolve_toggle(value: Toggle, *, auto: bool) -> bool:
     Returns:
         The resolved boolean decision.
     """
-    if value == "on":
+    if value == Toggle.ON:
         return True
-    if value == "off":
+    if value == Toggle.OFF:
         return False
     return auto
 
 
 def resolve_target_device(
-    device: str | None, gpus: tuple[int, ...] | None, *, role: str
+    device: str | None, gpus: tuple[int, ...] | None, *, role: str, default_all_gpus: bool = True
 ) -> tuple[str, tuple[int, ...]]:
     """Reconciles the requested device and GPU indices with the available hardware.
 
@@ -83,6 +113,9 @@ def resolve_target_device(
             automatic selection.
         gpus: The explicitly requested CUDA device indices, or None to select them automatically.
         role: The run role named in error messages, for example ``"training"`` or ``"inference"``.
+        default_all_gpus: When ``gpus`` is None on the CUDA path, determines whether every visible GPU is selected
+            (True) or only the first (False). Inference defaults to every GPU to spread videos across them, while
+            training selects only the first so that multi-GPU stays an explicit opt-in.
 
     Returns:
         A tuple of the resolved base device type and the tuple of CUDA indices to use.
@@ -122,7 +155,7 @@ def resolve_target_device(
                 )
                 raise ValueError(message)
             return "cuda", (index,)
-        return "cuda", tuple(range(available))
+        return "cuda", tuple(range(available)) if default_all_gpus else (0,)
 
     message = (
         f"Unable to resolve the {role} device. Expected 'auto', 'cpu', 'mps', 'cuda', or 'cuda:N', but got '{request}'."
@@ -146,13 +179,13 @@ def resolve_amp_dtype(amp: AmpMode, device: str, gpus: tuple[int, ...]) -> torch
         The autocast dtype to use, or None when mixed precision is disabled. Callers that train derive their own
         gradient-scaler requirement from a ``torch.float16`` result.
     """
-    if amp == "off":
+    if amp == AmpMode.OFF:
         return None
-    if amp == "auto":
+    if amp == AmpMode.AUTO:
         if device == "cuda" and supports_ampere(gpus):
             return torch.bfloat16
         return None
-    if amp == "bf16":
+    if amp == AmpMode.BF16:
         if device == "mps":
             warn("bfloat16 autocast is unreliable on MPS. Disabling mixed precision.")
             return None

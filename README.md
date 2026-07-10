@@ -102,6 +102,7 @@ This library provides the `slvt` CLI that exposes the following commands:
 | `extract frames`          | Selects DeepLabCut training frames by clustering every video in a project in parallel    |
 | `extract outliers`        | Extracts a trained model's likely-wrong frames from analyzed videos to refine the model  |
 | `extract purge`           | Deletes targeted videos' entire labeled-data directories, labels included, after a dry-run preview |
+| `gui`                     | Launches the DeepLabCut labeling and refinement GUI for a project's frames                |
 | `prepare`                 | Creates a training-dataset shuffle with a chosen network architecture and train/test split |
 | `train`                   | Trains a shuffle with mixed precision and multi-GPU DistributedDataParallel               |
 | `infer`                   | Analyzes videos across multiple GPUs, a single GPU, or the CPU, with in-flight polars output |
@@ -117,6 +118,12 @@ optionally balanced across groups of related videos with `--balance-groups`; the
 their unlabeled frames on `--overwrite` or `--reset` while preserving labeled frames; the `purge` subcommand instead
 deletes a video's whole labeled-data directory, labels included, when a clean start is needed. Use `slvt --help`,
 `slvt extract --help`, or `slvt COMMAND --help` for detailed usage information.
+
+The `gui` command opens the DeepLabCut labeling GUI — the same napari-based application reached by running
+`python -m deeplabcut` — where a project's extracted frames are hand-labeled and its outlier corrections refined before
+a shuffle is prepared. It needs a graphical session, so it is run on a workstation rather than a headless training or
+inference server:
+`slvt gui`
 
 For example, the following command extracts training frames from every video referenced by a project's config.yaml,
 sampling every 500th frame for clustering:

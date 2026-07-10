@@ -7,6 +7,7 @@ import click
 from ..inference import (
     Toggle,
     AmpMode,
+    DeviceType,
     run_inference,
     resolve_project_videos,
     detect_fixed_input_size,
@@ -14,7 +15,7 @@ from ..inference import (
 )
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
-"""Ensures that displayed Click help messages are formatted according to the lab standard."""
+"""Widens displayed Click help messages to 120 columns so option descriptions wrap consistently."""
 
 
 @click.command("infer", context_settings=_CONTEXT_SETTINGS)
@@ -55,14 +56,14 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "--batch-size",
     type=int,
     default=None,
-    help="The pose model batch size. Omit to use the configured value.",
+    help="The pose model batch size. Omit to use the model's default value.",
 )
 @click.option(
     "-dbs",
     "--detector-batch-size",
     type=int,
     default=None,
-    help="The detector batch size, for top-down models. Omit to use the configured value.",
+    help="The detector batch size, for top-down models. Omit to use the model's default value.",
 )
 @click.option(
     "-tp",
@@ -97,10 +98,11 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 @click.option(
     "-dv",
     "--device",
-    default="auto",
+    type=click.Choice([device.value for device in DeviceType]),
+    default=DeviceType.AUTO.value,
     show_default=True,
-    help="The device to run on: 'auto', 'cpu', 'mps', 'cuda', or 'cuda:N'. 'auto' uses every visible GPU, else "
-    "the CPU.",
+    help="The base device to run on. 'auto' uses every visible CUDA GPU when present and otherwise the CPU. 'cpu' and "
+    "'mps' (Apple Metal) force those devices. Choose specific GPUs with --gpus.",
 )
 @click.option(
     "-g",
@@ -115,7 +117,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     type=int,
     default=-1,
     show_default=True,
-    help="The number of worker processes per GPU. 1 runs one video per GPU; raise it to oversubscribe a GPU and fill "
+    help="The number of worker processes per GPU. 1 runs one video per GPU. Raise it to oversubscribe a GPU and fill "
     "decode gaps. Set to -1 for the default of one video per GPU.",
 )
 @click.option(
@@ -137,25 +139,25 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 @click.option(
     "-a",
     "--amp",
-    type=click.Choice(["auto", "off", "bf16", "fp16"]),
-    default="auto",
+    type=click.Choice([mode.value for mode in AmpMode]),
+    default=AmpMode.AUTO.value,
     show_default=True,
-    help="The mixed-precision mode. 'auto' enables bfloat16 on Ampere or newer GPUs; force 'bf16' to also use it on a "
+    help="The mixed-precision mode. 'auto' enables bfloat16 on Ampere or newer GPUs. Force 'bf16' to also use it on a "
     "capable CPU.",
 )
 @click.option(
     "-t",
     "--tf32",
-    type=click.Choice(["auto", "on", "off"]),
-    default="auto",
+    type=click.Choice([toggle.value for toggle in Toggle]),
+    default=Toggle.AUTO.value,
     show_default=True,
     help="TF32 acceleration for float32 matmuls and convolutions (CUDA only). 'auto' enables it on Ampere or newer.",
 )
 @click.option(
     "-cb",
     "--cudnn-benchmark",
-    type=click.Choice(["auto", "on", "off"]),
-    default="auto",
+    type=click.Choice([toggle.value for toggle in Toggle]),
+    default=Toggle.AUTO.value,
     show_default=True,
     help="The convolution autotuner (CUDA only). 'auto' enables it when the run is detected to use a single fixed "
     "input size (a shared project crop, or one shared video resolution), where it pays off rather than re-tuning per "
@@ -164,24 +166,24 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 @click.option(
     "-cl",
     "--channels-last",
-    type=click.Choice(["auto", "on", "off"]),
-    default="auto",
+    type=click.Choice([toggle.value for toggle in Toggle]),
+    default=Toggle.AUTO.value,
     show_default=True,
     help="The channels-last memory format, which accelerates convolutions. 'auto' enables it on CUDA.",
 )
 @click.option(
     "-cm",
     "--compile-model",
-    type=click.Choice(["auto", "on", "off"]),
-    default="auto",
+    type=click.Choice([toggle.value for toggle in Toggle]),
+    default=Toggle.AUTO.value,
     show_default=True,
     help="Whether to compile the model for faster inference. Off by default because of its warm-up cost.",
 )
 @click.option(
     "-pm",
     "--pin-memory",
-    type=click.Choice(["auto", "on", "off"]),
-    default="auto",
+    type=click.Choice([toggle.value for toggle in Toggle]),
+    default=Toggle.AUTO.value,
     show_default=True,
     help="Whether to use a non-blocking host-to-device transfer (CUDA only). 'auto' enables it on CUDA.",
 )
@@ -190,7 +192,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "--progress/--no-progress",
     default=True,
     show_default=True,
-    help="Whether to show the live aggregate progress bar during analysis.",
+    help="Determines whether the aggregate progress bar is shown during analysis.",
 )
 def infer_command(
     config: Path,
@@ -207,12 +209,12 @@ def infer_command(
     gpu_processes: int,
     cpu_workers: int,
     cpu_threads_per_worker: int,
-    amp: AmpMode,
-    tf32: Toggle,
-    cudnn_benchmark: Toggle,
-    channels_last: Toggle,
-    compile_model: Toggle,
-    pin_memory: Toggle,
+    amp: str,
+    tf32: str,
+    cudnn_benchmark: str,
+    channels_last: str,
+    compile_model: str,
+    pin_memory: str,
     *,
     project_videos: bool,
     to_polars: bool,
@@ -263,17 +265,17 @@ def infer_command(
 
     try:
         profile = resolve_inference_profile(
-            device=device,
+            device=DeviceType(device),
             gpus=gpu_indices,
-            amp=amp,
-            tf32=tf32,
-            cudnn_benchmark=cudnn_benchmark,
-            channels_last=channels_last,
-            torch_compile=compile_model,
+            amp=AmpMode(amp),
+            tf32=Toggle(tf32),
+            cudnn_benchmark=Toggle(cudnn_benchmark),
+            channels_last=Toggle(channels_last),
+            torch_compile=Toggle(compile_model),
             gpu_processes=gpu_processes,
             cpu_workers=cpu_workers,
             cpu_threads_per_worker=cpu_threads_per_worker,
-            pin_memory=pin_memory,
+            pin_memory=Toggle(pin_memory),
             fixed_input_size=fixed_input_size,
         )
         summary = run_inference(

@@ -2,6 +2,7 @@
 
 from typing import Any
 import logging
+from pathlib import Path
 from contextlib import AbstractContextManager, nullcontext
 from collections import defaultdict
 
@@ -25,12 +26,100 @@ _logger = logging.getLogger(__name__)
 """The module logger; its records propagate to DeepLabCut's root training-log handlers (``train.txt``)."""
 
 
+def build_optimized_training_runner(
+    runner_config: dict,
+    model_folder: Path,
+    task: Task,
+    model: nn.Module,
+    device: str,
+    gpus: list[int] | None = None,
+    snapshot_path: str | Path | None = None,
+    logger: BaseLogger | None = None,
+    *,
+    load_head_weights: bool = True,
+    amp_dtype: torch.dtype | None = None,
+    use_gradient_scaler: bool = False,
+    torch_compile: bool = False,
+    ddp: bool = False,
+    rank: int = 0,
+    world_size: int = 1,
+    local_rank: int = 0,
+) -> TrainingRunner:
+    """Builds an optimized training runner, mirroring DeepLabCut's ``build_training_runner`` with added optimizations.
+
+    This reuses DeepLabCut's optimizer, scheduler, and snapshot-manager builders unchanged and only substitutes the
+    optimized runner subclasses and threads the mixed-precision and DistributedDataParallel settings through.
+
+    Args:
+        runner_config: The ``runner`` section of the pose or detector configuration.
+        model_folder: The directory in which snapshots and training statistics are written.
+        task: The task the runner performs, selecting the pose or detector runner subclass.
+        model: The model to train.
+        device: The device to train on for this process, such as a CUDA index or the CPU.
+        gpus: The GPU indices for DataParallel, or a single-element list per process under DDP.
+        snapshot_path: The snapshot to resume training from, if any.
+        logger: The metrics logger to attach, if any.
+        load_head_weights: Determines whether to load head weights when resuming a pose model from a snapshot.
+        amp_dtype: The autocast compute dtype, or None to disable mixed precision.
+        use_gradient_scaler: Determines whether a gradient scaler is required (float16 only).
+        torch_compile: Determines whether to wrap the model with ``torch.compile``.
+        ddp: Determines whether this process trains in a DistributedDataParallel group.
+        rank: The global rank of this process.
+        world_size: The number of processes in the DDP group.
+        local_rank: The local GPU index this process trains on.
+
+    Returns:
+        The constructed optimized training runner for the requested task.
+    """
+    optimizer = build_optimizer(model=model, optimizer_config=runner_config["optimizer"])
+    scheduler = schedulers.build_scheduler(scheduler_cfg=runner_config.get("scheduler"), optimizer=optimizer)
+
+    snapshot_prefix = runner_config.get("snapshot_prefix")
+    if not snapshot_prefix:
+        snapshot_prefix = task.snapshot_prefix
+
+    kwargs = {
+        "model": model,
+        "optimizer": optimizer,
+        "snapshot_manager": TorchSnapshotManager(
+            snapshot_prefix=snapshot_prefix,
+            model_folder=model_folder,
+            key_metric=runner_config.get("key_metric"),
+            key_metric_asc=runner_config.get("key_metric_asc"),
+            max_snapshots=runner_config["snapshots"]["max_snapshots"],
+            save_epochs=runner_config["snapshots"]["save_epochs"],
+            save_optimizer_state=runner_config["snapshots"]["save_optimizer_state"],
+        ),
+        "device": device,
+        "gpus": gpus,
+        "eval_interval": runner_config.get("eval_interval"),
+        "snapshot_path": snapshot_path,
+        "scheduler": scheduler,
+        "load_scheduler_state_dict": runner_config.get("load_scheduler_state_dict", True),
+        "logger": logger,
+        "load_weights_only": runner_config.get("load_weights_only"),
+        "amp_dtype": amp_dtype,
+        "use_gradient_scaler": use_gradient_scaler,
+        "torch_compile": torch_compile,
+        "ddp": ddp,
+        "rank": rank,
+        "world_size": world_size,
+        "local_rank": local_rank,
+    }
+    if task == Task.DETECT:
+        return _OptimizedDetectorTrainingRunner(**kwargs)
+
+    kwargs["load_head_weights"] = load_head_weights
+    return _OptimizedPoseTrainingRunner(**kwargs)
+
+
 class _OptimizedTrainingRunnerMixin(TrainingRunner):
     """Adds mixed precision, ``torch.compile``, and DistributedDataParallel to a DeepLabCut training runner.
 
     The mixin is placed before a concrete DeepLabCut runner in the method resolution order so its ``fit``, ``_epoch``,
     and ``state_dict`` overrides take precedence while ``super().__init__`` still builds the stock runner. Each
-    concrete subclass overrides only ``step`` to wrap its forward pass and loss in autocast. It derives from the
+    concrete subclass overrides ``step`` to wrap its forward pass and loss in autocast (the detector subclass also
+    overrides the ``_ddp_static_graph`` class attribute). It derives from the
     (untyped) ``TrainingRunner`` base so the shared runner attributes and helpers it relies on resolve without stubs;
     it is never instantiated directly, so its own ``step`` remains abstract.
 
@@ -77,9 +166,10 @@ class _OptimizedTrainingRunnerMixin(TrainingRunner):
         Args:
             args: Positional arguments forwarded to the wrapped DeepLabCut runner.
             amp_dtype: The autocast compute dtype, or None to disable mixed precision.
-            use_gradient_scaler: Whether to use a gradient scaler, which is required only for float16 precision.
-            torch_compile: Whether to wrap the model with ``torch.compile`` before training.
-            ddp: Whether this process participates in a DistributedDataParallel group.
+            use_gradient_scaler: Determines whether to use a gradient scaler, which is required only for float16
+                precision.
+            torch_compile: Determines whether to wrap the model with ``torch.compile`` before training.
+            ddp: Determines whether this process participates in a DistributedDataParallel group.
             rank: The global rank of this process.
             world_size: The number of processes in the group.
             local_rank: The local GPU index this process trains on.
@@ -123,7 +213,8 @@ class _OptimizedTrainingRunnerMixin(TrainingRunner):
         process alone over the small labeled set, so the mixed-precision speed-up would be immaterial there anyway.
 
         Args:
-            enabled: Whether mixed precision may be enabled; pass False to force a no-op context (e.g. for evaluation).
+            enabled: Determines whether mixed precision may be enabled; pass False to force a no-op context (e.g.
+                for evaluation).
 
         Returns:
             A context manager that enables mixed precision on the runner's device when configured and enabled.
@@ -211,7 +302,7 @@ class _OptimizedTrainingRunnerMixin(TrainingRunner):
         self._prepare_model_for_training()
 
         if self._is_main and isinstance(self.logger, ImageLoggerMixin):
-            self.logger.select_images_to_log(train_loader, valid_loader)
+            self.logger.select_images_to_log(train=train_loader, valid=valid_loader)
 
         # Extend the epoch budget when resuming so the count reflects the total, not the extra, epochs.
         if self.starting_epoch > 0:
@@ -366,7 +457,7 @@ class _OptimizedPoseTrainingRunner(_OptimizedTrainingRunnerMixin, PoseTrainingRu
             self._backward_and_step(loss=losses_dict["total_loss"])
 
         if isinstance(self.logger, ImageLoggerMixin):
-            self.logger.log_images(batch, outputs, target, step=self.current_epoch)
+            self.logger.log_images(inputs=batch, outputs=outputs, targets=target, step=self.current_epoch)
 
         if mode == "eval":
             predictions = {
@@ -458,90 +549,3 @@ class _OptimizedDetectorTrainingRunner(_OptimizedTrainingRunnerMixin, DetectorTr
             )
 
         return losses
-
-
-def build_optimized_training_runner(
-    runner_config: dict,
-    model_folder: Any,
-    task: Task,
-    model: nn.Module,
-    device: str,
-    gpus: list[int] | None = None,
-    snapshot_path: Any = None,
-    logger: BaseLogger | None = None,
-    *,
-    load_head_weights: bool = True,
-    amp_dtype: torch.dtype | None = None,
-    use_gradient_scaler: bool = False,
-    torch_compile: bool = False,
-    ddp: bool = False,
-    rank: int = 0,
-    world_size: int = 1,
-    local_rank: int = 0,
-) -> TrainingRunner:
-    """Builds an optimized training runner, mirroring DeepLabCut's ``build_training_runner`` with added optimizations.
-
-    This reuses DeepLabCut's optimizer, scheduler, and snapshot-manager builders unchanged and only substitutes the
-    optimized runner subclasses and threads the mixed-precision and DistributedDataParallel settings through.
-
-    Args:
-        runner_config: The ``runner`` section of the pose or detector configuration.
-        model_folder: The directory in which snapshots and training statistics are written.
-        task: The task the runner performs, selecting the pose or detector runner subclass.
-        model: The model to train.
-        device: The device to train on for this process, such as a CUDA index or the CPU.
-        gpus: The GPU indices for DataParallel, or a single-element list per process under DDP.
-        snapshot_path: The snapshot to resume training from, if any.
-        logger: The metrics logger to attach, if any.
-        load_head_weights: Whether to load head weights when resuming a pose model from a snapshot.
-        amp_dtype: The autocast compute dtype, or None to disable mixed precision.
-        use_gradient_scaler: Whether a gradient scaler is required (float16 only).
-        torch_compile: Whether to wrap the model with ``torch.compile``.
-        ddp: Whether this process trains in a DistributedDataParallel group.
-        rank: The global rank of this process.
-        world_size: The number of processes in the DDP group.
-        local_rank: The local GPU index this process trains on.
-
-    Returns:
-        The constructed optimized training runner for the requested task.
-    """
-    optimizer = build_optimizer(model=model, optimizer_config=runner_config["optimizer"])
-    scheduler = schedulers.build_scheduler(runner_config.get("scheduler"), optimizer)
-
-    snapshot_prefix = runner_config.get("snapshot_prefix")
-    if not snapshot_prefix:
-        snapshot_prefix = task.snapshot_prefix
-
-    kwargs = {
-        "model": model,
-        "optimizer": optimizer,
-        "snapshot_manager": TorchSnapshotManager(
-            snapshot_prefix=snapshot_prefix,
-            model_folder=model_folder,
-            key_metric=runner_config.get("key_metric"),
-            key_metric_asc=runner_config.get("key_metric_asc"),
-            max_snapshots=runner_config["snapshots"]["max_snapshots"],
-            save_epochs=runner_config["snapshots"]["save_epochs"],
-            save_optimizer_state=runner_config["snapshots"]["save_optimizer_state"],
-        ),
-        "device": device,
-        "gpus": gpus,
-        "eval_interval": runner_config.get("eval_interval"),
-        "snapshot_path": snapshot_path,
-        "scheduler": scheduler,
-        "load_scheduler_state_dict": runner_config.get("load_scheduler_state_dict", True),
-        "logger": logger,
-        "load_weights_only": runner_config.get("load_weights_only"),
-        "amp_dtype": amp_dtype,
-        "use_gradient_scaler": use_gradient_scaler,
-        "torch_compile": torch_compile,
-        "ddp": ddp,
-        "rank": rank,
-        "world_size": world_size,
-        "local_rank": local_rank,
-    }
-    if task == Task.DETECT:
-        return _OptimizedDetectorTrainingRunner(**kwargs)
-
-    kwargs["load_head_weights"] = load_head_weights
-    return _OptimizedPoseTrainingRunner(**kwargs)

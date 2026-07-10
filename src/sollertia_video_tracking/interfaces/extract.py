@@ -16,7 +16,7 @@ from ..frame_extraction import (
 )
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
-"""Ensures that displayed Click help messages are formatted according to the lab standard."""
+"""Widens displayed Click help messages to 120 columns so option descriptions wrap consistently."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,7 +281,7 @@ def frames_command(
     is a per-video ceiling: each selected video is topped up to it, so a not-yet-extracted video gains a full set and a
     partly-extracted one gains only the frames that reach the ceiling. Passing ``--total-frames`` selects just enough
     videos to reach that project-wide total, preferring not-yet-extracted videos and falling back to below-ceiling
-    ones; any videos named with ``--videos`` are included first. If even topping every eligible video to the ceiling
+    ones. Any videos named with ``--videos`` are included first. If even topping every eligible video to the ceiling
     cannot reach the total in one pass, the run reports the shortfall and stops, so raise ``--frames-per-video``, lower
     ``--total-frames``, or register more videos. Passing ``--exclusive`` with ``--videos`` instead restricts the run to
     exactly those files, topping each up to ``--frames-per-video`` and ignoring the budget and group balancing. Passing
