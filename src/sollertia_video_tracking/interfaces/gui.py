@@ -4,6 +4,7 @@ import os
 import sys
 
 import click
+import matplotlib as mpl
 from deeplabcut.gui.launch_script import launch_dlc
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
@@ -27,6 +28,12 @@ def gui_command() -> None:
             "workstation with a graphical session."
         )
         raise click.ClickException(message=message)
+
+    # The GUI hosts interactive matplotlib panels (tracklet refinement, the skeleton builder, and the crop-region
+    # selector) that need an interactive backend. The package forces the headless 'Agg' backend at import for its
+    # compute-server commands, so an interactive Qt backend is restored here, for this GUI session only, before the
+    # window opens. PySide6 is already imported at this point, so matplotlib binds to the same Qt binding as DeepLabCut.
+    mpl.use("QtAgg")
 
     click.echo(message="Starting the DeepLabCut GUI...")
     launch_dlc()
