@@ -16,7 +16,7 @@ from ..training import (
 )
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
-"""Ensures that displayed Click help messages are formatted according to the lab standard."""
+"""Widens displayed Click help messages to 120 columns so option descriptions wrap consistently."""
 
 
 @click.command("prepare", context_settings=_CONTEXT_SETTINGS)
