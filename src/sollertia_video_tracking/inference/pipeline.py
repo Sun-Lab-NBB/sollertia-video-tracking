@@ -5,7 +5,7 @@ from typing import Any
 from pathlib import Path
 import contextlib
 from dataclasses import dataclass
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 
 import cv2
 import psutil
@@ -14,7 +14,6 @@ from deeplabcut.utils.auxiliaryfunctions import read_config
 from deeplabcut.pose_estimation_pytorch.apis import videos as dlc_videos
 
 from .runners import patch_dlc_runner_builders
-from .conversion import convert_predictions_to_feather
 from .optimization import InferenceProfile, apply_runtime_optimizations
 from ..frame_extraction import AggregateBar, plan_core_allocation, make_progress_reporter
 
@@ -40,9 +39,9 @@ class InferenceSummary:
     """Captures the outcome of a completed multi-video inference run for reporting to the caller.
 
     Notes:
-        The summary is built after every worker has finished. ``outputs`` holds the produced files in video order (a
-        feather per video when conversion is enabled, otherwise the DeepLabCut ``.h5``), and ``failures`` pairs each
-        failed video with its error message so a partial run is reported honestly rather than silently.
+        The summary is built after every worker has finished. ``outputs`` holds the produced DeepLabCut ``.h5``
+        prediction files in video order, and ``failures`` pairs each failed video with its error message so a partial
+        run is reported honestly rather than silently.
     """
 
     config: Path
@@ -58,10 +57,8 @@ class InferenceSummary:
     """The number of worker processes used."""
     precision: str
     """The compute precision used (``"bfloat16"``, ``"float16"``, or ``"fp32"``)."""
-    converted: bool
-    """Determines whether the predictions were converted in-flight to polars feather files."""
     outputs: tuple[Path, ...]
-    """The produced output files, one per successfully processed video."""
+    """The produced DeepLabCut ``.h5`` prediction files, one per successfully processed video."""
     failures: tuple[tuple[str, str], ...]
     """The videos that failed, each paired with its error message."""
 
@@ -73,13 +70,9 @@ class InferenceSummary:
         """
         ok = len(self.outputs)
         where = f"{self.device} x{self.workers}"
-        output_format = "feather" if self.converted else "h5"
         tail = f", {len(self.failures)} failed" if self.failures else ""
         written_to = self.destination if self.destination is not None else "each video's directory"
-        return (
-            f"analyzed {ok}/{self.video_count} videos on {where} in {self.precision} -> "
-            f"{output_format} in {written_to}{tail}"
-        )
+        return f"analyzed {ok}/{self.video_count} videos on {where} in {self.precision} -> h5 in {written_to}{tail}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,16 +105,6 @@ class _InferenceLaunch:
     """The pose-model inference batch size, or None to use the configured value."""
     detector_batch_size: int | None
     """The detector inference batch size, or None to use the configured value."""
-    to_polars: bool
-    """Determines whether each video's predictions are converted in-flight to a polars feather file."""
-    likelihood_threshold: float
-    """The likelihood below which keypoint positions are masked to NaN during conversion."""
-    save_as_csv: bool
-    """Determines whether DeepLabCut also writes a CSV alongside each prediction file."""
-    keep_dlc_outputs: bool
-    """Determines whether DeepLabCut's own prediction artifacts are kept after conversion."""
-    write_provenance: bool
-    """Determines whether the in-flight conversion writes its own provenance sidecar beside each feather."""
     display_progress: bool
     """Determines whether the live aggregate progress bar is rendered."""
     video_queue: Any
@@ -150,20 +133,28 @@ def resolve_project_videos(config: str | Path) -> list[Path]:
     return [video for video in videos if video.exists()]
 
 
-def detect_fixed_input_size(config: str | Path, videos: list[str | Path]) -> bool:
+def detect_fixed_input_size(
+    config: str | Path,
+    videos: list[str | Path],
+    crop_override: Sequence[tuple[int, int, int, int]] | None = None,
+) -> bool:
     """Determines whether every video would feed the pose network a single fixed input resolution.
 
     The cuDNN autotuner only pays off when the convolution input shapes stay constant across the run, so this reports
-    whether that precondition holds instead of asking the operator to assert it. When the project is configured to
-    crop, every analyzed video is reduced to its crop rectangle, so the run is fixed-size exactly when all videos
-    share one crop size. Otherwise the network sees each video's native resolution, so the run is fixed-size exactly
-    when all videos share one resolution. A single video is therefore always fixed-size. Any inability to read the
-    configuration or a video's dimensions is treated conservatively as not fixed, since a wrong assertion of fixed
+    whether that precondition holds instead of asking the operator to assert it. When per-video crop rectangles are
+    provided (the ``--crop`` override), each video is reduced to its rectangle, so the run is fixed-size exactly when
+    all rectangles share one size. Otherwise, when the project is configured to crop, every analyzed video is reduced
+    to its configured crop rectangle, so the run is fixed-size exactly when all videos share one crop size. When the
+    project is not configured to crop, the network sees each video's native resolution, so the run is fixed-size
+    exactly when all videos share one resolution. A single video is therefore always fixed-size. Any inability to read
+    the configuration or a video's dimensions is treated conservatively as not fixed, since a wrong assertion of fixed
     size makes the autotuner harmful.
 
     Args:
         config: The path of the DeepLabCut project configuration file.
         videos: The video files the run will analyze.
+        crop_override: The per-video crop rectangles that override the project configuration, parallel to ``videos``,
+            or None to derive each video's input size from the project configuration.
 
     Returns:
         True when the network's spatial input size is provably constant across the whole run, False otherwise.
@@ -171,12 +162,15 @@ def detect_fixed_input_size(config: str | Path, videos: list[str | Path]) -> boo
     video_paths = [Path(video) for video in videos]
     if not video_paths:
         return False
+    if crop_override is not None:
+        sizes = {(x2 - x1, y2 - y1) for x1, x2, y1, y2 in crop_override}
+        return len(sizes) == 1
     try:
         project_config = read_config(str(Path(config)))
-        sizes = {_resolve_input_size(project_config=project_config, video=video) for video in video_paths}
+        sizes_or_none = {_resolve_input_size(project_config=project_config, video=video) for video in video_paths}
     except Exception:  # noqa: BLE001 - detection is best-effort; any failure conservatively reports not-fixed.
         return False
-    return None not in sizes and len(sizes) == 1
+    return None not in sizes_or_none and len(sizes_or_none) == 1
 
 
 def run_inference(
@@ -190,12 +184,7 @@ def run_inference(
     detector_snapshot_index: int | None = None,
     batch_size: int | None = None,
     detector_batch_size: int | None = None,
-    to_polars: bool = False,
-    likelihood_threshold: float = 0.0,
-    save_as_csv: bool = False,
-    keep_dlc_outputs: bool = True,
-    output_feathers: list[str | Path] | None = None,
-    write_conversion_provenance: bool = True,
+    crop_override: Sequence[tuple[int, int, int, int]] | None = None,
     display_progress: bool = True,
 ) -> InferenceSummary:
     """Runs DeepLabCut inference over many videos, distributing whole videos across GPU or CPU worker slots.
@@ -203,8 +192,8 @@ def run_inference(
     Each worker pulls whole videos from a shared queue and analyzes them with DeepLabCut, so the work is balanced
     across slots without splitting any video. On CUDA a slot is a device (``gpu_processes`` of them per device); on CPU
     a slot is a disjoint, thread-bounded block of physical cores. Every worker's forward pass is wrapped with the
-    profile's mixed precision and channels-last format, and each video's predictions are optionally converted in-flight
-    to a wide polars feather.
+    profile's mixed precision and channels-last format, and each video's predictions are written as DeepLabCut's native
+    ``.h5`` prediction file, beside the video or into ``destination``.
 
     Args:
         config: The path of the DeepLabCut project configuration file.
@@ -217,29 +206,20 @@ def run_inference(
         detector_snapshot_index: The detector snapshot index to use, or None for the configured default.
         batch_size: The pose-model inference batch size, or None to use the configured value.
         detector_batch_size: The detector inference batch size, or None to use the configured value.
-        to_polars: Determines whether to convert each video's predictions in-flight to a polars feather file. Off by
-            default so the pipeline behaves like DeepLabCut's own analyze and leaves the project's native prediction
-            files intact for the rest of the model-refinement loop; the feather is deferred to the deployment path.
-        likelihood_threshold: The likelihood below which keypoint positions are masked to NaN during conversion.
-        save_as_csv: Determines whether DeepLabCut also writes a CSV alongside each prediction file.
-        keep_dlc_outputs: Determines whether to keep DeepLabCut's own prediction artifacts (the HDF5 table, the
-            full/meta/assemblies pickles, and any tracker files) after conversion. Kept by default so all DeepLabCut
-            data survives; only relevant when ``to_polars`` is set, since conversion is what would otherwise remove
-            them.
-        output_feathers: The per-video feather paths to write, parallel to ``videos``, or None to name each video's
-            feather from its stem inside ``destination``. Only valid together with ``to_polars``.
-        write_conversion_provenance: Determines whether the in-flight conversion writes its own provenance sidecar
-            beside each feather. Kept on by default; a deployment caller disables it to write a richer sidecar itself.
+        crop_override: The per-video crop rectangles to analyze, parallel to ``videos``, each an ``(x1, x2, y1, y2)``
+            tuple, or None to resolve each video's crop from the project configuration. Overrides the project's
+            cropping so de-novo videos that are not registered in the configuration can be analyzed at a caller-chosen
+            crop.
         display_progress: Determines whether to render the live aggregate progress bar.
 
     Returns:
         A summary of what was analyzed and the hardware configuration used.
 
     Raises:
-        ValueError: Raised when no videos are provided. Raised when per-video output paths are provided while
-            ``to_polars`` is disabled, or when their count does not match the videos. Raised when the profile selects
-            CUDA but resolves no GPU indices to build worker slots from. Raised when an explicit CPU worker/thread
-            configuration cannot be pinned to disjoint core blocks.
+        ValueError: Raised when no videos are provided, or when ``crop_override`` is provided but its length does not
+            match the number of videos. Raised when the profile selects CUDA but resolves no GPU indices to build
+            worker slots from. Raised when an explicit CPU worker/thread configuration cannot be pinned to disjoint
+            core blocks.
     """
     config = Path(config)
     destination = Path(destination) if destination is not None else None
@@ -247,19 +227,12 @@ def run_inference(
     if not video_paths:
         message = "Unable to run inference. Expected at least one video, but got an empty video list."
         raise ValueError(message)
-    if output_feathers is not None:
-        if not to_polars:
-            message = (
-                "Unable to run inference. Per-video output paths were provided, but polars conversion is disabled; "
-                "enable to_polars to write feather files at the requested paths."
-            )
-            raise ValueError(message)
-        if len(output_feathers) != len(video_paths):
-            message = (
-                f"Unable to run inference. Expected one output path per video, but got {len(output_feathers)} output "
-                f"paths for {len(video_paths)} videos."
-            )
-            raise ValueError(message)
+    if crop_override is not None and len(crop_override) != len(video_paths):
+        message = (
+            f"Unable to run inference. Expected one crop rectangle per video, but got {len(crop_override)} crop "
+            f"rectangles for {len(video_paths)} videos."
+        )
+        raise ValueError(message)
     if destination is not None:
         destination.mkdir(parents=True, exist_ok=True)
 
@@ -267,7 +240,8 @@ def run_inference(
     slots = _build_slots(profile=profile, video_count=len(video_paths))
 
     # Resolves each video's crop once, in the parent, so every worker analyzes the same region the frames were
-    # extracted from when the project is configured to crop, keeping predictions in the model's coordinate space.
+    # extracted from. A caller-supplied override takes precedence over the project configuration, letting de-novo
+    # videos be analyzed at a chosen crop; otherwise the crop is resolved from the project's cropping configuration.
     project_config = read_config(str(config))
 
     manager = mp.Manager()
@@ -275,9 +249,11 @@ def run_inference(
     progress_queue = manager.Queue()
     results_queue = manager.Queue()
     for index, video in enumerate(video_paths):
-        crop = _resolve_video_cropping(project_config=project_config, video=str(video))
-        feather = str(Path(output_feathers[index])) if output_feathers is not None else None
-        video_queue.put((index, str(video), totals[index], crop, feather))
+        if crop_override is not None:
+            crop: list[int] | None = list(crop_override[index])
+        else:
+            crop = _resolve_video_cropping(project_config=project_config, video=str(video))
+        video_queue.put((index, str(video), totals[index], crop))
     for _ in slots:
         video_queue.put(None)
 
@@ -300,11 +276,6 @@ def run_inference(
         profile=profile,
         batch_size=batch_size,
         detector_batch_size=detector_batch_size,
-        to_polars=to_polars,
-        likelihood_threshold=likelihood_threshold,
-        save_as_csv=save_as_csv,
-        keep_dlc_outputs=keep_dlc_outputs,
-        write_provenance=write_conversion_provenance,
         display_progress=display_progress,
         video_queue=video_queue,
         progress_queue=progress_queue,
@@ -335,7 +306,6 @@ def run_inference(
         device=profile.device,
         workers=len(slots),
         precision=precision,
-        converted=to_polars,
         outputs=tuple(outputs[index] for index in sorted(outputs)),
         failures=tuple(failures),
     )
@@ -591,20 +561,16 @@ def _run_inference_worker(slot: _Slot, launch: _InferenceLaunch) -> None:
             _analyze_one_video(slot=slot, launch=launch, item=item)
 
 
-def _analyze_one_video(
-    slot: _Slot, launch: _InferenceLaunch, item: tuple[int, str, int, list[int] | None, str | None]
-) -> None:
-    """Analyzes a single video from the queue, converts its output, and reports the result and progress.
+def _analyze_one_video(slot: _Slot, launch: _InferenceLaunch, item: tuple[int, str, int, list[int] | None]) -> None:
+    """Analyzes a single video from the queue and reports its prediction file and progress.
 
     Args:
         slot: The device and optional CPU-core placement for this worker.
         launch: The bundle of picklable per-run parameters.
-        item: The (video index, video path, frame total, crop rectangle, output feather path) work item pulled from the
-            queue. The crop rectangle is the ``[x1, x2, y1, y2]`` region to analyze, or None to analyze the full frame.
-            The output feather path is the explicit destination for this video's feather, or None to name it from the
-            video stem.
+        item: The (video index, video path, frame total, crop rectangle) work item pulled from the queue. The crop
+            rectangle is the ``[x1, x2, y1, y2]`` region to analyze, or None to analyze the full frame.
     """
-    index, video, total, cropping, output_feather = item
+    index, video, total, cropping = item
     output_directory = launch.destination if launch.destination is not None else Path(video).parent
     original_tqdm = dlc_videos.tqdm
     if launch.display_progress:
@@ -623,16 +589,12 @@ def _analyze_one_video(
                 detector_snapshot_index=launch.detector_snapshot_index,
                 batch_size=launch.batch_size,
                 detector_batch_size=launch.detector_batch_size,
-                save_as_csv=launch.save_as_csv,
                 # The submitted video is always (re)analyzed. DeepLabCut otherwise skips any video whose companion
-                # ``_full.pickle`` already exists, which would silently skip re-runs (and, since the converted HDF5 is
-                # deleted, report every already-completed video as a failure) when a batch is resubmitted.
+                # ``_full.pickle`` already exists, which would silently skip re-runs when a batch is resubmitted.
                 overwrite=True,
                 inference_cfg=_STOCK_ACCELERATION_DISABLED,
             )
-        output = _resolve_output(
-            launch=launch, video=video, scorer=scorer, destination=output_directory, feather_override=output_feather
-        )
+        output = _resolve_output(video=video, scorer=scorer, destination=output_directory)
         launch.results_queue.put((index, str(output) if output is not None else None, None))
     except Exception as error:  # noqa: BLE001 - report the per-video failure and keep draining the queue.
         launch.results_queue.put((index, None, f"{type(error).__name__}: {error}"))
@@ -643,69 +605,22 @@ def _analyze_one_video(
                 launch.progress_queue.put(("done", index))
 
 
-def _cleanup_dlc_artifacts(destination: Path, stem: str, scorer: str, *, keep_csv: bool) -> None:
-    """Removes DeepLabCut's own prediction files for one video, leaving only the converted feather and its sidecar.
-
-    DeepLabCut writes several files per video that all share the ``{stem}{scorer}`` name prefix: the HDF5 table, the
-    full/meta/assemblies pickles, and any tracker-suffixed files. The feather and its provenance sidecar are named from
-    the video stem alone, so matching on the prefix removes exactly the DeepLabCut artifacts and nothing else.
+def _resolve_output(video: str, scorer: str, destination: Path) -> Path | None:
+    """Locates the DeepLabCut native ``.h5`` prediction file written for one analyzed video.
 
     Args:
-        destination: The directory the prediction files were written to.
-        stem: The analyzed video's file stem.
-        scorer: The DeepLabCut scorer string that prefixes every DeepLabCut output file for this video.
-        keep_csv: Determines whether to keep a ``.csv`` export the caller explicitly requested.
-    """
-    prefix = f"{stem}{scorer}"
-    for artifact in destination.iterdir():
-        if not artifact.is_file() or not artifact.name.startswith(prefix):
-            continue
-        if keep_csv and artifact.suffix == ".csv":
-            continue
-        artifact.unlink(missing_ok=True)
-
-
-def _resolve_output(
-    launch: _InferenceLaunch, video: str, scorer: str, destination: Path, feather_override: str | None = None
-) -> Path | None:
-    """Locates the prediction HDF5 DeepLabCut wrote and optionally converts it to a polars feather.
-
-    Args:
-        launch: The bundle of per-run parameters, providing the conversion settings.
         video: The analyzed video path.
         scorer: The DeepLabCut scorer string returned by ``analyze_videos``, which names the output file.
-        destination: The directory this video's predictions were written to, which is the video's own directory when the
-            run configured no destination.
-        feather_override: The explicit feather path to write for this video, or None to name it from the video stem
-            inside ``destination``.
+        destination: The directory this video's predictions were written to, which is the video's own directory when
+            the run configured no destination.
 
     Returns:
-        The produced feather (when converting) or HDF5 file, or None when no prediction file was written.
+        The produced ``.h5`` file, or None when no prediction file was written.
     """
     stem = Path(video).stem
     exact = destination / f"{stem}{scorer}.h5"
     if exact.exists():
-        h5_path: Path | None = exact
-    else:
-        # Multi-animal auto-tracking writes a tracker-suffixed file instead of the plain per-frame table.
-        matches = sorted(destination.glob(f"{stem}{scorer}*.h5"))
-        h5_path = matches[-1] if matches else None
-
-    if h5_path is None:
-        return None
-    if not launch.to_polars:
-        return h5_path
-
-    feather_path = Path(feather_override) if feather_override is not None else destination / f"{stem}_pose.feather"
-    convert_predictions_to_feather(
-        h5_path=h5_path,
-        feather_path=feather_path,
-        likelihood_threshold=launch.likelihood_threshold,
-        write_provenance=launch.write_provenance,
-    )
-    # Deployment leaves only the feather and its provenance sidecar: once conversion succeeds, DeepLabCut's own
-    # prediction artifacts for this video are removed. Conversion runs just above, so a failed conversion raises before
-    # this point and leaves those artifacts in place as a fallback.
-    if not launch.keep_dlc_outputs:
-        _cleanup_dlc_artifacts(destination=destination, stem=stem, scorer=scorer, keep_csv=launch.save_as_csv)
-    return feather_path
+        return exact
+    # Multi-animal auto-tracking writes a tracker-suffixed file instead of the plain per-frame table.
+    matches = sorted(destination.glob(f"{stem}{scorer}*.h5"))
+    return matches[-1] if matches else None

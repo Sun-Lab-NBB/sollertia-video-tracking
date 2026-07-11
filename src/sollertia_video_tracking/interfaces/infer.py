@@ -17,6 +17,9 @@ from ..inference import (
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Widens displayed Click help messages to 120 columns so option descriptions wrap consistently."""
 
+_CROP_FIELD_COUNT: int = 4
+"""The number of comma-separated integers, ``x1,x2,y1,y2``, in a ``--crop`` rectangle."""
+
 
 @click.command("infer", context_settings=_CONTEXT_SETTINGS)
 @click.argument("config", type=click.Path(exists=True, dir_okay=False, path_type=Path))
@@ -66,34 +69,14 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     help="The detector batch size, for top-down models. Omit to use the model's default value.",
 )
 @click.option(
-    "-tp",
-    "--to-polars/--no-to-polars",
-    default=False,
-    show_default=True,
-    help="Also convert each video's predictions to a single wide table file. Off by default so the native prediction "
-    "files that the refinement loop (evaluation and outlier extraction) reads are preserved.",
-)
-@click.option(
-    "-lt",
-    "--likelihood-threshold",
-    type=float,
-    default=0.0,
-    show_default=True,
-    help="The confidence below which keypoint positions are cleared in the converted table output.",
-)
-@click.option(
-    "-sc",
-    "--save-csv",
-    is_flag=True,
-    help="Also write a CSV copy of the predictions alongside each prediction file.",
-)
-@click.option(
-    "-kdo",
-    "--keep-dlc-outputs/--no-keep-dlc-outputs",
-    default=True,
-    show_default=True,
-    help="Keep the original per-video prediction files in the destination. Kept by default so no prediction data is "
-    "lost; only takes effect with --to-polars, since conversion is what would otherwise remove them.",
+    "-cr",
+    "--crop",
+    multiple=True,
+    metavar="X1,X2,Y1,Y2",
+    help="A crop rectangle 'x1,x2,y1,y2' to analyze instead of the project's configured crop, decoupling cropping "
+    "from the project configuration so de-novo videos that are not registered in the project can be analyzed at a "
+    "chosen region. Pass once to apply one rectangle to every video, or once per video (matching the video count, and "
+    "not with --project-videos) for per-video crops in the order the videos are given.",
 )
 @click.option(
     "-dv",
@@ -203,7 +186,7 @@ def infer_command(
     detector_snapshot_index: int | None,
     batch_size: int | None,
     detector_batch_size: int | None,
-    likelihood_threshold: float,
+    crop: tuple[str, ...],
     device: str,
     gpus: str | None,
     gpu_processes: int,
@@ -217,9 +200,6 @@ def infer_command(
     pin_memory: str,
     *,
     project_videos: bool,
-    to_polars: bool,
-    save_csv: bool,
-    keep_dlc_outputs: bool,
     progress: bool,
 ) -> None:
     """Analyzes videos with a trained DeepLabCut model, distributing whole videos across GPU or CPU worker slots.
@@ -228,9 +208,11 @@ def infer_command(
     omitted when ``--project-videos`` is passed, which analyzes every existing video registered in the project
     configuration. Each worker analyzes whole videos pulled from a shared queue, so the work is balanced without
     splitting any video, and every forward pass runs with the mixed precision and memory format chosen for the detected
-    hardware. By default it writes DeepLabCut's native prediction files (preserving them for the evaluation and
-    outlier-extraction steps of the refinement loop); pass ``--to-polars`` to also convert them to wide polars feather
-    files. The same command runs on multiple GPUs, one GPU, or a CPU-only machine.
+    hardware. Each video's predictions are written as DeepLabCut's native ``.h5`` prediction file, beside the video or
+    into ``--destination``, which is exactly what the evaluation and outlier-extraction steps of the refinement loop
+    read. Pass ``--crop`` to analyze a chosen region rather than the project's configured crop, which lets de-novo
+    videos that are not registered in the project be analyzed. The same command runs on multiple GPUs, one GPU, or a
+    CPU-only machine.
     """
     try:
         gpu_indices = tuple(int(part) for part in gpus.split(",")) if gpus else None
@@ -259,9 +241,11 @@ def infer_command(
     if project_videos:
         click.echo(message=f"analyzing {len(unique_videos)} videos from the project configuration")
 
+    crop_override = _resolve_crop_override(crop=crop, video_count=len(unique_videos), project_videos=project_videos)
+
     # Detect whether the run feeds the network one fixed input size so the cuDNN autotuner's 'auto' default can enable
     # itself only when it pays off, replacing the operator-declared flag this used to require.
-    fixed_input_size = detect_fixed_input_size(config, unique_videos)
+    fixed_input_size = detect_fixed_input_size(config, unique_videos, crop_override)
 
     try:
         profile = resolve_inference_profile(
@@ -288,13 +272,82 @@ def infer_command(
             detector_snapshot_index=detector_snapshot_index,
             batch_size=batch_size,
             detector_batch_size=detector_batch_size,
-            to_polars=to_polars,
-            likelihood_threshold=likelihood_threshold,
-            save_as_csv=save_csv,
-            keep_dlc_outputs=keep_dlc_outputs,
+            crop_override=crop_override,
             display_progress=progress,
         )
     except (ValueError, FileNotFoundError) as error:
         raise click.ClickException(str(error)) from error
 
     click.echo(message=summary.describe())
+
+
+def _parse_crop_option(value: str) -> tuple[int, int, int, int]:
+    """Parses an ``x1,x2,y1,y2`` crop rectangle from a single ``--crop`` option value.
+
+    Args:
+        value: The comma-separated crop rectangle as four integers.
+
+    Returns:
+        The parsed ``(x1, x2, y1, y2)`` rectangle.
+
+    Raises:
+        click.UsageError: When the value is not four integers or does not describe a positive-area rectangle.
+    """
+    parts = [part.strip() for part in value.split(",")]
+    if len(parts) != _CROP_FIELD_COUNT:
+        message = f"Unable to parse the --crop value '{value}'. Expected four comma-separated integers 'x1,x2,y1,y2'."
+        raise click.UsageError(message=message)
+    try:
+        corners = [int(part) for part in parts]
+    except ValueError as error:
+        message = f"Unable to parse the --crop value '{value}'. Expected four integers 'x1,x2,y1,y2'."
+        raise click.UsageError(message=message) from error
+    x1, x2, y1, y2 = corners
+    if x2 <= x1 or y2 <= y1:
+        message = (
+            f"Unable to use the --crop value '{value}'. Expected x1 < x2 and y1 < y2 to describe a positive-area "
+            f"rectangle."
+        )
+        raise click.UsageError(message=message)
+    return x1, x2, y1, y2
+
+
+def _resolve_crop_override(
+    crop: tuple[str, ...], video_count: int, *, project_videos: bool
+) -> list[tuple[int, int, int, int]] | None:
+    """Resolves the ``--crop`` option values into one crop rectangle per analyzed video, or None when unset.
+
+    A single ``--crop`` is applied uniformly to every video. Several ``--crop`` rectangles are matched to the videos in
+    order and must equal the video count; because registered project videos carry their own configured crops and have
+    no stable position, per-video crops cannot be combined with ``--project-videos``.
+
+    Args:
+        crop: The raw ``--crop`` option values, each a ``x1,x2,y1,y2`` string.
+        video_count: The number of videos the run will analyze.
+        project_videos: Determines whether the run also analyzes the project's registered videos.
+
+    Returns:
+        One ``(x1, x2, y1, y2)`` rectangle per video, or None when no ``--crop`` was given.
+
+    Raises:
+        click.UsageError: When a rectangle is malformed, when several rectangles are combined with ``--project-videos``,
+            or when the rectangle count matches neither one nor the video count.
+    """
+    if not crop:
+        return None
+    rectangles = [_parse_crop_option(value) for value in crop]
+    if len(rectangles) == 1:
+        return rectangles * video_count
+    if project_videos:
+        message = (
+            "Per-video --crop rectangles cannot be combined with --project-videos. Pass a single --crop to apply one "
+            "rectangle to every video, or list the videos explicitly with one --crop each."
+        )
+        raise click.UsageError(message=message)
+    if len(rectangles) != video_count:
+        message = (
+            f"Got {len(rectangles)} --crop rectangles for {video_count} videos. Pass a single --crop to apply it to "
+            f"every video, or exactly one --crop per video."
+        )
+        raise click.UsageError(message=message)
+    return rectangles
