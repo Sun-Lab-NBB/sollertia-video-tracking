@@ -13,31 +13,25 @@ from .dataset import (
 )
 from .pipeline import TrainingSummary, train_model, detect_fixed_input_size
 from ..hardware import Toggle, AmpMode, DeviceType
-from .evaluation import SplitMetrics, EvaluationSummary, evaluate_trained_model
 from .optimization import (
     MultiGpuStrategy,
     OptimizationProfile,
-    apply_runtime_optimizations,
     resolve_optimization_profile,
 )
 
 __all__ = [
     "AmpMode",
     "DeviceType",
-    "EvaluationSummary",
     "MultiGpuStrategy",
     "OptimizationProfile",
-    "SplitMetrics",
     "Toggle",
     "TrainingDatasetSummary",
     "TrainingSummary",
     "WeightInitializationMethod",
-    "apply_runtime_optimizations",
     "build_conditional_top_down_conditions",
     "build_superanimal_weight_init",
     "create_training_dataset",
     "detect_fixed_input_size",
-    "evaluate_trained_model",
     "get_available_augmenters",
     "get_available_object_detectors",
     "get_available_pose_models",
