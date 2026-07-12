@@ -2,11 +2,7 @@
 
 from .pipeline import InferenceSummary, run_inference, resolve_project_videos, detect_fixed_input_size
 from ..hardware import Toggle, AmpMode, DeviceType
-from .optimization import (
-    InferenceProfile,
-    resolve_inference_profile,
-    apply_runtime_optimizations,
-)
+from .optimization import InferenceProfile, resolve_inference_profile
 
 __all__ = [
     "AmpMode",
@@ -14,7 +10,6 @@ __all__ = [
     "InferenceProfile",
     "InferenceSummary",
     "Toggle",
-    "apply_runtime_optimizations",
     "detect_fixed_input_size",
     "resolve_inference_profile",
     "resolve_project_videos",
