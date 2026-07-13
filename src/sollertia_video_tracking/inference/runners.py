@@ -1,4 +1,4 @@
-"""Provides thin optimization wrappers over DeepLabCut's inference runners for mixed precision and channels-last."""
+"""Provides wrappers optimizing DeepLabCut inference runners with mixed precision, channels-last, and torch.compile."""
 
 from typing import Any
 import warnings
@@ -79,8 +79,8 @@ def _optimize_inference_runner(runner: InferenceRunner, profile: InferenceProfil
     The runner's forward pass is replaced with a version that wraps the model call in the profile's autocast context,
     with the correct device type and bfloat16/float16 dtype. That version moves each batch to the runner device on
     every forward pass, using a non-blocking transfer only when host-memory pinning is enabled, and additionally
-    converts inputs to the channels-last memory format when channels-last is enabled. The model is converted to
-    channels-last and compiled before the swap.
+    converts inputs to the channels-last memory format when channels-last is enabled. When enabled by the profile, the
+    model is converted to channels-last and compiled before the swap.
     Conditional-top-down runners drive a stateful, multi-stage forward that this simple swap would not preserve, so
     they are left unmodified with a warning.
 
@@ -98,14 +98,15 @@ def _optimize_inference_runner(runner: InferenceRunner, profile: InferenceProfil
         )
         return runner
 
-    # DeepLabCut's own autocast is disabled through the inference config passed to analyze_videos, but reassert it here
-    # so the stock forward path never double-applies autocast on top of ours even if a runner was built differently.
+    # DeepLabCut's own autocast is disabled through the inference config passed to analyze_videos; the disable is
+    # reasserted here so the stock forward path never double-applies autocast on top of the injected one even if a
+    # runner was built differently.
     runner.inference_cfg.autocast.enabled = False
 
     if profile.channels_last:
         runner.model = runner.model.to(memory_format=torch.channels_last)
     if profile.torch_compile:
-        # torch.compile can raise a range of backend errors; fall back to eager execution when it does.
+        # torch.compile can raise a range of backend errors; the wrapper falls back to eager execution when it does.
         try:
             runner.model = torch.compile(runner.model)
         except Exception as error:  # noqa: BLE001
@@ -151,7 +152,8 @@ def _build_pose_predict(
         move_inputs: A callable that moves a batch to the device with the configured memory format.
 
     Returns:
-        A ``predict(inputs, **kwargs)`` callable mirroring ``PoseInferenceRunner.predict`` with our autocast applied.
+        A ``predict(inputs, **kwargs)`` callable mirroring ``PoseInferenceRunner.predict`` with the injected
+        autocast applied.
     """
 
     def predict(inputs: torch.Tensor, **kwargs: Any) -> list[dict[str, dict[str, Any]]]:
@@ -163,7 +165,7 @@ def _build_pose_predict(
             raw_predictions = runner.model.get_predictions(outputs)
         if runner.dynamic is not None:
             raw_predictions["bodypart"]["poses"] = runner.dynamic.update(raw_predictions["bodypart"]["poses"])
-        # Copy each output tensor to host once, then index the resulting array per frame, rather than issuing a
+        # Copies each output tensor to host once, then indexes the resulting array per frame, rather than issuing a
         # separate device-to-host copy for every frame of every tensor.
         host_predictions = {
             head: {name: prediction.cpu().numpy() for name, prediction in head_outputs.items()}
@@ -193,7 +195,8 @@ def _build_detector_predict(
         move_inputs: A callable that moves a batch to the device with the configured memory format.
 
     Returns:
-        A ``predict(inputs, **kwargs)`` callable mirroring ``DetectorInferenceRunner.predict`` with our autocast.
+        A ``predict(inputs, **kwargs)`` callable mirroring ``DetectorInferenceRunner.predict`` with the injected
+        autocast.
     """
 
     def predict(inputs: torch.Tensor, **kwargs: Any) -> list[dict[str, dict[str, Any]]]:

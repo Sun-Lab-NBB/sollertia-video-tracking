@@ -58,7 +58,7 @@ def warn(message: str) -> None:
     sys.stderr.flush()
 
 
-def cuda_device_count() -> int:
+def _cuda_device_count() -> int:
     """Returns the number of visible CUDA devices, or zero when CUDA is unavailable.
 
     Returns:
@@ -125,7 +125,7 @@ def resolve_target_device(
             does not begin with ``"cuda"`` and is not one of ``"auto"``, ``"cpu"``, or ``"mps"``.
     """
     request = (device or "auto").lower()
-    available = cuda_device_count()
+    available = _cuda_device_count()
 
     if request == "cpu":
         return "cpu", ()

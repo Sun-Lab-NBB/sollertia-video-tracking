@@ -67,7 +67,7 @@ Notes:
 
 
 @dataclass(frozen=True, slots=True)
-class SplitMetrics:
+class _SplitMetrics:
     """Captures DeepLabCut's canonical error metrics for one labeled-data partition.
 
     Notes:
@@ -113,9 +113,9 @@ class EvaluationSummary:
     ``write_provenance`` is True, otherwise this path names a file that was not created."""
     pcutoff: float
     """The confidence cutoff applied when computing the cutoff-filtered metrics and the ``above_pcutoff`` column."""
-    train: SplitMetrics
+    train: _SplitMetrics
     """The canonical metrics for the training frames."""
-    test: SplitMetrics
+    test: _SplitMetrics
     """The canonical metrics for the held-out test frames."""
 
     @property
@@ -220,7 +220,7 @@ def evaluate_trained_model(
 
     snapshot_name = pose_snapshot.path.stem
     columns: dict[str, list[Any]] = {name: [] for name in _FEATHER_SCHEMA}
-    split_metrics: dict[str, SplitMetrics] = {}
+    split_metrics: dict[str, _SplitMetrics] = {}
     raw_metrics: dict[str, dict[str, Any]] = {}
     for split in _SPLITS:
         metrics, predictions = evaluate(
@@ -261,7 +261,7 @@ def evaluate_trained_model(
                 confidence_cutoff=cutoff,
                 prediction_key="unique_bodyparts",
             )
-        split_metrics[split] = SplitMetrics(
+        split_metrics[split] = _SplitMetrics(
             images=len(ground_truth),
             rmse_px=float(metrics["rmse"]),
             rmse_pcutoff_px=float(metrics["rmse_pcutoff"]),
@@ -613,7 +613,7 @@ def _write_provenance(
     batch_size: int,
     confidence_cutoff: float,
     single_animal: bool,
-    split_metrics: dict[str, SplitMetrics],
+    split_metrics: dict[str, _SplitMetrics],
     feather_path: Path,
     worst_keypoints: list[dict[str, Any]],
 ) -> None:
