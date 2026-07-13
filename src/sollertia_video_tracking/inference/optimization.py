@@ -24,10 +24,10 @@ _DEFAULT_GPU_PROCESSES: int = 1
 """The default number of inference worker processes to run per CUDA device.
 
 One process per device is the predictable default: each GPU processes one whole video at a time, which is correct for
-every DeepLabCut backend and needs no per-video coordination. Because inference is bottlenecked by single-threaded
-video decode, a lone process can leave the GPU underused; raising this runs several videos concurrently on one device
-so one worker's decode overlaps another's forward pass. The useful factor is workload-dependent and is best found by
-measurement rather than assumed."""
+every DeepLabCut backend and needs no per-video coordination. Inference is GPU-compute-bound, so a lone process can
+still leave the device idle in the gaps between and within videos; raising this runs several videos concurrently on
+one device so one worker's forward pass fills the compute gaps another worker leaves. The useful factor is
+workload-dependent and is best found by measurement rather than assumed."""
 
 _DEFAULT_CPU_THREADS_PER_WORKER: int = 8
 """The default intra-op thread count for one CPU inference worker, sized to roughly one core complex (CCX/CCD).
@@ -44,9 +44,9 @@ class InferenceProfile:
         Every field is a concrete decision: the tri-state request flags and hardware capabilities have already been
         reconciled by ``resolve_inference_profile``, so consumers apply these values directly without any further
         capability checks. Parallelism is expressed as independent worker processes that each pull whole videos from a
-        shared queue: ``gpu_processes`` per CUDA device (raising it oversubscribes a device to fill decode-starved GPU
-        gaps) or ``cpu_workers`` core-block-pinned processes on CPU. The profile holds cores back rather than saturating
-        the machine.
+        shared queue: ``gpu_processes`` per CUDA device (raising it oversubscribes a device to fill the GPU's idle
+        gaps between videos) or ``cpu_workers`` core-block-pinned processes on CPU. The profile holds cores back rather
+        than saturating the machine.
     """
 
     device: str

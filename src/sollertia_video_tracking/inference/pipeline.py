@@ -351,7 +351,7 @@ def _probe_frame_size(video: Path) -> tuple[int, int] | None:
     """Reads a video's frame dimensions from its container header.
 
     Args:
-        video: The path to the video file.
+        video: The path of the video whose frame dimensions are read.
 
     Returns:
         The ``(width, height)`` reported by the container, or None when the video cannot be opened or reports a
@@ -370,7 +370,7 @@ def _probe_frame_size(video: Path) -> tuple[int, int] | None:
     return width, height
 
 
-def _parse_crop(crop: Any) -> list[int] | None:
+def _parse_crop(crop: str | None) -> list[int] | None:
     """Parses a ``"x1, x2, y1, y2"`` crop specification into four integers, or None when it is absent or malformed.
 
     Args:
@@ -408,10 +408,10 @@ def _resolve_video_cropping(project_config: dict[str, Any], video: str) -> list[
     if not project_config.get("cropping", False):
         return None
     target = Path(video).resolve()
-    for registered, meta in (project_config.get("video_sets") or {}).items():
-        if not isinstance(meta, dict) or Path(registered).resolve() != target:
+    for registered, metadata in (project_config.get("video_sets") or {}).items():
+        if not isinstance(metadata, dict) or Path(registered).resolve() != target:
             continue
-        crop = _parse_crop(meta.get("crop"))
+        crop = _parse_crop(metadata.get("crop"))
         if crop is not None:
             return crop
     corners: list[int] = []
@@ -494,7 +494,7 @@ def _probe_frame_count(video: Path) -> int:
     """Reads a video's frame count from its container header for the aggregate progress bar.
 
     Args:
-        video: The path to the video file.
+        video: The path of the video whose frame count is read.
 
     Returns:
         The reported frame count, clamped to at least one so the progress bar always has a positive total.
@@ -593,7 +593,9 @@ def _analyze_one_video(
     output_directory = Path(destination) if destination is not None else Path(video).parent
     original_tqdm = dlc_videos.tqdm
     if launch.display_progress:
-        dlc_videos.tqdm = make_progress_reporter(launch.progress_queue, index, total)
+        dlc_videos.tqdm = make_progress_reporter(
+            progress_queue=launch.progress_queue, video_index=index, frame_total=total
+        )
     try:
         with _suppress_stdout(active=launch.display_progress):
             scorer = dlc_videos.analyze_videos(
@@ -608,7 +610,7 @@ def _analyze_one_video(
                 detector_snapshot_index=launch.detector_snapshot_index,
                 batch_size=launch.batch_size,
                 detector_batch_size=launch.detector_batch_size,
-                # The submitted video is always (re)analyzed. DeepLabCut otherwise skips any video whose companion
+                # Always (re)analyze the submitted video. DeepLabCut otherwise skips any video whose companion
                 # ``_full.pickle`` already exists, which would silently skip re-runs when a batch is resubmitted.
                 overwrite=True,
                 inference_cfg=_STOCK_ACCELERATION_DISABLED,
