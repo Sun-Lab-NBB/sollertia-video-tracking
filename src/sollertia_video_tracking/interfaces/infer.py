@@ -22,64 +22,83 @@ _CROP_FIELD_COUNT: int = 4
 
 
 @click.command("infer", context_settings=_CONTEXT_SETTINGS)
-@click.argument("config", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@click.argument("videos", nargs=-1, required=False, type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(
-    "-pv",
-    "--project-videos",
-    is_flag=True,
-    help="Also analyze every video registered in the project, in addition to any VIDEOS given explicitly. Registered "
-    "videos that no longer exist on disk are skipped.",
+    "-cfg",
+    "--config-path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="The path to the DeepLabCut project's config.yaml whose trained model analyzes the videos.",
 )
 @click.option(
-    "-d",
-    "--destination",
+    "-v",
+    "--videos",
+    multiple=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    metavar="PATH",
+    help="A video file to analyze. Provide the option several times for several videos. These need not be registered "
+    "in the project, so de-novo videos can be analyzed, optionally at a chosen region with --crop. Omit --videos to "
+    "analyze every video registered in the project's config.yaml.",
+)
+@click.option(
+    "-o",
+    "--output",
+    multiple=True,
     type=click.Path(file_okay=False, path_type=Path),
-    default=None,
-    help="The directory prediction files are written to. Omit to write each video's predictions beside the video "
-    "itself, where the 'extract outliers' step reads them.",
+    metavar="DIRECTORY",
+    help="A directory the prediction files are written to. Pass once to collect every video's predictions in one "
+    "directory, or once per --videos file (in order, matching the video count) to bundle each video's predictions "
+    "with its own directory. Per-video outputs require explicit --videos. Omit to write each video's predictions "
+    "beside the video itself, where 'slvt extract outliers' reads them.",
 )
-@click.option("-s", "--shuffle", default=1, show_default=True, help="The shuffle index whose trained model is used.")
+@click.option(
+    "-s",
+    "--shuffle",
+    default=1,
+    show_default=True,
+    help="The shuffle index whose trained model analyzes the videos.",
+)
 @click.option(
     "-si",
     "--snapshot-index",
     type=int,
     default=None,
-    help="The trained pose snapshot to use. Omit to use the configured default.",
+    help="The index of the trained pose-model snapshot to run. Omit to use the project's configured default.",
 )
 @click.option(
     "-dsi",
     "--detector-snapshot-index",
     type=int,
     default=None,
-    help="The detector snapshot to use, for top-down models. Omit to use the configured default.",
+    help="The index of the detector snapshot to run, for top-down models. Omit to use the project's configured "
+    "default.",
 )
 @click.option(
     "-b",
     "--batch-size",
     type=int,
     default=None,
-    help="The pose model batch size. Omit to use the model's default value.",
+    help="The number of frames the pose model processes per forward pass. Larger batches use more GPU memory and can "
+    "speed up analysis. Omit to use the model's default value.",
 )
 @click.option(
     "-dbs",
     "--detector-batch-size",
     type=int,
     default=None,
-    help="The detector batch size, for top-down models. Omit to use the model's default value.",
+    help="The number of frames the object detector processes per step, for top-down models. Omit to use the model's "
+    "default value.",
 )
 @click.option(
     "-cr",
     "--crop",
     multiple=True,
     metavar="X1,X2,Y1,Y2",
-    help="A crop rectangle 'x1,x2,y1,y2' to analyze instead of the project's configured crop, decoupling cropping "
-    "from the project configuration so de-novo videos that are not registered in the project can be analyzed at a "
-    "chosen region. Pass once to apply one rectangle to every video, or once per video (matching the video count, and "
-    "not with --project-videos) for per-video crops in the order the videos are given.",
+    help="A crop rectangle 'x1,x2,y1,y2' to analyze instead of the project's configured crop, so de-novo videos can be "
+    "analyzed at a chosen region. Pass once to apply one rectangle to every video, or once per --videos file (in "
+    "order, matching the video count) for per-video crops. Per-video crops require explicit --videos.",
 )
 @click.option(
-    "-dv",
+    "-d",
     "--device",
     type=click.Choice([device.value for device in DeviceType]),
     default=DeviceType.AUTO.value,
@@ -92,7 +111,8 @@ _CROP_FIELD_COUNT: int = 4
     "--gpus",
     default=None,
     metavar="INDICES",
-    help="The comma-separated CUDA device indices to use (e.g. '0,1'). Omit to use every visible GPU.",
+    help="The comma-separated CUDA device indices to run on (e.g. '0,1'). Omit to use every visible GPU. Applies only "
+    "when the device is a CUDA GPU.",
 )
 @click.option(
     "-gp",
@@ -100,8 +120,9 @@ _CROP_FIELD_COUNT: int = 4
     type=int,
     default=-1,
     show_default=True,
-    help="The number of worker processes per GPU. 1 runs one video per GPU. Raise it to oversubscribe a GPU and fill "
-    "decode gaps. Set to -1 for the default of one video per GPU.",
+    help="The number of inference worker processes per GPU, each analyzing one video at a time. Raise it to "
+    "oversubscribe a GPU and fill decode gaps. Most gpus fully saturate with 1 or 2 workers. Set to -1 for the "
+    "default of one process (one video) per GPU.",
 )
 @click.option(
     "-cw",
@@ -109,7 +130,8 @@ _CROP_FIELD_COUNT: int = 4
     type=int,
     default=-1,
     show_default=True,
-    help="The number of CPU worker processes, each pinned to a disjoint core block. Set to -1 to choose automatically.",
+    help="The number of CPU inference worker processes, each pinned to a disjoint block of CPU cores. Set to -1 to "
+    "choose automatically from the core count.",
 )
 @click.option(
     "-ctpw",
@@ -117,7 +139,7 @@ _CROP_FIELD_COUNT: int = 4
     type=int,
     default=-1,
     show_default=True,
-    help="The number of CPU threads (and cores) per worker. Set to -1 to choose automatically.",
+    help="The number of CPU threads (and cores) each CPU worker uses. Set to -1 to choose automatically.",
 )
 @click.option(
     "-a",
@@ -125,8 +147,10 @@ _CROP_FIELD_COUNT: int = 4
     type=click.Choice([mode.value for mode in AmpMode]),
     default=AmpMode.AUTO.value,
     show_default=True,
-    help="The mixed-precision mode. 'auto' enables bfloat16 on Ampere or newer GPUs. Force 'bf16' to also use it on a "
-    "capable CPU.",
+    help="The mixed-precision compute mode, which trades some numerical precision for speed and lower memory use. "
+    "'auto' enables bfloat16 on Ampere or newer GPUs and stays in float32 elsewhere. 'off' forces float32. 'bf16' "
+    "forces bfloat16 (disabled with a warning on MPS) and 'fp16' forces float16 on CUDA (disabled with a warning "
+    "elsewhere).",
 )
 @click.option(
     "-t",
@@ -134,7 +158,8 @@ _CROP_FIELD_COUNT: int = 4
     type=click.Choice([toggle.value for toggle in Toggle]),
     default=Toggle.AUTO.value,
     show_default=True,
-    help="TF32 acceleration for float32 matmuls and convolutions (CUDA only). 'auto' enables it on Ampere or newer.",
+    help="TF32 acceleration for float32 matmuls and convolutions on CUDA, which speeds up float32 math at slightly "
+    "reduced precision. 'auto' enables it on Ampere or newer GPUs. 'on' and 'off' force it. It is a no-op off CUDA.",
 )
 @click.option(
     "-cb",
@@ -142,9 +167,9 @@ _CROP_FIELD_COUNT: int = 4
     type=click.Choice([toggle.value for toggle in Toggle]),
     default=Toggle.AUTO.value,
     show_default=True,
-    help="The convolution autotuner (CUDA only). 'auto' enables it when the run is detected to use a single fixed "
-    "input size (a shared project crop, or one shared video resolution), where it pays off rather than re-tuning per "
-    "size.",
+    help="The cuDNN convolution autotuner on CUDA. 'auto' enables it only when the run is detected to feed one fixed "
+    "input size (a shared project crop, or one shared video resolution), where it speeds up convolutions rather than "
+    "re-tuning per size. 'on' and 'off' force it.",
 )
 @click.option(
     "-cl",
@@ -152,7 +177,8 @@ _CROP_FIELD_COUNT: int = 4
     type=click.Choice([toggle.value for toggle in Toggle]),
     default=Toggle.AUTO.value,
     show_default=True,
-    help="The channels-last memory format, which accelerates convolutions. 'auto' enables it on CUDA.",
+    help="The channels-last memory format, which speeds up convolutions on tensor-core GPUs. 'auto' enables it on "
+    "CUDA. 'on' and 'off' force it.",
 )
 @click.option(
     "-cm",
@@ -160,7 +186,8 @@ _CROP_FIELD_COUNT: int = 4
     type=click.Choice([toggle.value for toggle in Toggle]),
     default=Toggle.AUTO.value,
     show_default=True,
-    help="Whether to compile the model for faster inference. Off by default because of its warm-up cost.",
+    help="Determines whether the model is compiled with torch.compile for faster inference. 'auto' leaves it off "
+    "because its one-time warm-up cost may not amortize. 'on' and 'off' force it.",
 )
 @click.option(
     "-pm",
@@ -168,7 +195,8 @@ _CROP_FIELD_COUNT: int = 4
     type=click.Choice([toggle.value for toggle in Toggle]),
     default=Toggle.AUTO.value,
     show_default=True,
-    help="Whether to use a non-blocking host-to-device transfer (CUDA only). 'auto' enables it on CUDA.",
+    help="Determines whether host memory is pinned to speed up host-to-device transfers on CUDA. 'auto' enables it on "
+    "CUDA. 'on' and 'off' force it. It has no effect off CUDA.",
 )
 @click.option(
     "-p",
@@ -178,9 +206,9 @@ _CROP_FIELD_COUNT: int = 4
     help="Determines whether the aggregate progress bar is shown during analysis.",
 )
 def infer_command(
-    config: Path,
+    config_path: Path,
     videos: tuple[Path, ...],
-    destination: Path | None,
+    output: tuple[Path, ...],
     shuffle: int,
     snapshot_index: int | None,
     detector_snapshot_index: int | None,
@@ -199,20 +227,19 @@ def infer_command(
     compile_model: str,
     pin_memory: str,
     *,
-    project_videos: bool,
     progress: bool,
 ) -> None:
     """Analyzes videos with a trained DeepLabCut model, distributing whole videos across GPU or CPU worker slots.
 
-    CONFIG is the path to the DeepLabCut project's config.yaml, and VIDEOS are the video files to analyze. VIDEOS may be
-    omitted when ``--project-videos`` is passed, which analyzes every existing video registered in the project
-    configuration. Each worker analyzes whole videos pulled from a shared queue, so the work is balanced without
-    splitting any video, and every forward pass runs with the mixed precision and memory format chosen for the detected
-    hardware. Each video's predictions are written as DeepLabCut's native ``.h5`` prediction file, beside the video or
-    into ``--destination``, which is exactly what the evaluation and outlier-extraction steps of the refinement loop
-    read. Pass ``--crop`` to analyze a chosen region rather than the project's configured crop, which lets de-novo
-    videos that are not registered in the project be analyzed. The same command runs on multiple GPUs, one GPU, or a
-    CPU-only machine.
+    ``--config-path`` names the DeepLabCut project's config.yaml whose trained model runs. Provide the videos to analyze
+    with ``--videos`` (given several times for several files), or omit ``--videos`` to analyze every existing video
+    registered in the project configuration. Each worker analyzes whole videos pulled from a shared queue, so the work
+    is balanced without splitting any video, and every forward pass runs with the mixed precision and memory format
+    chosen for the detected hardware. Each video's predictions are written as DeepLabCut's native ``.h5`` prediction
+    file, beside the video or into an ``--output`` directory (one shared directory, or one per video), which is exactly
+    what the evaluation and outlier-extraction steps of the refinement loop read. Pass ``--crop`` to analyze a chosen
+    region rather than the project's configured crop, which lets de-novo videos that are not registered in the project
+    be analyzed. The same command runs on multiple GPUs, one GPU, or a CPU-only machine.
     """
     try:
         gpu_indices = tuple(int(part) for part in gpus.split(",")) if gpus else None
@@ -222,9 +249,8 @@ def infer_command(
         )
         raise click.ClickException(message=message) from error
 
-    resolved_videos = list(videos)
-    if project_videos:
-        resolved_videos.extend(resolve_project_videos(config))
+    whole_project = not videos
+    resolved_videos: list[Path] = list(resolve_project_videos(config_path)) if whole_project else list(videos)
     seen: set[str] = set()
     unique_videos: list[str | Path] = []
     for video in resolved_videos:
@@ -234,18 +260,21 @@ def infer_command(
             unique_videos.append(video)
     if not unique_videos:
         message = (
-            "No videos to analyze. Provide one or more VIDEOS, or pass --project-videos to analyze the videos "
-            "registered in the project configuration."
+            "No videos to analyze. Provide one or more videos with --videos, or register videos in the project's "
+            "config.yaml to analyze the whole project."
         )
         raise click.UsageError(message=message)
-    if project_videos:
+    if whole_project:
         click.echo(message=f"analyzing {len(unique_videos)} videos from the project configuration")
 
-    crop_override = _resolve_crop_override(crop=crop, video_count=len(unique_videos), project_videos=project_videos)
+    crop_override = _resolve_crop_override(crop=crop, video_count=len(unique_videos), whole_project=whole_project)
+    destination_override = _resolve_output_override(
+        output=output, video_count=len(unique_videos), whole_project=whole_project
+    )
 
     # Detect whether the run feeds the network one fixed input size so the cuDNN autotuner's 'auto' default can enable
     # itself only when it pays off, replacing the operator-declared flag this used to require.
-    fixed_input_size = detect_fixed_input_size(config, unique_videos, crop_override)
+    fixed_input_size = detect_fixed_input_size(config_path, unique_videos, crop_override)
 
     try:
         profile = resolve_inference_profile(
@@ -263,9 +292,9 @@ def infer_command(
             fixed_input_size=fixed_input_size,
         )
         summary = run_inference(
-            config=config,
+            config=config_path,
             videos=unique_videos,
-            destination=destination,
+            destination_override=destination_override,
             profile=profile,
             shuffle=shuffle,
             snapshot_index=snapshot_index,
@@ -313,35 +342,35 @@ def _parse_crop_option(value: str) -> tuple[int, int, int, int]:
 
 
 def _resolve_crop_override(
-    crop: tuple[str, ...], video_count: int, *, project_videos: bool
+    crop: tuple[str, ...], video_count: int, *, whole_project: bool
 ) -> list[tuple[int, int, int, int]] | None:
     """Resolves the ``--crop`` option values into one crop rectangle per analyzed video, or None when unset.
 
     A single ``--crop`` is applied uniformly to every video. Several ``--crop`` rectangles are matched to the videos in
-    order and must equal the video count; because registered project videos carry their own configured crops and have
-    no stable position, per-video crops cannot be combined with ``--project-videos``.
+    order and must equal the video count; because the whole-project video order is not user-controlled, per-video crops
+    cannot be combined with the whole-project default and require explicit ``--videos``.
 
     Args:
         crop: The raw ``--crop`` option values, each a ``x1,x2,y1,y2`` string.
         video_count: The number of videos the run will analyze.
-        project_videos: Determines whether the run also analyzes the project's registered videos.
+        whole_project: Determines whether the run defaults to every registered project video.
 
     Returns:
         One ``(x1, x2, y1, y2)`` rectangle per video, or None when no ``--crop`` was given.
 
     Raises:
-        click.UsageError: When a rectangle is malformed, when several rectangles are combined with ``--project-videos``,
-            or when the rectangle count matches neither one nor the video count.
+        click.UsageError: When a rectangle is malformed, when several rectangles are given while defaulting to the whole
+            project, or when the rectangle count matches neither one nor the video count.
     """
     if not crop:
         return None
     rectangles = [_parse_crop_option(value) for value in crop]
     if len(rectangles) == 1:
         return rectangles * video_count
-    if project_videos:
+    if whole_project:
         message = (
-            "Per-video --crop rectangles cannot be combined with --project-videos. Pass a single --crop to apply one "
-            "rectangle to every video, or list the videos explicitly with one --crop each."
+            "Per-video --crop rectangles cannot be used when analyzing the whole project. Pass a single --crop to "
+            "apply one rectangle to every video, or list the videos explicitly with --videos and one --crop each."
         )
         raise click.UsageError(message=message)
     if len(rectangles) != video_count:
@@ -351,3 +380,44 @@ def _resolve_crop_override(
         )
         raise click.UsageError(message=message)
     return rectangles
+
+
+def _resolve_output_override(output: tuple[Path, ...], video_count: int, *, whole_project: bool) -> list[Path] | None:
+    """Resolves the ``--output`` option values into one output directory per analyzed video, or None when unset.
+
+    A single ``--output`` collects every video's predictions in one directory. Several ``--output`` directories are
+    matched to the videos in order and must equal the video count; because the whole-project video order is not
+    user-controlled, per-video directories cannot be combined with the whole-project default and require explicit
+    ``--videos``.
+
+    Args:
+        output: The raw ``--output`` option values, each a directory path.
+        video_count: The number of videos the run will analyze.
+        whole_project: Determines whether the run defaults to every registered project video.
+
+    Returns:
+        One output directory per video, or None when no ``--output`` was given.
+
+    Raises:
+        click.UsageError: When several directories are given while defaulting to the whole project, or when the
+            directory count matches neither one nor the video count.
+    """
+    if not output:
+        return None
+    directories = list(output)
+    if len(directories) == 1:
+        return directories * video_count
+    if whole_project:
+        message = (
+            "Per-video --output directories cannot be used when analyzing the whole project. Pass a single --output "
+            "to collect every video's predictions in one directory, or list the videos explicitly with --videos and "
+            "one --output each."
+        )
+        raise click.UsageError(message=message)
+    if len(directories) != video_count:
+        message = (
+            f"Got {len(directories)} --output directories for {video_count} videos. Pass a single --output to collect "
+            f"every video's predictions in one directory, or exactly one --output per video."
+        )
+        raise click.UsageError(message=message)
+    return directories

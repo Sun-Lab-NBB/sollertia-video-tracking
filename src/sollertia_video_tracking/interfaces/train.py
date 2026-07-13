@@ -155,8 +155,9 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     default=AmpMode.AUTO.value,
     show_default=True,
     help="The mixed-precision compute mode, which trades some numerical precision for speed and lower memory use. "
-    "'auto' enables bfloat16 on Ampere or newer GPUs and stays in float32 elsewhere. 'off' forces float32. 'bf16' and "
-    "'fp16' force those dtypes.",
+    "'auto' enables bfloat16 on Ampere or newer GPUs and stays in float32 elsewhere. 'off' forces float32. 'bf16' "
+    "forces bfloat16 (disabled with a warning on MPS) and 'fp16' forces float16 on CUDA (disabled with a warning "
+    "elsewhere).",
 )
 @click.option(
     "-t",
