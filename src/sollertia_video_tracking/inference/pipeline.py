@@ -48,9 +48,9 @@ class InferenceSummary:
     """The path of the DeepLabCut project configuration file inference ran for."""
     video_count: int
     """The number of videos submitted for inference."""
-    destination: Path | None
-    """The directory the prediction files were written to, or None when each video's predictions were written beside
-    the video itself."""
+    destinations: tuple[Path, ...] | None
+    """The distinct directories the prediction files were written to, or None when each video's predictions were
+    written beside the video itself."""
     device: str
     """The base device type inference ran on (``"cuda"``, ``"cpu"``, or ``"mps"``)."""
     workers: int
@@ -71,7 +71,12 @@ class InferenceSummary:
         ok = len(self.outputs)
         where = f"{self.device} x{self.workers}"
         tail = f", {len(self.failures)} failed" if self.failures else ""
-        written_to = self.destination if self.destination is not None else "each video's directory"
+        if self.destinations is None:
+            written_to: Path | str = "each video's directory"
+        elif len(self.destinations) == 1:
+            written_to = self.destinations[0]
+        else:
+            written_to = f"{len(self.destinations)} per-video directories"
         return f"analyzed {ok}/{self.video_count} videos on {where} in {self.precision} -> h5 in {written_to}{tail}"
 
 
@@ -97,8 +102,6 @@ class _InferenceLaunch:
     """The pose snapshot index to use, or None for the configured default."""
     detector_snapshot_index: int | None
     """The detector snapshot index to use, or None for the configured default."""
-    destination: Path | None
-    """The directory prediction files are written to, or None to write beside each video."""
     profile: InferenceProfile
     """The resolved optimization profile describing the device, precision, and parallelism to use."""
     batch_size: int | None
@@ -178,7 +181,7 @@ def run_inference(
     videos: list[str | Path],
     profile: InferenceProfile,
     *,
-    destination: str | Path | None = None,
+    destination_override: Sequence[str | Path] | None = None,
     shuffle: int = 1,
     snapshot_index: int | None = None,
     detector_snapshot_index: int | None = None,
@@ -193,14 +196,16 @@ def run_inference(
     across slots without splitting any video. On CUDA a slot is a device (``gpu_processes`` of them per device); on CPU
     a slot is a disjoint, thread-bounded block of physical cores. Every worker's forward pass is wrapped with the
     profile's mixed precision and channels-last format, and each video's predictions are written as DeepLabCut's native
-    ``.h5`` prediction file, beside the video or into ``destination``.
+    ``.h5`` prediction file, beside the video or into its chosen output directory.
 
     Args:
         config: The path of the DeepLabCut project configuration file.
         videos: The video files to analyze.
         profile: The resolved optimization profile describing the device, precision, and parallelism to use.
-        destination: The directory prediction files are written to, or None to write each video's predictions beside
-            the video itself, matching DeepLabCut's own default and the location the outlier-extraction step reads.
+        destination_override: The per-video output directories prediction files are written to, parallel to ``videos``,
+            or None to write each video's predictions beside the video itself, matching DeepLabCut's own default and the
+            location the outlier-extraction step reads. Pass one directory per video, so a single chosen directory can
+            collect every video's predictions or each video's predictions can be bundled with its own directory.
         shuffle: The shuffle index whose trained model is used.
         snapshot_index: The pose snapshot index to use, or None for the configured default.
         detector_snapshot_index: The detector snapshot index to use, or None for the configured default.
@@ -216,13 +221,12 @@ def run_inference(
         A summary of what was analyzed and the hardware configuration used.
 
     Raises:
-        ValueError: Raised when no videos are provided, or when ``crop_override`` is provided but its length does not
-            match the number of videos. Raised when the profile selects CUDA but resolves no GPU indices to build
-            worker slots from. Raised when an explicit CPU worker/thread configuration cannot be pinned to disjoint
-            core blocks.
+        ValueError: Raised when no videos are provided, or when ``crop_override`` or ``destination_override`` is
+            provided but its length does not match the number of videos. Raised when the profile selects CUDA but
+            resolves no GPU indices to build worker slots from. Raised when an explicit CPU worker/thread configuration
+            cannot be pinned to disjoint core blocks.
     """
     config = Path(config)
-    destination = Path(destination) if destination is not None else None
     video_paths = [Path(video) for video in videos]
     if not video_paths:
         message = "Unable to run inference. Expected at least one video, but got an empty video list."
@@ -233,8 +237,20 @@ def run_inference(
             f"rectangles for {len(video_paths)} videos."
         )
         raise ValueError(message)
-    if destination is not None:
-        destination.mkdir(parents=True, exist_ok=True)
+    if destination_override is not None and len(destination_override) != len(video_paths):
+        message = (
+            f"Unable to run inference. Expected one output directory per video, but got {len(destination_override)} "
+            f"output directories for {len(video_paths)} videos."
+        )
+        raise ValueError(message)
+    destinations = (
+        tuple(dict.fromkeys(Path(directory) for directory in destination_override))
+        if destination_override is not None
+        else None
+    )
+    if destinations is not None:
+        for directory in destinations:
+            directory.mkdir(parents=True, exist_ok=True)
 
     totals = {index: _probe_frame_count(video) for index, video in enumerate(video_paths)}
     slots = _build_slots(profile=profile, video_count=len(video_paths))
@@ -253,7 +269,8 @@ def run_inference(
             crop: list[int] | None = list(crop_override[index])
         else:
             crop = _resolve_video_cropping(project_config=project_config, video=str(video))
-        video_queue.put((index, str(video), totals[index], crop))
+        video_destination = str(destination_override[index]) if destination_override is not None else None
+        video_queue.put((index, str(video), totals[index], crop, video_destination))
     for _ in slots:
         video_queue.put(None)
 
@@ -272,7 +289,6 @@ def run_inference(
         shuffle=shuffle,
         snapshot_index=snapshot_index,
         detector_snapshot_index=detector_snapshot_index,
-        destination=destination,
         profile=profile,
         batch_size=batch_size,
         detector_batch_size=detector_batch_size,
@@ -302,7 +318,7 @@ def run_inference(
     return InferenceSummary(
         config=config,
         video_count=len(video_paths),
-        destination=destination,
+        destinations=destinations,
         device=profile.device,
         workers=len(slots),
         precision=precision,
@@ -561,17 +577,20 @@ def _run_inference_worker(slot: _Slot, launch: _InferenceLaunch) -> None:
             _analyze_one_video(slot=slot, launch=launch, item=item)
 
 
-def _analyze_one_video(slot: _Slot, launch: _InferenceLaunch, item: tuple[int, str, int, list[int] | None]) -> None:
+def _analyze_one_video(
+    slot: _Slot, launch: _InferenceLaunch, item: tuple[int, str, int, list[int] | None, str | None]
+) -> None:
     """Analyzes a single video from the queue and reports its prediction file and progress.
 
     Args:
         slot: The device and optional CPU-core placement for this worker.
         launch: The bundle of picklable per-run parameters.
-        item: The (video index, video path, frame total, crop rectangle) work item pulled from the queue. The crop
-            rectangle is the ``[x1, x2, y1, y2]`` region to analyze, or None to analyze the full frame.
+        item: The (video index, video path, frame total, crop rectangle, output directory) work item pulled from the
+            queue. The crop rectangle is the ``[x1, x2, y1, y2]`` region to analyze, or None to analyze the full frame.
+            The output directory is where this video's predictions are written, or None to write beside the video.
     """
-    index, video, total, cropping = item
-    output_directory = launch.destination if launch.destination is not None else Path(video).parent
+    index, video, total, cropping, destination = item
+    output_directory = Path(destination) if destination is not None else Path(video).parent
     original_tqdm = dlc_videos.tqdm
     if launch.display_progress:
         dlc_videos.tqdm = make_progress_reporter(launch.progress_queue, index, total)
