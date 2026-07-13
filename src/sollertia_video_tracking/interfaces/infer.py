@@ -238,10 +238,9 @@ def infer_command(
     is balanced without splitting any video. Each forward pass runs with the mixed precision and memory format chosen
     for the detected hardware, except conditional-top-down models, which run at stock precision. Each video's
     predictions are written as DeepLabCut's native ``.h5`` prediction file, beside the video or into an ``--output``
-    directory (one shared directory, or one per video). The outlier-extraction step of the refinement loop reads
-    exactly these files. Pass ``--crop`` to analyze a chosen region rather than the project's configured crop, which
-    lets de-novo videos that are not registered in the project be analyzed. The same command runs on multiple GPUs,
-    one GPU, or a CPU-only machine.
+    directory (one shared directory, or one per video). Pass ``--crop`` to analyze a chosen region rather than the
+    project's configured crop, which lets de-novo videos that are not registered in the project be analyzed. The same
+    command runs on multiple GPUs, one GPU, or a CPU-only machine.
     """
     try:
         gpu_indices = tuple(int(part) for part in gpus.split(",")) if gpus else None
