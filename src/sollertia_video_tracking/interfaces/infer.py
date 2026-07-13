@@ -103,8 +103,9 @@ _CROP_FIELD_COUNT: int = 4
     type=click.Choice([device.value for device in DeviceType]),
     default=DeviceType.AUTO.value,
     show_default=True,
-    help="The base device to run on. 'auto' uses every visible CUDA GPU when present and otherwise the CPU. 'cpu' and "
-    "'mps' (Apple Metal) force those devices. Choose specific GPUs with --gpus.",
+    help="The base device to run on. 'auto' uses every visible CUDA GPU when present and otherwise the CPU. 'cuda' "
+    "targets every visible GPU but warns before falling back to the CPU when none is present. 'cpu' and 'mps' (Apple "
+    "Metal) force those devices. Choose specific GPUs with --gpus.",
 )
 @click.option(
     "-g",
@@ -121,7 +122,7 @@ _CROP_FIELD_COUNT: int = 4
     default=-1,
     show_default=True,
     help="The number of inference worker processes per GPU, each analyzing one video at a time. Raise it to "
-    "oversubscribe a GPU and fill decode gaps. Most gpus fully saturate with 1 or 2 workers. Set to -1 for the "
+    "oversubscribe a GPU and fill decode gaps. Most GPUs fully saturate with 1 or 2 workers. Set to -1 for the "
     "default of one process (one video) per GPU.",
 )
 @click.option(
@@ -168,8 +169,8 @@ _CROP_FIELD_COUNT: int = 4
     default=Toggle.AUTO.value,
     show_default=True,
     help="The cuDNN convolution autotuner on CUDA. 'auto' enables it only when the run is detected to feed one fixed "
-    "input size (a shared project crop, or one shared video resolution), where it speeds up convolutions rather than "
-    "re-tuning per size. 'on' and 'off' force it.",
+    "input size (a shared --crop rectangle, a shared project crop, or one shared video resolution), where it speeds "
+    "up convolutions rather than re-tuning per size. 'on' and 'off' force it.",
 )
 @click.option(
     "-cl",
@@ -234,12 +235,13 @@ def infer_command(
     ``--config-path`` names the DeepLabCut project's config.yaml whose trained model runs. Provide the videos to analyze
     with ``--videos`` (given several times for several files), or omit ``--videos`` to analyze every existing video
     registered in the project configuration. Each worker analyzes whole videos pulled from a shared queue, so the work
-    is balanced without splitting any video, and every forward pass runs with the mixed precision and memory format
-    chosen for the detected hardware. Each video's predictions are written as DeepLabCut's native ``.h5`` prediction
-    file, beside the video or into an ``--output`` directory (one shared directory, or one per video), which is exactly
-    what the evaluation and outlier-extraction steps of the refinement loop read. Pass ``--crop`` to analyze a chosen
-    region rather than the project's configured crop, which lets de-novo videos that are not registered in the project
-    be analyzed. The same command runs on multiple GPUs, one GPU, or a CPU-only machine.
+    is balanced without splitting any video. Each forward pass runs with the mixed precision and memory format chosen
+    for the detected hardware, except conditional-top-down models, which run at stock precision. Each video's
+    predictions are written as DeepLabCut's native ``.h5`` prediction file, beside the video or into an ``--output``
+    directory (one shared directory, or one per video). The outlier-extraction step of the refinement loop reads
+    exactly these files. Pass ``--crop`` to analyze a chosen region rather than the project's configured crop, which
+    lets de-novo videos that are not registered in the project be analyzed. The same command runs on multiple GPUs,
+    one GPU, or a CPU-only machine.
     """
     try:
         gpu_indices = tuple(int(part) for part in gpus.split(",")) if gpus else None
@@ -260,8 +262,8 @@ def infer_command(
             unique_videos.append(video)
     if not unique_videos:
         message = (
-            "No videos to analyze. Provide one or more videos with --videos, or register videos in the project's "
-            "config.yaml to analyze the whole project."
+            "Unable to run inference without videos. Provide one or more videos with --videos, or register videos "
+            "in the project's config.yaml to analyze the whole project."
         )
         raise click.UsageError(message=message)
     if whole_project:
@@ -274,7 +276,7 @@ def infer_command(
 
     # Detect whether the run feeds the network one fixed input size so the cuDNN autotuner's 'auto' default can enable
     # itself only when it pays off, replacing the operator-declared flag this used to require.
-    fixed_input_size = detect_fixed_input_size(config_path, unique_videos, crop_override)
+    fixed_input_size = detect_fixed_input_size(config=config_path, videos=unique_videos, crop_override=crop_override)
 
     try:
         profile = resolve_inference_profile(
@@ -305,7 +307,7 @@ def infer_command(
             display_progress=progress,
         )
     except (ValueError, FileNotFoundError) as error:
-        raise click.ClickException(str(error)) from error
+        raise click.ClickException(message=str(error)) from error
 
     click.echo(message=summary.describe())
 
@@ -369,14 +371,14 @@ def _resolve_crop_override(
         return rectangles * video_count
     if whole_project:
         message = (
-            "Per-video --crop rectangles cannot be used when analyzing the whole project. Pass a single --crop to "
+            "Unable to apply per-video --crop rectangles when analyzing the whole project. Pass a single --crop to "
             "apply one rectangle to every video, or list the videos explicitly with --videos and one --crop each."
         )
         raise click.UsageError(message=message)
     if len(rectangles) != video_count:
         message = (
-            f"Got {len(rectangles)} --crop rectangles for {video_count} videos. Pass a single --crop to apply it to "
-            f"every video, or exactly one --crop per video."
+            f"Unable to match the --crop rectangles to the videos. Expected a single --crop or exactly one per video, "
+            f"but got {len(rectangles)} --crop rectangles for {video_count} videos."
         )
         raise click.UsageError(message=message)
     return rectangles
@@ -409,15 +411,15 @@ def _resolve_output_override(output: tuple[Path, ...], video_count: int, *, whol
         return directories * video_count
     if whole_project:
         message = (
-            "Per-video --output directories cannot be used when analyzing the whole project. Pass a single --output "
+            "Unable to apply per-video --output directories when analyzing the whole project. Pass a single --output "
             "to collect every video's predictions in one directory, or list the videos explicitly with --videos and "
             "one --output each."
         )
         raise click.UsageError(message=message)
     if len(directories) != video_count:
         message = (
-            f"Got {len(directories)} --output directories for {video_count} videos. Pass a single --output to collect "
-            f"every video's predictions in one directory, or exactly one --output per video."
+            f"Unable to match the --output directories to the videos. Expected a single --output or exactly one per "
+            f"video, but got {len(directories)} --output directories for {video_count} videos."
         )
         raise click.UsageError(message=message)
     return directories
