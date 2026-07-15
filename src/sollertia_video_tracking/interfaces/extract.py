@@ -188,7 +188,7 @@ _pass_shared_parameters = click.make_pass_decorator(_SharedExtractionParameters)
 )
 @click.pass_context
 def extract_group(
-    ctx: click.Context,
+    context: click.Context,
     config_path: Path | None,
     workers: int,
     cores: int,
@@ -213,9 +213,9 @@ def extract_group(
     subcommand name.
     """
     if overwrite and reset:
-        message = "The --overwrite and --reset options are mutually exclusive."
+        message = "Unable to run 'slvt extract'. The --overwrite and --reset options are mutually exclusive."
         raise click.UsageError(message=message)
-    ctx.obj = _SharedExtractionParameters(
+    context.obj = _SharedExtractionParameters(
         config_path=config_path,
         worker_count=workers,
         cores_per_worker=cores,
@@ -290,7 +290,10 @@ def frames_command(
     keep already-labeled and outlier frames.
     """
     if exclusive and not shared.videos:
-        message = "The --exclusive flag requires at least one --videos file to restrict the run to."
+        message = (
+            "Unable to run 'slvt extract frames' with --exclusive. Provide at least one --videos file to restrict "
+            "the run to."
+        )
         raise click.UsageError(message=message)
     try:
         summary = extract_frames_kmeans(

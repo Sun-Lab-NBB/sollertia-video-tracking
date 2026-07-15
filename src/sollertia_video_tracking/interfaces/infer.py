@@ -273,8 +273,8 @@ def infer_command(
         output=output, video_count=len(unique_videos), whole_project=whole_project
     )
 
-    # Detect whether the run feeds the network one fixed input size so the cuDNN autotuner's 'auto' default can enable
-    # itself only when it pays off, replacing the operator-declared flag this used to require.
+    # Detects whether the run feeds the network one fixed input size so the cuDNN autotuner's 'auto' default can enable
+    # itself only when it pays off.
     fixed_input_size = detect_fixed_input_size(config=config_path, videos=unique_videos, crop_override=crop_override)
 
     try:

@@ -286,7 +286,7 @@ def train_command(
         raise click.ClickException(message=message) from error
 
     # Detects whether the shuffle's training transform feeds the network one fixed input size so the cuDNN autotuner's
-    # 'auto' default can enable itself only when it pays off, replacing the operator-declared flag this used to require.
+    # 'auto' default can enable itself only when it pays off.
     fixed_input_size = detect_fixed_input_size(config=config_path, shuffle=shuffle)
 
     try:
