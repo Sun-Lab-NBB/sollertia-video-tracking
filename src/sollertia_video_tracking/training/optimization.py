@@ -33,6 +33,7 @@ class MultiGpuStrategy(StrEnum):
     SINGLE = "single"
     """Trains on a single device. This is the resolved outcome of selecting one GPU, not a user-selectable request."""
 
+
 _MIN_MULTI_GPU_COUNT: int = 2
 """The minimum number of selected GPUs required to run any multi-GPU strategy rather than a single device."""
 
