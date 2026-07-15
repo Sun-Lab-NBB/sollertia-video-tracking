@@ -1,4 +1,4 @@
-"""Tests for the multi-device DeepLabCut inference pipeline orchestration.
+"""Contains tests for the multi-device DeepLabCut inference pipeline orchestration.
 
 These tests drive the whole pipeline module without a GPU, network, or real DeepLabCut runtime. Heavy handoffs
 (``analyze_videos``, the multiprocessing manager/context, the aggregate progress bar, OpenCV decode) are replaced with
@@ -164,12 +164,9 @@ def _make_launch(**overrides):
     return pipeline._InferenceLaunch(**defaults)
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # InferenceSummary.describe
-# --------------------------------------------------------------------------------------------------------------------
-
-
 def test_summary_describe_no_destinations_no_failures():
+    """Verifies that describe reports each video's own directory and omits failures when the run had none."""
     summary = pipeline.InferenceSummary(
         config=Path("c"),
         video_count=2,
@@ -188,6 +185,7 @@ def test_summary_describe_no_destinations_no_failures():
 
 
 def test_summary_describe_single_destination_with_failures():
+    """Verifies that describe names the single destination directory and reports the failure count."""
     summary = pipeline.InferenceSummary(
         config=Path("c"),
         video_count=3,
@@ -205,6 +203,7 @@ def test_summary_describe_single_destination_with_failures():
 
 
 def test_summary_describe_multiple_destinations():
+    """Verifies that describe summarizes multiple destinations as a per-video-directory count."""
     summary = pipeline.InferenceSummary(
         config=Path("c"),
         video_count=2,
@@ -218,12 +217,9 @@ def test_summary_describe_multiple_destinations():
     assert "2 per-video directories" in summary.describe()
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # resolve_project_videos
-# --------------------------------------------------------------------------------------------------------------------
-
-
 def test_resolve_project_videos_filters_existing(monkeypatch, tmp_path):
+    """Verifies that resolve_project_videos keeps only the registered videos that still exist on disk."""
     existing = tmp_path / "exists.mp4"
     existing.write_bytes(b"")
     missing = tmp_path / "gone.mp4"
@@ -232,36 +228,41 @@ def test_resolve_project_videos_filters_existing(monkeypatch, tmp_path):
 
 
 def test_resolve_project_videos_no_video_sets(monkeypatch):
+    """Verifies that resolve_project_videos returns an empty list when the configuration registers no video sets."""
     monkeypatch.setattr(pipeline, "read_config", lambda _c: {})
     assert pipeline.resolve_project_videos("cfg") == []
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # detect_fixed_input_size
-# --------------------------------------------------------------------------------------------------------------------
-
-
 def test_detect_fixed_empty_videos():
+    """Verifies that detect_fixed_input_size reports not-fixed for an empty video list."""
     assert pipeline.detect_fixed_input_size(config="x", videos=[]) is False
 
 
 def test_detect_fixed_crop_override_uniform():
+    """Verifies that detect_fixed_input_size reports fixed when the per-video crop overrides share one size."""
     # Both rectangles reduce to a 10x20 region, so the run feeds one fixed input size.
-    assert pipeline.detect_fixed_input_size("x", ["a", "b"], crop_override=[(0, 10, 0, 20), (5, 15, 5, 25)]) is True
+    assert (
+        pipeline.detect_fixed_input_size(config="x", videos=["a", "b"], crop_override=[(0, 10, 0, 20), (5, 15, 5, 25)])
+        is True
+    )
 
 
 def test_detect_fixed_crop_override_mixed():
+    """Verifies that detect_fixed_input_size reports not-fixed when the per-video crop overrides differ in size."""
     assert pipeline.detect_fixed_input_size("x", ["a", "b"], crop_override=[(0, 10, 0, 20), (0, 30, 0, 20)]) is False
 
 
 def test_detect_fixed_from_config_uniform(monkeypatch, tmp_path):
+    """Verifies that detect_fixed_input_size reports fixed when all videos share one native resolution."""
     monkeypatch.setattr(pipeline, "read_config", lambda _c: {"cropping": False})
     _install_capture(monkeypatch, lambda _p: _FakeCapture(width=100, height=80))
     videos = [tmp_path / "a.mp4", tmp_path / "b.mp4"]
-    assert pipeline.detect_fixed_input_size(str(tmp_path / "cfg.yaml"), videos) is True
+    assert pipeline.detect_fixed_input_size(config=str(tmp_path / "cfg.yaml"), videos=videos) is True
 
 
 def test_detect_fixed_from_config_mixed(monkeypatch, tmp_path):
+    """Verifies that detect_fixed_input_size reports not-fixed when the videos differ in native resolution."""
     monkeypatch.setattr(pipeline, "read_config", lambda _c: {"cropping": False})
     widths = {str(tmp_path / "a.mp4"): 100, str(tmp_path / "b.mp4"): 200}
     _install_capture(monkeypatch, lambda p: _FakeCapture(width=widths[p], height=80))
@@ -270,6 +271,7 @@ def test_detect_fixed_from_config_mixed(monkeypatch, tmp_path):
 
 
 def test_detect_fixed_from_config_unknown_size(monkeypatch, tmp_path):
+    """Verifies that detect_fixed_input_size reports not-fixed when a video's dimensions cannot be resolved."""
     monkeypatch.setattr(pipeline, "read_config", lambda _c: {"cropping": False})
     opened = {str(tmp_path / "a.mp4"): True, str(tmp_path / "b.mp4"): False}
     _install_capture(monkeypatch, lambda p: _FakeCapture(opened=opened[p], width=100, height=80))
@@ -279,6 +281,8 @@ def test_detect_fixed_from_config_unknown_size(monkeypatch, tmp_path):
 
 
 def test_detect_fixed_read_config_raises(monkeypatch):
+    """Verifies that detect_fixed_input_size reports not-fixed when reading the configuration raises."""
+
     def boom(_config):
         message = "nope"
         raise RuntimeError(message)
@@ -287,85 +291,92 @@ def test_detect_fixed_read_config_raises(monkeypatch):
     assert pipeline.detect_fixed_input_size("cfg", ["a"]) is False
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _resolve_input_size / _probe_frame_size / _probe_frame_count
-# --------------------------------------------------------------------------------------------------------------------
-
-
 def test_resolve_input_size_cropping_with_crop(tmp_path):
+    """Verifies that _resolve_input_size returns the crop rectangle's size when cropping is configured."""
     video = tmp_path / "v.mp4"
     cfg = {"cropping": True, "video_sets": {str(video): {"crop": "0,10,0,20"}}}
     assert pipeline._resolve_input_size(project_config=cfg, video=video) == (10, 20)
 
 
 def test_resolve_input_size_cropping_unresolved(tmp_path):
+    """Verifies that _resolve_input_size returns None when the configured crop cannot be resolved."""
     cfg = {"cropping": True, "video_sets": {}}
     assert pipeline._resolve_input_size(project_config=cfg, video=tmp_path / "v.mp4") is None
 
 
 def test_resolve_input_size_no_cropping(monkeypatch, tmp_path):
+    """Verifies that _resolve_input_size returns the video's native resolution when cropping is disabled."""
     _install_capture(monkeypatch, lambda _p: _FakeCapture(width=320, height=240))
     assert pipeline._resolve_input_size(project_config={"cropping": False}, video=tmp_path / "v.mp4") == (320, 240)
 
 
 def test_probe_frame_size_ok(monkeypatch, tmp_path):
+    """Verifies that _probe_frame_size returns the frame dimensions reported by the container header."""
     _install_capture(monkeypatch, lambda _p: _FakeCapture(width=640, height=480))
     assert pipeline._probe_frame_size(tmp_path / "v.mp4") == (640, 480)
 
 
 def test_probe_frame_size_not_opened(monkeypatch, tmp_path):
+    """Verifies that _probe_frame_size returns None when the video cannot be opened."""
     _install_capture(monkeypatch, lambda _p: _FakeCapture(opened=False))
     assert pipeline._probe_frame_size(tmp_path / "v.mp4") is None
 
 
 def test_probe_frame_size_nonpositive_dimension(monkeypatch, tmp_path):
+    """Verifies that _probe_frame_size returns None when the container reports a non-positive dimension."""
     _install_capture(monkeypatch, lambda _p: _FakeCapture(width=0, height=480))
     assert pipeline._probe_frame_size(tmp_path / "v.mp4") is None
 
 
 def test_probe_frame_count_ok(monkeypatch, tmp_path):
+    """Verifies that _probe_frame_count returns the frame count reported by the container header."""
     _install_capture(monkeypatch, lambda _p: _FakeCapture(frames=7))
     assert pipeline._probe_frame_count(tmp_path / "v.mp4") == 7
 
 
 def test_probe_frame_count_not_opened_clamped(monkeypatch, tmp_path):
+    """Verifies that _probe_frame_count clamps a closed capture's frame count to at least one."""
     _install_capture(monkeypatch, lambda _p: _FakeCapture(opened=False, frames=99))
     # A closed capture reports zero frames, clamped to at least one for the progress bar.
     assert pipeline._probe_frame_count(tmp_path / "v.mp4") == 1
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _parse_crop / _resolve_video_cropping
-# --------------------------------------------------------------------------------------------------------------------
-
-
 def test_parse_crop_none():
+    """Verifies that _parse_crop returns None for a missing crop specification."""
     assert pipeline._parse_crop(None) is None
 
 
 def test_parse_crop_valid():
+    """Verifies that _parse_crop parses a four-integer crop specification into a list of integers."""
     assert pipeline._parse_crop("1, 2, 3, 4") == [1, 2, 3, 4]
 
 
 def test_parse_crop_wrong_field_count():
+    """Verifies that _parse_crop returns None when the crop specification has the wrong field count."""
     assert pipeline._parse_crop("1,2,3") is None
 
 
 def test_parse_crop_non_integer():
+    """Verifies that _parse_crop returns None when the crop specification contains non-integer fields."""
     assert pipeline._parse_crop("a,b,c,d") is None
 
 
 def test_resolve_video_cropping_disabled():
+    """Verifies that _resolve_video_cropping returns None when the project is not configured to crop."""
     assert pipeline._resolve_video_cropping(project_config={"cropping": False}, video="/x.mp4") is None
 
 
 def test_resolve_video_cropping_registered_crop(tmp_path):
+    """Verifies that _resolve_video_cropping returns a registered video's own crop rectangle."""
     video = tmp_path / "v.mp4"
     cfg = {"cropping": True, "video_sets": {str(video): {"crop": "1,2,3,4"}}}
     assert pipeline._resolve_video_cropping(project_config=cfg, video=str(video)) == [1, 2, 3, 4]
 
 
 def test_resolve_video_cropping_registered_no_crop_falls_back_to_corners(tmp_path):
+    """Verifies that _resolve_video_cropping uses the project-wide rectangle for a registered video with no crop."""
     video = tmp_path / "v.mp4"
     # The video is registered but carries no parseable crop, so the project-wide rectangle is used.
     cfg = {"cropping": True, "video_sets": {str(video): {"other": 1}}, "x1": 0, "x2": 100, "y1": 5, "y2": 80}
@@ -373,6 +384,7 @@ def test_resolve_video_cropping_registered_no_crop_falls_back_to_corners(tmp_pat
 
 
 def test_resolve_video_cropping_non_dict_metadata_skipped(tmp_path):
+    """Verifies that _resolve_video_cropping skips a non-dict video_sets entry and uses the project-wide corners."""
     video = tmp_path / "v.mp4"
     # A non-dict video_sets entry is skipped, and the project-wide corners are used instead.
     cfg = {"cropping": True, "video_sets": {str(video): ["not", "a", "dict"]}, "x1": 1, "x2": 2, "y1": 3, "y2": 4}
@@ -380,29 +392,25 @@ def test_resolve_video_cropping_non_dict_metadata_skipped(tmp_path):
 
 
 def test_resolve_video_cropping_missing_corner_returns_none():
+    """Verifies that _resolve_video_cropping returns None when a project-wide corner is missing."""
     cfg = {"cropping": True, "video_sets": {}, "x1": 0, "x2": 100, "y1": 0}  # y2 absent
     assert pipeline._resolve_video_cropping(project_config=cfg, video="/x.mp4") is None
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _describe_precision
-# --------------------------------------------------------------------------------------------------------------------
-
-
 def test_describe_precision_fp32():
+    """Verifies that _describe_precision labels a profile with no autocast dtype as fp32."""
     assert pipeline._describe_precision(make_profile(amp_dtype=None)) == "fp32"
 
 
 def test_describe_precision_bfloat16():
+    """Verifies that _describe_precision labels a bfloat16 autocast profile as bfloat16."""
     assert pipeline._describe_precision(make_profile(amp_dtype=torch.bfloat16)) == "bfloat16"
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _build_slots / _usable_cpu_cores
-# --------------------------------------------------------------------------------------------------------------------
-
-
 def test_build_slots_cuda_round_robin():
+    """Verifies that _build_slots round-robins the CUDA worker slots across the available GPUs."""
     profile = make_profile(device="cuda", gpus=(0, 1), gpu_processes=2)
     slots = pipeline._build_slots(profile=profile, video_count=10)
     assert [slot.device for slot in slots] == ["cuda:0", "cuda:1", "cuda:0", "cuda:1"]
@@ -410,6 +418,7 @@ def test_build_slots_cuda_round_robin():
 
 
 def test_build_slots_cuda_truncated_to_video_count():
+    """Verifies that _build_slots truncates the CUDA slot list to the video count."""
     profile = make_profile(device="cuda", gpus=(0, 1), gpu_processes=2)
     slots = pipeline._build_slots(profile=profile, video_count=1)
     assert len(slots) == 1
@@ -417,12 +426,14 @@ def test_build_slots_cuda_truncated_to_video_count():
 
 
 def test_build_slots_cuda_no_gpus_raises():
+    """Verifies that _build_slots raises when CUDA is selected but no GPU indices are resolved."""
     profile = make_profile(device="cuda", gpus=(), gpu_processes=1)
     with pytest.raises(ValueError, match="no GPU indices"):
         pipeline._build_slots(profile=profile, video_count=3)
 
 
 def test_build_slots_mps_single_slot():
+    """Verifies that _build_slots builds a single unpinned slot for the MPS device."""
     profile = make_profile(device="mps")
     slots = pipeline._build_slots(profile=profile, video_count=5)
     assert len(slots) == 1
@@ -431,6 +442,7 @@ def test_build_slots_mps_single_slot():
 
 
 def test_build_slots_cpu(monkeypatch):
+    """Verifies that _build_slots pins the sole CPU worker to its planned two-core block."""
     # Pin the topology so a single worker with a definite two-core block is planned deterministically. With 16 cores
     # (logical and physical), one worker, and two threads/worker, _usable_cpu_cores is 2, so 14 cores are reserved and
     # exactly two usable cores (0 and 1) are pinned to the sole worker.
@@ -444,23 +456,22 @@ def test_build_slots_cpu(monkeypatch):
 
 
 def test_usable_cpu_cores_with_threads(monkeypatch):
+    """Verifies that _usable_cpu_cores bounds the worker-thread product by the physical core count."""
     monkeypatch.setattr(pipeline.psutil, "cpu_count", lambda **_kwargs: 16)
     # min(16 physical, 2 workers * 4 threads) = 8.
     assert pipeline._usable_cpu_cores(make_profile(cpu_workers=2, cpu_threads_per_worker=4)) == 8
 
 
 def test_usable_cpu_cores_threads_none_and_zero_workers(monkeypatch):
+    """Verifies that _usable_cpu_cores clamps None threads and zero workers to a product of one."""
     monkeypatch.setattr(pipeline.psutil, "cpu_count", lambda **_kwargs: 16)
     # None threads -> 1, zero workers -> max(1, 0) = 1, so the product is 1.
     assert pipeline._usable_cpu_cores(make_profile(cpu_workers=0, cpu_threads_per_worker=None)) == 1
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _collect_results
-# --------------------------------------------------------------------------------------------------------------------
-
-
 def test_collect_results_success_and_failures():
+    """Verifies that _collect_results separates successful outputs from explicit and empty-file failures."""
     results_queue = _FakeQueue()
     results_queue.put((0, "/out/a.h5", None))  # success
     results_queue.put((1, None, "RuntimeError: boom"))  # explicit error
@@ -474,6 +485,7 @@ def test_collect_results_success_and_failures():
 
 
 def test_collect_results_worker_died_missing_result():
+    """Verifies that _collect_results reports a never-arriving result as a worker-exited failure."""
     results_queue = _FakeQueue()
     results_queue.put((0, "/out/a.h5", None))
     video_paths = [Path("a.mp4"), Path("b.mp4")]
@@ -483,35 +495,31 @@ def test_collect_results_worker_died_missing_result():
     assert failures == [("b.mp4", "the worker process exited before reporting a result")]
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _suppress_stdout
-# --------------------------------------------------------------------------------------------------------------------
-
-
 def test_suppress_stdout_inactive_passes_through(capsys):
+    """Verifies that _suppress_stdout passes standard output through when inactive."""
     with pipeline._suppress_stdout(active=False):
         print("visible")
     assert "visible" in capsys.readouterr().out
 
 
 def test_suppress_stdout_active_redirects(capsys):
+    """Verifies that _suppress_stdout redirects standard output away from the console when active."""
     with pipeline._suppress_stdout(active=True):
         print("hidden")
     assert "hidden" not in capsys.readouterr().out
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _resolve_output
-# --------------------------------------------------------------------------------------------------------------------
-
-
 def test_resolve_output_exact(tmp_path):
+    """Verifies that _resolve_output returns the exact per-frame prediction file when it exists."""
     (tmp_path / "clipScorer.h5").write_bytes(b"")
     out = pipeline._resolve_output(video=str(tmp_path / "clip.mp4"), scorer="Scorer", destination=tmp_path)
     assert out == tmp_path / "clipScorer.h5"
 
 
 def test_resolve_output_glob_suffixed(tmp_path):
+    """Verifies that _resolve_output picks the last tracker-suffixed prediction file when no plain file exists."""
     # No plain per-frame file exists; a tracker-suffixed file is picked as the last lexicographic match.
     (tmp_path / "clipScorer_bx.h5").write_bytes(b"")
     (tmp_path / "clipScorer_el.h5").write_bytes(b"")
@@ -520,23 +528,21 @@ def test_resolve_output_glob_suffixed(tmp_path):
 
 
 def test_resolve_output_none(tmp_path):
+    """Verifies that _resolve_output returns None when no prediction file was written."""
     out = pipeline._resolve_output(video=str(tmp_path / "clip.mp4"), scorer="Scorer", destination=tmp_path)
     assert out is None
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _run_inference_worker
-# --------------------------------------------------------------------------------------------------------------------
-
-
 def test_run_inference_worker_drains_queue_and_pins_cores(monkeypatch):
+    """Verifies that _run_inference_worker pins its cores and drains every work item from the queue."""
     affinity_calls = []
 
-    class _FakeProc:
+    class _FakePsutilProcess:
         def cpu_affinity(self, cores):
             affinity_calls.append(cores)
 
-    monkeypatch.setattr(pipeline.psutil, "Process", _FakeProc)
+    monkeypatch.setattr(pipeline.psutil, "Process", _FakePsutilProcess)
     applied = []
     monkeypatch.setattr(pipeline, "apply_runtime_optimizations", applied.append)
     monkeypatch.setattr(pipeline, "patch_dlc_runner_builders", lambda _profile: contextlib.nullcontext())
@@ -558,13 +564,14 @@ def test_run_inference_worker_drains_queue_and_pins_cores(monkeypatch):
 
 
 def test_run_inference_worker_no_cores_skips_affinity(monkeypatch):
+    """Verifies that _run_inference_worker skips CPU affinity when its slot pins no cores."""
     affinity_calls = []
 
-    class _FakeProc:
+    class _FakePsutilProcess:
         def cpu_affinity(self, cores):
             affinity_calls.append(cores)
 
-    monkeypatch.setattr(pipeline.psutil, "Process", _FakeProc)
+    monkeypatch.setattr(pipeline.psutil, "Process", _FakePsutilProcess)
     monkeypatch.setattr(pipeline, "apply_runtime_optimizations", lambda _profile: None)
     monkeypatch.setattr(pipeline, "patch_dlc_runner_builders", lambda _profile: contextlib.nullcontext())
     monkeypatch.setattr(pipeline, "_analyze_one_video", lambda **_kwargs: None)
@@ -580,12 +587,14 @@ def test_run_inference_worker_no_cores_skips_affinity(monkeypatch):
 
 
 def test_run_inference_worker_tolerates_affinity_failure(monkeypatch):
-    class _FakeProc:
+    """Verifies that _run_inference_worker tolerates a failing cpu_affinity and still drains its work."""
+
+    class _FakePsutilProcess:
         def cpu_affinity(self, _cores):
             message = "affinity unavailable"
             raise OSError(message)
 
-    monkeypatch.setattr(pipeline.psutil, "Process", _FakeProc)
+    monkeypatch.setattr(pipeline.psutil, "Process", _FakePsutilProcess)
     applied = []
     monkeypatch.setattr(pipeline, "apply_runtime_optimizations", applied.append)
     monkeypatch.setattr(pipeline, "patch_dlc_runner_builders", lambda _profile: contextlib.nullcontext())
@@ -606,17 +615,14 @@ def test_run_inference_worker_tolerates_affinity_failure(monkeypatch):
     assert analyzed == [(0, "/v0.mp4", 10, None, None)]
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _analyze_one_video
-# --------------------------------------------------------------------------------------------------------------------
-
-
 def test_analyze_one_video_success_with_progress(monkeypatch, tmp_path):
-    dest = tmp_path / "out"
-    dest.mkdir()
+    """Verifies that _analyze_one_video reports the resolved output and publishes a completion marker on success."""
+    destination = tmp_path / "out"
+    destination.mkdir()
     scorer = "DLCscorer"
     video = tmp_path / "clip.mp4"
-    (dest / f"clip{scorer}.h5").write_bytes(b"")
+    (destination / f"clip{scorer}.h5").write_bytes(b"")
 
     captured = {}
 
@@ -636,26 +642,27 @@ def test_analyze_one_video_success_with_progress(monkeypatch, tmp_path):
         config=tmp_path / "config.yaml",
     )
     slot = pipeline._Slot(device="cpu", cores=None)
-    item = (3, str(video), 100, [0, 10, 0, 20], str(dest))
+    item = (3, str(video), 100, [0, 10, 0, 20], str(destination))
 
     pipeline._analyze_one_video(slot=slot, launch=launch, item=item)
 
     index, path, error = results_queue._items.popleft()
     assert index == 3
     assert error is None
-    assert Path(path) == dest / f"clip{scorer}.h5"
+    assert Path(path) == destination / f"clip{scorer}.h5"
     # The completion marker is published to the progress queue.
     assert progress_queue._items[-1] == ("done", 3)
     # analyze_videos received the resolved crop and the always-overwrite/acceleration-disabled settings.
     assert captured["cropping"] == [0, 10, 0, 20]
     assert captured["overwrite"] is True
-    assert captured["destfolder"] == str(dest)
+    assert captured["destfolder"] == str(destination)
     assert captured["inference_cfg"] == pipeline._STOCK_ACCELERATION_DISABLED
     assert captured["shuffle"] == 1
     assert captured["device"] == "cpu"
 
 
 def test_analyze_one_video_failure_without_progress(monkeypatch, tmp_path):
+    """Verifies that _analyze_one_video reports an analysis failure as an error and emits no completion marker."""
     video = tmp_path / "sub" / "clip.mp4"
     video.parent.mkdir(parents=True)
 
@@ -684,15 +691,16 @@ def test_analyze_one_video_failure_without_progress(monkeypatch, tmp_path):
 
 
 def test_analyze_one_video_success_without_output_file(monkeypatch, tmp_path):
-    dest = tmp_path / "out"
-    dest.mkdir()
+    """Verifies that _analyze_one_video reports a None output when analysis produces no prediction file."""
+    destination = tmp_path / "out"
+    destination.mkdir()
     monkeypatch.setattr(pipeline.dlc_videos, "analyze_videos", lambda **kwargs: "Scorer")
     monkeypatch.setattr(pipeline.dlc_videos, "tqdm", object(), raising=False)
 
     results_queue = _FakeQueue()
     launch = _make_launch(display_progress=False, results_queue=results_queue)
     slot = pipeline._Slot(device="cpu", cores=None)
-    item = (2, str(tmp_path / "v.mp4"), 10, None, str(dest))
+    item = (2, str(tmp_path / "v.mp4"), 10, None, str(destination))
 
     pipeline._analyze_one_video(slot=slot, launch=launch, item=item)
 
@@ -702,41 +710,37 @@ def test_analyze_one_video_success_without_output_file(monkeypatch, tmp_path):
     assert error is None
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # run_inference input validation
-# --------------------------------------------------------------------------------------------------------------------
-
-
 def test_run_inference_empty_videos_raises():
+    """Verifies that run_inference raises when given an empty video list."""
     with pytest.raises(ValueError, match="at least one video"):
         pipeline.run_inference(config="cfg", videos=[], profile=make_profile())
 
 
 def test_run_inference_crop_override_length_mismatch_raises():
+    """Verifies that run_inference raises when the crop override length does not match the video count."""
     with pytest.raises(ValueError, match="one crop rectangle per video"):
         pipeline.run_inference(config="cfg", videos=["a", "b"], profile=make_profile(), crop_override=[(0, 10, 0, 20)])
 
 
 def test_run_inference_destination_override_length_mismatch_raises():
+    """Verifies that run_inference raises when the destination override length does not match the video count."""
     with pytest.raises(ValueError, match="one output directory per video"):
         pipeline.run_inference(config="cfg", videos=["a", "b"], profile=make_profile(), destination_override=["d1"])
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # run_inference orchestration
-# --------------------------------------------------------------------------------------------------------------------
-
-
 def test_run_inference_full_success_with_overrides(monkeypatch, tmp_path):
+    """Verifies that run_inference forwards the crop and destination overrides and summarizes a fully successful run."""
     videos = [tmp_path / "a.mp4", tmp_path / "b.mp4"]
-    dest_a = tmp_path / "outa"
-    dest_b = tmp_path / "outb"
+    destination_a = tmp_path / "outa"
+    destination_b = tmp_path / "outb"
     monkeypatch.setattr(pipeline, "read_config", lambda _c: {"cropping": False})
     _install_capture(monkeypatch, lambda _p: _FakeCapture(frames=30))
     monkeypatch.setattr(
         pipeline,
         "_build_slots",
-        lambda **_kwargs: [pipeline._Slot("cuda:0", None), pipeline._Slot("cuda:1", None)],
+        lambda **_kwargs: [pipeline._Slot(device="cuda:0", cores=None), pipeline._Slot(device="cuda:1", cores=None)],
     )
 
     bars = []
@@ -774,7 +778,7 @@ def test_run_inference_full_success_with_overrides(monkeypatch, tmp_path):
         config=str(tmp_path / "cfg.yaml"),
         videos=videos,
         profile=profile,
-        destination_override=[dest_a, dest_b],
+        destination_override=[destination_a, destination_b],
         crop_override=[(0, 10, 0, 20), (0, 10, 0, 20)],
         display_progress=True,
     )
@@ -783,11 +787,11 @@ def test_run_inference_full_success_with_overrides(monkeypatch, tmp_path):
     assert summary.device == "cuda"
     assert summary.workers == 2
     assert summary.precision == "bfloat16"
-    assert summary.destinations == (dest_a, dest_b)
+    assert summary.destinations == (destination_a, destination_b)
     assert len(summary.outputs) == 2
     assert summary.failures == ()
-    assert dest_a.is_dir()
-    assert dest_b.is_dir()
+    assert destination_a.is_dir()
+    assert destination_b.is_dir()
     assert bars
     assert bars[0].started
     assert bars[0].stopped
@@ -796,6 +800,7 @@ def test_run_inference_full_success_with_overrides(monkeypatch, tmp_path):
 
 
 def test_run_inference_partial_failure_no_overrides(monkeypatch, tmp_path):
+    """Verifies that run_inference resolves crops from the project configuration and reports a partial failure."""
     videos = [tmp_path / "a.mp4", tmp_path / "b.mp4"]
     project_config = {"cropping": True, "video_sets": {}, "x1": 0, "x2": 100, "y1": 0, "y2": 80}
     monkeypatch.setattr(pipeline, "read_config", lambda _c: project_config)
@@ -803,7 +808,7 @@ def test_run_inference_partial_failure_no_overrides(monkeypatch, tmp_path):
     monkeypatch.setattr(
         pipeline,
         "_build_slots",
-        lambda **_kwargs: [pipeline._Slot("cpu", (0, 1))],
+        lambda **_kwargs: [pipeline._Slot(device="cpu", cores=(0, 1))],
     )
 
     def worker(_slot, launch):

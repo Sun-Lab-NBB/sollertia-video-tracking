@@ -1,4 +1,4 @@
-"""Tests for the fast, decode-aware k-means candidate-frame reader that replaces DeepLabCut's own."""
+"""Contains tests for the fast, decode-aware k-means candidate-frame reader that replaces DeepLabCut's own."""
 
 import numpy as np
 import pytest
@@ -80,11 +80,9 @@ def _make_fake_kmeans(labels, recorder):
     return _FakeKMeans
 
 
-# ----------------------------------------------------------------------------------------------------------------------
 # make_fast_kmeans_selector / the installed select closure
-# ----------------------------------------------------------------------------------------------------------------------
 def test_selector_uses_defaults_and_plain_tqdm(monkeypatch):
-    """With no overrides the closure keeps DeepLabCut's cluster count and falls back to a plain tqdm bar."""
+    """Verifies the closure keeps DeepLabCut's cluster count and falls back to a plain tqdm bar without overrides."""
     captured = {}
 
     def fake_select(**kwargs):
@@ -113,7 +111,7 @@ def test_selector_uses_defaults_and_plain_tqdm(monkeypatch):
 
 
 def test_selector_overrides_frame_count_and_forwards_options(monkeypatch):
-    """An explicit frame count overrides the cluster count and every DeepLabCut keyword option is forwarded."""
+    """Verifies an explicit frame count overrides the cluster count and every DeepLabCut keyword option is forwarded."""
     captured = {}
 
     def fake_select(**kwargs):
@@ -152,11 +150,9 @@ def test_selector_overrides_frame_count_and_forwards_options(monkeypatch):
     assert captured["progress"] is my_progress
 
 
-# ----------------------------------------------------------------------------------------------------------------------
 # _resolve_candidate_indices
-# ----------------------------------------------------------------------------------------------------------------------
 def test_resolve_candidate_indices_samples_full_window_when_none():
-    """With no candidate list the whole window is sampled at the requested stride."""
+    """Verifies that with no candidate list the whole window is sampled at the requested stride."""
     indices = _resolve_candidate_indices(
         frame_indices=None, frame_count=100, window_start=0.0, window_stop=1.0, sampling_step=2
     )
@@ -165,7 +161,7 @@ def test_resolve_candidate_indices_samples_full_window_when_none():
 
 
 def test_resolve_candidate_indices_uses_floor_and_ceil_window_bounds():
-    """Fractional window bounds floor the start and ceil the stop before sampling."""
+    """Verifies that fractional window bounds floor the start and ceil the stop before sampling."""
     indices = _resolve_candidate_indices(
         frame_indices=None, frame_count=100, window_start=0.1, window_stop=0.5, sampling_step=1
     )
@@ -174,7 +170,7 @@ def test_resolve_candidate_indices_uses_floor_and_ceil_window_bounds():
 
 
 def test_resolve_candidate_indices_crops_supplied_list_with_strict_inequalities():
-    """Supplied candidate indices are cropped to the open window interval, matching DeepLabCut exactly."""
+    """Verifies that supplied candidate indices are cropped to the open window interval, matching DeepLabCut exactly."""
     indices = _resolve_candidate_indices(
         frame_indices=[0, 5, 50, 99, 100, 150],
         frame_count=100,
@@ -188,7 +184,7 @@ def test_resolve_candidate_indices_crops_supplied_list_with_strict_inequalities(
 
 
 def test_resolve_candidate_indices_crops_supplied_list_inside_subwindow():
-    """A sub-window crops a supplied candidate list to the floored/ceiled open interval."""
+    """Verifies that a sub-window crops a supplied candidate list to the floored/ceiled open interval."""
     indices = _resolve_candidate_indices(
         frame_indices=[5, 10, 11, 49, 50, 60],
         frame_count=100,
@@ -200,39 +196,35 @@ def test_resolve_candidate_indices_crops_supplied_list_inside_subwindow():
     assert np.array_equal(indices, np.array([11, 49], dtype=np.int64))
 
 
-# ----------------------------------------------------------------------------------------------------------------------
 # _should_stream
-# ----------------------------------------------------------------------------------------------------------------------
 def test_should_stream_false_when_too_few_candidates():
-    """Fewer than two candidates leaves no gap to measure, so the reader always seeks."""
+    """Verifies that fewer than two candidates leaves no gap to measure, so the reader always seeks."""
     assert _should_stream(candidate_indices=np.array([], dtype=np.int64)) is False
     assert _should_stream(candidate_indices=np.array([5], dtype=np.int64)) is False
 
 
 def test_should_stream_true_for_dense_candidates():
-    """A small mean gap favors a single sequential streaming pass."""
+    """Verifies that a small mean gap favors a single sequential streaming pass."""
     assert _should_stream(candidate_indices=np.array([0, 1, 2], dtype=np.int64)) is True
     # Boundary: a mean gap exactly at the crossover still streams.
     assert _should_stream(candidate_indices=np.array([0, 200], dtype=np.int64)) is True
 
 
 def test_should_stream_false_for_sparse_candidates():
-    """A mean gap above the crossover favors seeking to each candidate."""
+    """Verifies that a mean gap above the crossover favors seeking to each candidate."""
     assert _should_stream(candidate_indices=np.array([0, 201], dtype=np.int64)) is False
 
 
-# ----------------------------------------------------------------------------------------------------------------------
 # _downsample_frame
-# ----------------------------------------------------------------------------------------------------------------------
 def test_downsample_frame_grayscale_averages_channels():
-    """The grayscale thumbnail downsamples the frame and averages its channels."""
+    """Verifies that the grayscale thumbnail downsamples the frame and averages its channels."""
     thumbnail = _downsample_frame(frame=_solid_frame(80), downsample_ratio=0.5, cluster_in_color=False)
     assert thumbnail.shape == (20, 30)
     assert np.allclose(thumbnail, 80.0)
 
 
 def test_downsample_frame_color_stacks_channels_horizontally():
-    """The color thumbnail downsamples the frame and stacks its channels side by side."""
+    """Verifies that the color thumbnail downsamples the frame and stacks its channels side by side."""
     frame = np.zeros((40, 60, 3), dtype=np.uint8)
     frame[:, :, 0] = 10
     frame[:, :, 1] = 20
@@ -244,11 +236,9 @@ def test_downsample_frame_color_stacks_channels_horizontally():
     assert np.all(thumbnail[:, 60:90] == 30)
 
 
-# ----------------------------------------------------------------------------------------------------------------------
 # _read_thumbnails_streaming
-# ----------------------------------------------------------------------------------------------------------------------
 def test_read_thumbnails_streaming_grabs_gaps_and_skips_failed_decode():
-    """Streaming grabs past non-candidate gaps, decodes candidates, and leaves failed-decode rows untouched."""
+    """Verifies streaming grabs past non-candidate gaps, decodes candidates, and leaves failed-decode rows untouched."""
     frames = {2: _solid_frame(30), 4: None, 5: _solid_frame(200)}
     reader = FakeVideoReader(frame_count=100, dimensions=(60, 40), frames=frames)
     thumbnails = np.full((3, 20, 30), -1.0)
@@ -271,11 +261,9 @@ def test_read_thumbnails_streaming_grabs_gaps_and_skips_failed_decode():
     assert np.all(thumbnails[1] == -1.0)
 
 
-# ----------------------------------------------------------------------------------------------------------------------
 # _read_thumbnails_seeking
-# ----------------------------------------------------------------------------------------------------------------------
 def test_read_thumbnails_seeking_seeks_each_candidate_and_skips_failed_decode():
-    """Seeking positions to each candidate independently and leaves failed-decode rows untouched."""
+    """Verifies that seeking positions to each candidate independently and leaves failed-decode rows untouched."""
     frames = {10: _solid_frame(70), 20: None}
     reader = FakeVideoReader(frame_count=100, dimensions=(60, 40), frames=frames)
     thumbnails = np.full((2, 20, 30), -1.0)
@@ -295,11 +283,9 @@ def test_read_thumbnails_seeking_seeks_each_candidate_and_skips_failed_decode():
     assert np.all(thumbnails[1] == -1.0)
 
 
-# ----------------------------------------------------------------------------------------------------------------------
 # _cluster_and_pick
-# ----------------------------------------------------------------------------------------------------------------------
 def test_cluster_and_pick_keeps_configured_batch_and_returns_one_per_singleton_cluster(monkeypatch):
-    """When the batch fits the candidates it is kept, and single-member clusters pick their sole member."""
+    """Verifies when the batch fits the candidates it is kept, and single-member clusters pick their sole member."""
     recorder = {}
     labels = np.array([0, 1, 2, 3, 4])
     monkeypatch.setattr(frame_reading, "MiniBatchKMeans", _make_fake_kmeans(labels, recorder))
@@ -331,7 +317,7 @@ def test_cluster_and_pick_keeps_configured_batch_and_returns_one_per_singleton_c
 
 
 def test_cluster_and_pick_shrinks_oversized_batch_and_drops_empty_cluster(monkeypatch):
-    """An oversized batch shrinks to half the candidate count and empty clusters yield no representative."""
+    """Verifies an oversized batch shrinks to half the candidate count and empty clusters yield no representative."""
     recorder = {}
     # Cluster id 1 receives no members and must be dropped from the result.
     labels = np.array([0, 0, 2, 2, 2])
@@ -356,11 +342,9 @@ def test_cluster_and_pick_shrinks_oversized_batch_and_drops_empty_cluster(monkey
     assert all(isinstance(index, int) for index in result)
 
 
-# ----------------------------------------------------------------------------------------------------------------------
 # End-to-end tests for the frame-selection entry point _select_kmeans_frames
-# ----------------------------------------------------------------------------------------------------------------------
 def test_select_kmeans_frames_raises_when_resize_would_upsample():
-    """A resize width wider than the frame would upsample, which DeepLabCut and this reader both reject."""
+    """Verifies a resize width wider than the frame would upsample, which DeepLabCut and this reader both reject."""
     reader = FakeVideoReader(frame_count=100, dimensions=(20, 40), frames={})
     with pytest.raises(ValueError, match="must not upsample"):
         _select_kmeans_frames(
@@ -379,7 +363,7 @@ def test_select_kmeans_frames_raises_when_resize_would_upsample():
 
 
 def test_select_kmeans_frames_returns_all_candidates_below_cluster_count():
-    """With fewer candidates than clusters the reader returns them all without decoding any frame."""
+    """Verifies that with fewer candidates than clusters the reader returns them all without decoding any frame."""
     reader = FakeVideoReader(frame_count=100, dimensions=(60, 40), frames={})
     result = _select_kmeans_frames(
         video_reader=reader,
@@ -401,7 +385,7 @@ def test_select_kmeans_frames_returns_all_candidates_below_cluster_count():
 
 
 def test_select_kmeans_frames_streams_dense_candidates():
-    """Dense candidates take the streaming path and cluster down to at most the requested count."""
+    """Verifies that dense candidates take the streaming path and cluster down to at most the requested count."""
     rng = np.random.default_rng(0)
     frames = {index: rng.integers(0, 256, size=(40, 60, 3), dtype=np.uint8) for index in range(1, 8)}
     reader = FakeVideoReader(frame_count=100, dimensions=(60, 40), frames=frames)
@@ -429,7 +413,7 @@ def test_select_kmeans_frames_streams_dense_candidates():
 
 
 def test_select_kmeans_frames_seeks_sparse_candidates():
-    """Sparse candidates take the seeking path, seeking once per candidate."""
+    """Verifies that sparse candidates take the seeking path, seeking once per candidate."""
     rng = np.random.default_rng(1)
     frames = {index: rng.integers(0, 256, size=(40, 60, 3), dtype=np.uint8) for index in (10, 900)}
     reader = FakeVideoReader(frame_count=1000, dimensions=(60, 40), frames=frames)

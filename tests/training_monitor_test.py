@@ -1,4 +1,4 @@
-"""Tests for the training progress monitor and its rank-0 queue logger (training/monitor.py).
+"""Contains tests for the training progress monitor and its rank-0 queue logger (training/monitor.py).
 
 These drive the logger and renderer directly with tiny in-memory messages; no queue thread, DLC runtime, or GPU is
 started. The renderer's compose/ingest helpers are exercised in isolation so every line is covered deterministically.
@@ -44,7 +44,7 @@ def _make_monitor() -> TrainingMonitor:
 
 
 def test_logger_init_stores_queue_and_task() -> None:
-    """The logger retains the shared queue and the task label supplied at construction."""
+    """Verifies that the logger retains the shared queue and the task label supplied at construction."""
     queue = _RecordingQueue()
     logger = QueueTrainingLogger(queue, task_name="detector")
     assert logger._progress_queue is queue
@@ -52,13 +52,13 @@ def test_logger_init_stores_queue_and_task() -> None:
 
 
 def test_logger_default_task_name_is_pose() -> None:
-    """The task label defaults to ``pose`` when not supplied."""
+    """Verifies that the task label defaults to ``pose`` when not supplied."""
     logger = QueueTrainingLogger(_RecordingQueue())
     assert logger._task_name == "pose"
 
 
 def test_log_config_none_puts_nothing() -> None:
-    """A None config short-circuits without forwarding any message."""
+    """Verifies that a None config short-circuits without forwarding any message."""
     queue = _RecordingQueue()
     logger = QueueTrainingLogger(queue)
     logger.log_config(None)
@@ -66,7 +66,7 @@ def test_log_config_none_puts_nothing() -> None:
 
 
 def test_log_config_forwards_epoch_budget() -> None:
-    """A config with train_settings forwards the epoch budget and task under the ``config`` kind."""
+    """Verifies that a config with train_settings forwards the epoch budget and task under the ``config`` kind."""
     queue = _RecordingQueue()
     logger = QueueTrainingLogger(queue, task_name="detector")
     logger.log_config({"train_settings": {"epochs": 120}})
@@ -74,7 +74,7 @@ def test_log_config_forwards_epoch_budget() -> None:
 
 
 def test_log_config_missing_train_settings_forwards_none_epochs() -> None:
-    """A config without train_settings still forwards a config message with a None epoch budget."""
+    """Verifies that a config without train_settings still forwards a config message with a None epoch budget."""
     queue = _RecordingQueue()
     logger = QueueTrainingLogger(queue)
     logger.log_config({})
@@ -82,7 +82,7 @@ def test_log_config_missing_train_settings_forwards_none_epochs() -> None:
 
 
 def test_log_tags_evaluation_phase_from_eval_loss_key() -> None:
-    """A metrics dict carrying an eval-loss key is tagged as the evaluation phase."""
+    """Verifies that a metrics dict carrying an eval-loss key is tagged as the evaluation phase."""
     queue = _RecordingQueue()
     logger = QueueTrainingLogger(queue)
     metrics = {"losses/eval.total_loss": 0.4}
@@ -91,7 +91,7 @@ def test_log_tags_evaluation_phase_from_eval_loss_key() -> None:
 
 
 def test_log_tags_evaluation_phase_from_metrics_key() -> None:
-    """A metrics dict carrying a ``metrics/`` key is tagged as the evaluation phase."""
+    """Verifies that a metrics dict carrying a ``metrics/`` key is tagged as the evaluation phase."""
     queue = _RecordingQueue()
     logger = QueueTrainingLogger(queue)
     logger.log({"metrics/test.mAP": 0.9}, step=3)
@@ -99,7 +99,7 @@ def test_log_tags_evaluation_phase_from_metrics_key() -> None:
 
 
 def test_log_tags_training_phase_when_no_eval_keys() -> None:
-    """A metrics dict with only train losses is tagged as the training phase and copies the metrics dict."""
+    """Verifies that a metrics dict with only train losses is tagged as training phase and copies the metrics dict."""
     queue = _RecordingQueue()
     logger = QueueTrainingLogger(queue)
     original = {"losses/train.total_loss": 1.5}
@@ -112,7 +112,7 @@ def test_log_tags_training_phase_when_no_eval_keys() -> None:
 
 
 def test_log_allows_none_step() -> None:
-    """A None step is forwarded verbatim as the epoch tag."""
+    """Verifies that a None step is forwarded verbatim as the epoch tag."""
     queue = _RecordingQueue()
     logger = QueueTrainingLogger(queue)
     logger.log({"losses/train.total_loss": 1.0})
@@ -120,7 +120,7 @@ def test_log_allows_none_step() -> None:
 
 
 def test_save_is_a_noop() -> None:
-    """save returns None and forwards nothing, since metrics stream as they arrive."""
+    """Verifies that save returns None and forwards nothing, since metrics stream as they arrive."""
     queue = _RecordingQueue()
     logger = QueueTrainingLogger(queue)
     assert logger.save() is None
@@ -128,7 +128,7 @@ def test_save_is_a_noop() -> None:
 
 
 def test_put_forwards_message_on_healthy_queue() -> None:
-    """_put places the message on a healthy queue via put_nowait."""
+    """Verifies that _put places the message on a healthy queue via put_nowait."""
     queue = _RecordingQueue()
     logger = QueueTrainingLogger(queue)
     logger._put({"kind": "custom"})
@@ -136,7 +136,7 @@ def test_put_forwards_message_on_healthy_queue() -> None:
 
 
 def test_put_suppresses_queue_errors() -> None:
-    """A queue error inside _put is suppressed after put_nowait is attempted, so training is never disrupted."""
+    """Verifies that _put attempts put_nowait but suppresses the raised queue error so training is never disrupted."""
     queue = _RaisingQueue()
     logger = QueueTrainingLogger(queue)
     # Must not raise even though put_nowait raises...
@@ -149,7 +149,7 @@ def test_put_suppresses_queue_errors() -> None:
 
 
 def test_monitor_init_defaults() -> None:
-    """The monitor starts with an unknown epoch budget and empty retained metric state."""
+    """Verifies that the monitor starts with an unknown epoch budget and empty retained metric state."""
     monitor = _make_monitor()
     assert monitor._total_epochs == 0
     assert monitor._task == "pose"
@@ -161,7 +161,7 @@ def test_monitor_init_defaults() -> None:
 
 
 def test_ingest_config_sets_budget_and_forces_redraw() -> None:
-    """A config message records the epoch budget and task and returns True to force an immediate redraw."""
+    """Verifies that a config message records the epoch budget and task and returns True to force a redraw."""
     monitor = _make_monitor()
     forced = monitor._ingest({"kind": "config", "epochs": 200, "task": "detector"})
     assert forced is True
@@ -170,7 +170,7 @@ def test_ingest_config_sets_budget_and_forces_redraw() -> None:
 
 
 def test_ingest_config_falls_back_to_defaults() -> None:
-    """A config with a falsy epoch budget and missing task falls back to zero epochs and the ``pose`` task."""
+    """Verifies that a config with a falsy epoch budget and missing task falls back to zero epochs and ``pose``."""
     monitor = _make_monitor()
     forced = monitor._ingest({"kind": "config", "epochs": 0})
     assert forced is True
@@ -179,7 +179,7 @@ def test_ingest_config_falls_back_to_defaults() -> None:
 
 
 def test_ingest_metrics_returns_false_and_merges() -> None:
-    """A metrics message merges into retained state and returns False (no forced redraw)."""
+    """Verifies that a metrics message merges into retained state and returns False (no forced redraw)."""
     monitor = _make_monitor()
     forced = monitor._ingest(
         {"kind": "metrics", "epoch": 5, "phase": "training", "metrics": {"losses/train.total_loss": 0.8}},
@@ -190,7 +190,7 @@ def test_ingest_metrics_returns_false_and_merges() -> None:
 
 
 def test_ingest_unknown_kind_returns_false() -> None:
-    """An unrecognized message kind leaves state untouched and returns False."""
+    """Verifies that an unrecognized message kind leaves state untouched and returns False."""
     monitor = _make_monitor()
     forced = monitor._ingest({"kind": "heartbeat"})
     assert forced is False
@@ -198,7 +198,7 @@ def test_ingest_unknown_kind_returns_false() -> None:
 
 
 def test_is_preparing_reflects_epoch_budget() -> None:
-    """The monitor reports preparing until an epoch budget has been reported."""
+    """Verifies that the monitor reports preparing until an epoch budget has been reported."""
     monitor = _make_monitor()
     assert monitor._is_preparing() is True
     monitor._total_epochs = 50
@@ -209,7 +209,7 @@ def test_is_preparing_reflects_epoch_budget() -> None:
 
 
 def test_ingest_metrics_evaluation_sets_validation_and_filters_metrics() -> None:
-    """An evaluation phase records the validation loss and keeps only ``metrics/`` keys in retained metrics."""
+    """Verifies that an evaluation phase records the validation loss and keeps only ``metrics/`` keys in metrics."""
     monitor = _make_monitor()
     monitor._ingest_metrics(
         {
@@ -228,7 +228,7 @@ def test_ingest_metrics_evaluation_sets_validation_and_filters_metrics() -> None
 
 
 def test_ingest_metrics_training_sets_training_loss_only() -> None:
-    """A training phase records the training loss and leaves validation loss and metrics untouched."""
+    """Verifies that a training phase records the training loss and leaves validation loss and metrics untouched."""
     monitor = _make_monitor()
     monitor._ingest_metrics(
         {"epoch": 4, "phase": "training", "metrics": {"losses/train.total_loss": 1.1}},
@@ -239,7 +239,7 @@ def test_ingest_metrics_training_sets_training_loss_only() -> None:
 
 
 def test_ingest_metrics_none_epoch_keeps_current_epoch() -> None:
-    """A metrics message without an epoch tag leaves the current epoch unchanged."""
+    """Verifies that a metrics message without an epoch tag leaves the current epoch unchanged."""
     monitor = _make_monitor()
     monitor._current_epoch = 12
     monitor._ingest_metrics({"phase": "training", "metrics": {"losses/train.total_loss": 0.5}})
@@ -247,7 +247,7 @@ def test_ingest_metrics_none_epoch_keeps_current_epoch() -> None:
 
 
 def test_ingest_metrics_defaults_empty_metrics() -> None:
-    """A metrics message without a metrics payload defaults to an empty dict, running the branch without error."""
+    """Verifies that a metrics message without a metrics payload defaults to an empty dict and runs without error."""
     monitor = _make_monitor()
     monitor._training_loss = 9.9  # A stale value the training branch must overwrite from the empty-dict default.
     monitor._ingest_metrics({"epoch": 1, "phase": "training"})
@@ -261,13 +261,13 @@ def test_ingest_metrics_defaults_empty_metrics() -> None:
 
 
 def test_format_metrics_empty_when_no_metrics() -> None:
-    """With no retained metrics the formatted string is empty."""
+    """Verifies that with no retained metrics the formatted string is empty."""
     monitor = _make_monitor()
     assert monitor._format_metrics() == ""
 
 
 def test_format_metrics_orders_by_priority_and_skips_non_matching() -> None:
-    """Metrics render in prefix-priority order, skipping non-test keys, non-numeric values, and unknown prefixes."""
+    """Verifies that metrics render in prefix-priority order, skipping non-test, non-numeric, and unknown prefixes."""
     monitor = _make_monitor()
     monitor._metrics = {
         "metrics/test.mAR": 0.44,  # priority 1, inserted before the priority-0 entry to prove sorting.
@@ -282,7 +282,7 @@ def test_format_metrics_orders_by_priority_and_skips_non_matching() -> None:
 
 
 def test_format_metrics_truncates_to_max_rendered() -> None:
-    """No more than the configured maximum number of metric pairs are rendered."""
+    """Verifies that no more than the configured maximum number of metric pairs are rendered."""
     monitor = _make_monitor()
     # Four keys all sharing the highest-priority ``mAP`` prefix; only _MAX_RENDERED_METRICS survive.
     monitor._metrics = {
@@ -299,7 +299,7 @@ def test_format_metrics_truncates_to_max_rendered() -> None:
 
 
 def test_compose_active_full_line() -> None:
-    """A fully populated state composes epoch, both losses, metrics, elapsed, and an ETA onto one line."""
+    """Verifies that a fully populated state composes epoch, both losses, metrics, elapsed, and an ETA onto one line."""
     monitor = _make_monitor()
     monitor._total_epochs = 100
     monitor._current_epoch = 50
@@ -316,7 +316,7 @@ def test_compose_active_full_line() -> None:
 
 
 def test_compose_active_minimal_line_omits_optional_segments() -> None:
-    """With no losses and no metrics only the epoch segment (plus elapsed and ETA) is rendered."""
+    """Verifies that with no losses and no metrics only the epoch segment (plus elapsed and ETA) is rendered."""
     monitor = _make_monitor()
     monitor._total_epochs = 10
     monitor._current_epoch = 1
@@ -327,7 +327,7 @@ def test_compose_active_minimal_line_omits_optional_segments() -> None:
 
 
 def test_compose_active_skips_nan_validation_loss() -> None:
-    """A NaN validation loss is treated as absent and omitted from the composed line."""
+    """Verifies that a NaN validation loss is treated as absent and omitted from the composed line."""
     monitor = _make_monitor()
     monitor._total_epochs = 10
     monitor._current_epoch = 2
@@ -337,7 +337,7 @@ def test_compose_active_skips_nan_validation_loss() -> None:
 
 
 def test_compose_active_completion_shows_zero_eta() -> None:
-    """At completion the bar reads full and the ETA collapses to a zero duration."""
+    """Verifies that at completion the bar reads full and the ETA collapses to a zero duration."""
     monitor = _make_monitor()
     monitor._total_epochs = 10
     monitor._current_epoch = 10
@@ -347,7 +347,7 @@ def test_compose_active_completion_shows_zero_eta() -> None:
 
 
 def test_repr_reports_task_and_epoch_progress() -> None:
-    """The repr summarizes the task and epoch progress (exercised for completeness)."""
+    """Verifies that the repr summarizes the task and epoch progress (exercised for completeness)."""
     monitor = _make_monitor()
     monitor._total_epochs = 100
     monitor._current_epoch = 3

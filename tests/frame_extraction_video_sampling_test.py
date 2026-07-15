@@ -1,4 +1,4 @@
-"""Tests for the budgeted video-subset sampling planner used to top a DLC project up toward a frame budget."""
+"""Contains tests for the budgeted video-subset sampling planner used to top a DLC project up toward a frame budget."""
 
 from random import Random
 from dataclasses import FrozenInstanceError
@@ -28,7 +28,7 @@ def _deterministic_random(monkeypatch):
 
 
 def test_plan_defaults_and_frozen():
-    """VideoSamplingPlan defaults per_group/overshoot and is a frozen, slotted dataclass that rejects mutation."""
+    """Verifies VideoSamplingPlan defaults per_group/overshoot and rejects mutation as a frozen, slotted dataclass."""
     plan = VideoSamplingPlan(
         selected_videos=("a",),
         existing_frame_count=1,
@@ -46,8 +46,8 @@ def test_plan_defaults_and_frozen():
 
 
 def test_budget_already_met_when_existing_exceeds_target():
-    """When existing frames already exceed the target the pass extracts nothing and flags budget_already_met."""
-    plan = plan_video_sampling(["a", "b"], {"a": 10, "b": 10}, 10, 5)
+    """Verifies that when existing frames exceed the target the pass extracts nothing and flags budget_already_met."""
+    plan = plan_video_sampling(["a", "b"], {"a": 10, "b": 10}, frames_per_video_count=10, total_frame_budget=5)
     assert plan.budget_already_met is True
     assert plan.selected_videos == ()
     assert plan.existing_frame_count == 20
@@ -59,16 +59,16 @@ def test_budget_already_met_when_existing_exceeds_target():
 
 
 def test_budget_already_met_at_exact_target():
-    """The remaining <= 0 guard also triggers when existing frames exactly equal the target (boundary)."""
-    plan = plan_video_sampling(["a"], {"a": 10}, 10, 10)
+    """Verifies that the remaining <= 0 guard also triggers when existing frames exactly equal the target (boundary)."""
+    plan = plan_video_sampling(["a"], {"a": 10}, frames_per_video_count=10, total_frame_budget=10)
     assert plan.budget_already_met is True
     assert plan.selected_videos == ()
     assert plan.projected_frame_count == 10
 
 
 def test_uniform_early_return_in_unextracted_tier():
-    """Uniform selection fills from not-yet-extracted videos and stops once accumulated capacity meets the budget."""
-    plan = plan_video_sampling(["a", "b", "c", "d"], {}, 10, 25)
+    """Verifies that uniform selection fills from not-yet-extracted videos and stops once capacity meets the budget."""
+    plan = plan_video_sampling(["a", "b", "c", "d"], {}, frames_per_video_count=10, total_frame_budget=25)
     # a, b, c contribute 30 >= 25; d is never reached.
     assert plan.selected_videos == ("a", "b", "c")
     assert plan.existing_frame_count == 0
@@ -81,8 +81,8 @@ def test_uniform_early_return_in_unextracted_tier():
 
 
 def test_uniform_spills_into_below_ceiling_tier_and_completes_loop():
-    """Uniform selection exhausts the not-yet-extracted tier before topping up a below-ceiling extracted video."""
-    plan = plan_video_sampling(["a", "b"], {"a": 5}, 10, 20)
+    """Verifies that uniform selection exhausts the not-yet-extracted tier before topping up a below-ceiling video."""
+    plan = plan_video_sampling(["a", "b"], {"a": 5}, frames_per_video_count=10, total_frame_budget=20)
     # unextracted [b] (cap 10) fills first, then below-ceiling [a] (cap 5) tops the budget up; loop runs to completion.
     assert plan.selected_videos == ("b", "a")
     assert plan.existing_frame_count == 5
@@ -91,8 +91,8 @@ def test_uniform_spills_into_below_ceiling_tier_and_completes_loop():
 
 
 def test_uniform_target_unreachable_selects_everything():
-    """When total capacity falls short of the budget the plan flags target_unreachable and selects all it can."""
-    plan = plan_video_sampling(["a"], {}, 10, 25)
+    """Verifies that when capacity is short of the budget the plan flags target_unreachable and selects all it can."""
+    plan = plan_video_sampling(["a"], {}, frames_per_video_count=10, total_frame_budget=25)
     assert plan.target_unreachable is True
     assert plan.selected_videos == ("a",)
     assert plan.projected_frame_count == 10
@@ -100,8 +100,8 @@ def test_uniform_target_unreachable_selects_everything():
 
 
 def test_uniform_pins_overshoot_budget():
-    """A pinned video is always included even when its capacity alone overshoots the remaining budget."""
-    plan = plan_video_sampling(["a", "b"], {}, 10, 5, pinned_videos=("a",))
+    """Verifies that a pinned video is always included even when its capacity alone overshoots the remaining budget."""
+    plan = plan_video_sampling(["a", "b"], {}, frames_per_video_count=10, total_frame_budget=5, pinned_videos=("a",))
     # Pin a (cap 10) alone exceeds the remaining 5, so the fill loop returns immediately and only a is selected.
     assert plan.selected_videos == ("a",)
     assert plan.always_included_overshoot is True
@@ -109,8 +109,10 @@ def test_uniform_pins_overshoot_budget():
 
 
 def test_pins_are_deduplicated_and_unknown_pins_ignored():
-    """Duplicate pins collapse to one entry and pins outside the candidate set are dropped before selection."""
-    plan = plan_video_sampling(["a", "b", "c"], {}, 10, 100, pinned_videos=("a", "a", "z"))
+    """Verifies that duplicate pins collapse to one entry and pins outside the candidate set are dropped."""
+    plan = plan_video_sampling(
+        ["a", "b", "c"], {}, frames_per_video_count=10, total_frame_budget=100, pinned_videos=("a", "a", "z")
+    )
     # "z" is not a candidate and the duplicate "a" is collapsed; the unreachable budget then pulls in b and c too.
     assert plan.selected_videos == ("a", "b", "c")
     assert plan.target_unreachable is True
@@ -118,8 +120,14 @@ def test_pins_are_deduplicated_and_unknown_pins_ignored():
 
 
 def test_balanced_alternates_between_groups():
-    """Grouped selection assigns each next video to the least-covered group, alternating across equal groups."""
-    plan = plan_video_sampling(["a", "b", "c", "d"], {}, 10, 20, groups={"g1": ["a", "b"], "g2": ["c", "d"]})
+    """Verifies that grouped selection assigns each next video to the least-covered group, alternating equal groups."""
+    plan = plan_video_sampling(
+        ["a", "b", "c", "d"],
+        {},
+        frames_per_video_count=10,
+        total_frame_budget=20,
+        groups={"g1": ["a", "b"], "g2": ["c", "d"]},
+    )
     assert plan.selected_videos == ("b", "d")
     assert plan.per_group == (("g1", 0, 1, 10, 2), ("g2", 0, 1, 10, 2))
     assert plan.projected_frame_count == 20
@@ -127,8 +135,8 @@ def test_balanced_alternates_between_groups():
 
 
 def test_balanced_single_group_unreachable_exits_when_heap_empties():
-    """A grouped pass whose only group exhausts its videos exits the fill loop on an empty heap, flags unreachable."""
-    plan = plan_video_sampling(["a"], {}, 10, 100, groups={"g1": ["a"]})
+    """Verifies that a grouped pass whose only group runs out of videos exits on an empty heap and flags unreachable."""
+    plan = plan_video_sampling(["a"], {}, frames_per_video_count=10, total_frame_budget=100, groups={"g1": ["a"]})
     assert plan.target_unreachable is True
     assert plan.selected_videos == ("a",)
     assert plan.per_group == (("g1", 0, 1, 10, 1),)
@@ -136,8 +144,10 @@ def test_balanced_single_group_unreachable_exits_when_heap_empties():
 
 
 def test_balanced_group_exhaustion_does_not_requeue():
-    """A group is not re-queued once its last video is taken, and the pass ends when accumulated meets the budget."""
-    plan = plan_video_sampling(["a", "b", "c"], {}, 10, 30, groups={"g1": ["a"], "g2": ["b", "c"]})
+    """Verifies that a group is not re-queued once its last video is taken and the pass ends when the budget is met."""
+    plan = plan_video_sampling(
+        ["a", "b", "c"], {}, frames_per_video_count=10, total_frame_budget=30, groups={"g1": ["a"], "g2": ["b", "c"]}
+    )
     # g1 (1 video) empties and is not requeued; g2 is drained tail-first (c then b).
     assert plan.selected_videos == ("a", "c", "b")
     assert plan.per_group == (("g1", 0, 1, 10, 1), ("g2", 0, 2, 20, 2))
@@ -145,8 +155,10 @@ def test_balanced_group_exhaustion_does_not_requeue():
 
 
 def test_balanced_seeds_existing_frames_and_uses_below_ceiling_tier():
-    """Grouped seeding counts prior frames per group and drains below-ceiling before unextracted within a group."""
-    plan = plan_video_sampling(["a", "b"], {"a": 5}, 10, 20, groups={"g1": ["a", "b"]})
+    """Verifies that grouped seeding counts prior frames per group and drains below-ceiling before unextracted."""
+    plan = plan_video_sampling(
+        ["a", "b"], {"a": 5}, frames_per_video_count=10, total_frame_budget=20, groups={"g1": ["a", "b"]}
+    )
     # Group g1 holds a (below-ceiling, cap 5) and b (not-yet-extracted, cap 10); the tail-first pop drains b then a.
     assert plan.selected_videos == ("b", "a")
     assert plan.per_group == (("g1", 5, 2, 20, 2),)
@@ -154,12 +166,12 @@ def test_balanced_seeds_existing_frames_and_uses_below_ceiling_tier():
 
 
 def test_balanced_pins_across_group_membership_states():
-    """Pinned videos are always included whether in a group and below ceiling, in a group at ceiling, or ungrouped."""
+    """Verifies that pins are always included whether grouped and below ceiling, grouped at ceiling, or ungrouped."""
     plan = plan_video_sampling(
         ["a", "b", "x"],
         {"b": 10},
-        10,
-        100,
+        frames_per_video_count=10,
+        total_frame_budget=100,
         groups={"g1": ["a", "b"]},
         pinned_videos=("a", "b", "x"),
     )
@@ -172,7 +184,7 @@ def test_balanced_pins_across_group_membership_states():
 
 
 def test_select_balanced_skips_duplicate_pins_directly():
-    """Calling _select_balanced with a repeated pin exercises the in-loop dedup guard the planner otherwise prevents."""
+    """Verifies that _select_balanced with a repeated pin exercises the in-loop dedup guard the planner prevents."""
     selected, per_group = _select_balanced(
         groups={"g1": ["a", "b"]},
         extracted_frame_counts={},
@@ -186,9 +198,9 @@ def test_select_balanced_skips_duplicate_pins_directly():
 
 
 def test_uniform_selection_valid_with_real_random_shuffle(monkeypatch):
-    """With the real shuffling Random restored, uniform selection still yields a valid, correctly sized subset."""
+    """Verifies that with real shuffling Random restored, uniform selection yields a valid, correctly sized subset."""
     monkeypatch.setattr(video_sampling, "Random", Random)
-    plan = plan_video_sampling(["a", "b", "c", "d", "e"], {}, 10, 30)
+    plan = plan_video_sampling(["a", "b", "c", "d", "e"], {}, frames_per_video_count=10, total_frame_budget=30)
     # Regardless of shuffle order, exactly three distinct candidates (3 * 10 == 30) are chosen to meet the budget.
     assert len(plan.selected_videos) == 3
     assert len(set(plan.selected_videos)) == 3

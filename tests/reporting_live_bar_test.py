@@ -1,4 +1,4 @@
-"""Tests for the shared live progress-bar base that the training, inference, and frame-extraction bars build on."""
+"""Contains tests for the shared progress-bar base underlying the training, inference, and frame-extraction bars."""
 
 import sys
 import time
@@ -75,29 +75,23 @@ class _FakeBar(LiveBar):
         return f"active {format_duration(elapsed)}"
 
 
-# --- format_duration -------------------------------------------------------------------------------------------------
-
-
 def test_format_duration_minutes_and_seconds() -> None:
-    """Under an hour, the duration is rendered as zero-padded MM:SS."""
+    """Verifies that under an hour, the duration is rendered as zero-padded MM:SS."""
     assert format_duration(65) == "01:05"
 
 
 def test_format_duration_spans_an_hour() -> None:
-    """At or past an hour, the hours component is prepended as H:MM:SS."""
+    """Verifies that at or past an hour, the hours component is prepended as H:MM:SS."""
     assert format_duration(3661) == "1:01:01"
 
 
 def test_format_duration_clamps_negative_to_zero() -> None:
-    """A negative duration is clamped to zero so the bar never shows a negative clock."""
+    """Verifies that a negative duration is clamped to zero so the bar never shows a negative clock."""
     assert format_duration(-42) == "00:00"
 
 
-# --- construction ----------------------------------------------------------------------------------------------------
-
-
 def test_init_defaults_to_stderr_stream() -> None:
-    """With no explicit stream, the renderer writes to the standard error stream."""
+    """Verifies that with no explicit stream, the renderer writes to the standard error stream."""
     bar = _FakeBar(Queue())
     assert bar._stream is sys.stderr
     assert bar.daemon is True
@@ -106,7 +100,7 @@ def test_init_defaults_to_stderr_stream() -> None:
 
 
 def test_init_uses_explicit_stream_and_reads_tty_status() -> None:
-    """An explicit stream is retained and its interactive-terminal status is captured at construction."""
+    """Verifies that an explicit stream is retained and its interactive-terminal status is captured at construction."""
     stream = _FakeStream(is_tty=True)
     bar = _FakeBar(Queue(), stream=stream, width=12, preparing_label="warming...")
     assert bar._stream is stream
@@ -116,13 +110,13 @@ def test_init_uses_explicit_stream_and_reads_tty_status() -> None:
 
 
 def test_repr_reports_width_and_tty_status() -> None:
-    """The repr surfaces the configured bar width and the captured interactive-terminal status."""
+    """Verifies that the repr surfaces the configured bar width and the captured interactive-terminal status."""
     bar = _FakeBar(Queue(), stream=_FakeStream(is_tty=True), width=17)
     assert repr(bar) == "LiveBar(width=17, is_tty=True)"
 
 
 def test_base_class_hooks_are_unimplemented() -> None:
-    """The base class leaves the three subclass hooks unimplemented, so a subclass must supply real behavior."""
+    """Verifies that the base class leaves its three subclass hooks unimplemented for a subclass to implement."""
     base = LiveBar(Queue(), stream=_FakeStream(is_tty=False))
     with pytest.raises(NotImplementedError):
         base._ingest("msg")
@@ -132,11 +126,8 @@ def test_base_class_hooks_are_unimplemented() -> None:
         base._compose_active(1.0)
 
 
-# --- _bar ------------------------------------------------------------------------------------------------------------
-
-
 def test_bar_partial_fill() -> None:
-    """A mid-range fraction fills the proportional number of glyphs and reports the matching percent."""
+    """Verifies that a mid-range fraction fills the proportional number of glyphs and reports the matching percent."""
     bar = _FakeBar(Queue(), stream=_FakeStream(is_tty=False), width=10)
     glyphs, percent = bar._bar(0.5)
     assert glyphs == "#####-----"
@@ -144,7 +135,7 @@ def test_bar_partial_fill() -> None:
 
 
 def test_bar_clamps_above_one() -> None:
-    """A fraction above one is clamped so the bar never overflows its width."""
+    """Verifies that a fraction above one is clamped so the bar never overflows its width."""
     bar = _FakeBar(Queue(), stream=_FakeStream(is_tty=False), width=8)
     glyphs, percent = bar._bar(1.5)
     assert glyphs == "########"
@@ -152,55 +143,46 @@ def test_bar_clamps_above_one() -> None:
 
 
 def test_bar_clamps_below_zero() -> None:
-    """A negative fraction is clamped to an empty bar at zero percent."""
+    """Verifies that a negative fraction is clamped to an empty bar at zero percent."""
     bar = _FakeBar(Queue(), stream=_FakeStream(is_tty=False), width=6)
     glyphs, percent = bar._bar(-0.5)
     assert glyphs == "------"
     assert percent == 0.0
 
 
-# --- _eta ------------------------------------------------------------------------------------------------------------
-
-
 def test_eta_completed_shows_zero() -> None:
-    """Once the work is done, the ETA collapses to a plain zero clock."""
+    """Verifies that once the work is done, the ETA collapses to a plain zero clock."""
     bar = _FakeBar(Queue(), stream=_FakeStream(is_tty=False))
     assert bar._eta(done=10, total=10, elapsed=5.0) == "00:00"
 
 
 def test_eta_projects_remaining_from_rate() -> None:
-    """With measurable throughput, the ETA projects the remaining time from the observed rate."""
+    """Verifies that with measurable throughput, the ETA projects the remaining time from the observed rate."""
     bar = _FakeBar(Queue(), stream=_FakeStream(is_tty=False))
     # rate = 5 / 5 = 1 unit/sec; remaining = (10 - 5) / 1 = 5 seconds.
     assert bar._eta(done=5, total=10, elapsed=5.0) == "00:05"
 
 
 def test_eta_no_throughput_shows_placeholder() -> None:
-    """Before any work is completed, the ETA stays a placeholder rather than a false zero."""
+    """Verifies that before any work is completed, the ETA stays a placeholder rather than a false zero."""
     bar = _FakeBar(Queue(), stream=_FakeStream(is_tty=False))
     assert bar._eta(done=0, total=10, elapsed=5.0) == "--:--"
 
 
 def test_eta_zero_elapsed_shows_placeholder() -> None:
-    """With no elapsed time yet, the rate is unknown and the ETA is a placeholder (the elapsed<=0 branch)."""
+    """Verifies that with no elapsed time, the rate is unknown and the ETA is a placeholder (the elapsed<=0 branch)."""
     bar = _FakeBar(Queue(), stream=_FakeStream(is_tty=False))
     assert bar._eta(done=5, total=10, elapsed=0.0) == "--:--"
 
 
-# --- _compose_preparing ----------------------------------------------------------------------------------------------
-
-
 def test_compose_preparing_default_body() -> None:
-    """The default warm-up body shows an empty bar, the label, and the elapsed clock."""
+    """Verifies that the default warm-up body shows an empty bar, the label, and the elapsed clock."""
     bar = _FakeBar(Queue(), stream=_FakeStream(is_tty=False), width=5, preparing_label="preparing...")
     assert bar._compose_preparing(72.0) == "[-----] preparing... | 01:12 elapsed"
 
 
-# --- _render ---------------------------------------------------------------------------------------------------------
-
-
 def test_render_forced_tty_redraws_in_place() -> None:
-    """A forced render on a terminal rewrites the line in place with a carriage return and clear-to-end code."""
+    """Verifies that a forced terminal render rewrites the line in place with a carriage return and clear-to-end."""
     stream = _FakeStream(is_tty=True)
     bar = _FakeBar(Queue(), stream=stream, preparing=False)
     bar._render(force=True)
@@ -215,7 +197,7 @@ def test_render_forced_tty_redraws_in_place() -> None:
 
 
 def test_render_non_tty_appends_new_line() -> None:
-    """A forced render to a non-terminal appends a fresh line rather than redrawing in place."""
+    """Verifies that a forced render to a non-terminal appends a fresh line rather than redrawing in place."""
     stream = _FakeStream(is_tty=False)
     bar = _FakeBar(Queue(), stream=stream, preparing=False)
     bar._render(force=True)
@@ -226,7 +208,7 @@ def test_render_non_tty_appends_new_line() -> None:
 
 
 def test_render_uses_preparing_body_before_work_starts() -> None:
-    """While still warming up, the render draws the preparing body instead of the active one."""
+    """Verifies that while still warming up, the render draws the preparing body instead of the active one."""
     stream = _FakeStream(is_tty=False)
     bar = _FakeBar(Queue(), stream=stream, preparing=True, preparing_label="preparing...")
     bar._render(force=True)
@@ -235,7 +217,7 @@ def test_render_uses_preparing_body_before_work_starts() -> None:
 
 
 def test_render_respects_minimum_interval() -> None:
-    """An unforced render inside the minimum interval is suppressed and nothing is written."""
+    """Verifies that an unforced render inside the minimum interval is suppressed and nothing is written."""
     stream = _FakeStream(is_tty=False)
     bar = _FakeBar(Queue(), stream=stream, preparing=False)
     # A render that just happened means a follow-up unforced render is within the interval and must be skipped.
@@ -246,7 +228,7 @@ def test_render_respects_minimum_interval() -> None:
 
 
 def test_render_spinner_cycles_across_draws() -> None:
-    """Successive drawn lines cycle through the spinner frames to signal liveness while the counter is static."""
+    """Verifies that successive draws cycle through the spinner frames to signal liveness with a static counter."""
     stream = _FakeStream(is_tty=False)
     bar = _FakeBar(Queue(), stream=stream, preparing=False)
     for _ in range(len(_SPINNER_FRAMES) + 1):
@@ -257,22 +239,16 @@ def test_render_spinner_cycles_across_draws() -> None:
     assert drawn_spinners[len(_SPINNER_FRAMES)] == _SPINNER_FRAMES[0]
 
 
-# --- stop ------------------------------------------------------------------------------------------------------------
-
-
 def test_stop_places_sentinel_on_queue() -> None:
-    """Calling stop enqueues the shared terminal sentinel for the run loop to recognize."""
+    """Verifies that calling stop enqueues the shared terminal sentinel for the run loop to recognize."""
     queue: Queue = Queue()
     bar = _FakeBar(queue, stream=_FakeStream(is_tty=False))
     bar.stop()
     assert queue.get_nowait() == _STOP_SENTINEL
 
 
-# --- run -------------------------------------------------------------------------------------------------------------
-
-
 def test_run_non_tty_handles_empty_message_and_stop() -> None:
-    """The non-terminal run loop renders on an idle timeout, ingests real messages, and exits on the sentinel."""
+    """Verifies that the non-terminal run loop renders on idle timeout, ingests messages, and exits on the sentinel."""
     stream = _FakeStream(is_tty=False)
     # First an idle timeout (renders), then one real message, then the terminal sentinel.
     scripted = _ScriptedQueue([Empty, "msg-1", _STOP_SENTINEL])
@@ -292,7 +268,7 @@ def test_run_non_tty_handles_empty_message_and_stop() -> None:
 
 
 def test_run_tty_draws_final_frame_and_trailing_newline() -> None:
-    """The terminal run loop ingests messages, draws a forced final frame, and closes with a trailing newline."""
+    """Verifies that the terminal run loop ingests messages, draws a forced final frame, and closes with a newline."""
     stream = _FakeStream(is_tty=True)
     scripted = _ScriptedQueue(["msg-a", _STOP_SENTINEL])
     bar = _FakeBar(scripted, stream=stream, preparing=False, force_value=True)
@@ -309,6 +285,6 @@ def test_run_tty_draws_final_frame_and_trailing_newline() -> None:
 
 
 def test_non_tty_render_interval_constant_is_slow_cadence() -> None:
-    """The non-terminal render cadence is far slower than the terminal one, keeping redirected logs greppable."""
+    """Verifies that the non-terminal render cadence is much slower than terminal, keeping redirected logs greppable."""
     # Guards the constant the non-tty suppression above relies on staying well above the in-loop poll cadence.
     assert _NON_TTY_RENDER_INTERVAL == 30.0

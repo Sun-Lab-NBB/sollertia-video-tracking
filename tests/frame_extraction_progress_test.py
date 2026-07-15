@@ -1,4 +1,4 @@
-"""Tests for the aggregate frame-extraction progress bar and the DeepLabCut tqdm shim used to report progress."""
+"""Contains tests for the aggregate frame-extraction progress bar and DeepLabCut tqdm shim used to report progress."""
 
 import io
 import queue
@@ -49,7 +49,7 @@ def _make_bar(
 
 
 def test_reporter_forwards_items_unchanged_and_emits_every_frame_for_small_video() -> None:
-    """A tiny video gets a stride of one, so every frame plus the leading zero is reported and items pass through."""
+    """Verifies that a tiny video's stride of one reports every frame plus the leading zero and forwards items."""
     progress_queue: queue.Queue = queue.Queue()
     # frame_total // 100 == 0, so the stride clamps up to 1: every count crosses the stride.
     reporter = make_progress_reporter(progress_queue, video_index=2, frame_total=5)
@@ -69,7 +69,7 @@ def test_reporter_forwards_items_unchanged_and_emits_every_frame_for_small_video
 
 
 def test_reporter_throttles_updates_by_stride() -> None:
-    """A larger frame total widens the stride so only counts on the stride (plus the lead zero) are reported."""
+    """Verifies that a larger frame total widens the stride, reporting only counts on it plus the lead zero."""
     progress_queue: queue.Queue = queue.Queue()
     # frame_total // 100 == 3, below the 250 cap, so the stride is 3.
     reporter = make_progress_reporter(progress_queue, video_index=0, frame_total=300)
@@ -87,7 +87,7 @@ def test_reporter_throttles_updates_by_stride() -> None:
 
 
 def test_reporter_stride_is_capped_at_max_frames_per_update() -> None:
-    """A huge frame total does not widen the stride past the 250-frame cap."""
+    """Verifies that a huge frame total does not widen the stride past the 250-frame cap."""
     progress_queue: queue.Queue = queue.Queue()
     # frame_total // 100 == 1000, but the cap holds the stride at 250.
     reporter = make_progress_reporter(progress_queue, video_index=1, frame_total=100_000)
@@ -103,7 +103,7 @@ def test_reporter_stride_is_capped_at_max_frames_per_update() -> None:
 
 
 def test_reporter_emits_on_final_frame_off_the_stride() -> None:
-    """The terminal frame is reported even when the frame total is not a multiple of the stride."""
+    """Verifies that the terminal frame is reported even when the frame total is not a multiple of the stride."""
     progress_queue: queue.Queue = queue.Queue()
     # frame_total // 100 == 2 -> stride 2; 201 is odd, so only the frame-total equality triggers the last message.
     reporter = make_progress_reporter(progress_queue, video_index=4, frame_total=201)
@@ -120,7 +120,7 @@ def test_reporter_emits_on_final_frame_off_the_stride() -> None:
 
 
 def test_reporter_suppresses_queue_errors_and_still_forwards_items() -> None:
-    """A queue that rejects every put is swallowed, so the wrapped iteration still yields every item."""
+    """Verifies that a queue that rejects every put is swallowed, so the wrapped iteration still yields every item."""
     raising_queue = _RaisingQueue()
     reporter = make_progress_reporter(raising_queue, video_index=0, frame_total=3)
 
@@ -139,7 +139,7 @@ def test_reporter_suppresses_queue_errors_and_still_forwards_items() -> None:
 
 
 def test_reporter_accepts_and_ignores_extra_tqdm_arguments() -> None:
-    """As a drop-in for tqdm, the reporter tolerates the extra positional and keyword arguments tqdm is called with."""
+    """Verifies that the reporter, a tqdm drop-in, tolerates extra positional and keyword arguments tqdm receives."""
     progress_queue: queue.Queue = queue.Queue()
     reporter = make_progress_reporter(progress_queue, video_index=0, frame_total=3)
 
@@ -157,7 +157,7 @@ def test_reporter_accepts_and_ignores_extra_tqdm_arguments() -> None:
 
 
 def test_aggregate_bar_grand_total_clamped_to_one_for_empty_totals() -> None:
-    """An empty frame-total mapping clamps the grand total to one so the fraction math never divides by zero."""
+    """Verifies that an empty frame-total mapping clamps the grand total to one, avoiding a fraction divide-by-zero."""
     bar = _make_bar({}, total_video_count=0)
 
     assert bar._grand_frame_total == 1
@@ -166,7 +166,7 @@ def test_aggregate_bar_grand_total_clamped_to_one_for_empty_totals() -> None:
 
 
 def test_aggregate_bar_grand_total_sums_per_video_totals() -> None:
-    """The grand total is the sum of the per-video frame totals when the mapping is non-empty."""
+    """Verifies that the grand total is the sum of the per-video frame totals when the mapping is non-empty."""
     bar = _make_bar({0: 100, 1: 250})
 
     assert bar._grand_frame_total == 350
@@ -174,7 +174,7 @@ def test_aggregate_bar_grand_total_sums_per_video_totals() -> None:
 
 
 def test_ingest_progress_updates_frame_count_without_forcing_redraw() -> None:
-    """A progress message stores the latest count for its video and does not force an immediate redraw."""
+    """Verifies that a progress message stores the latest count for its video and does not force an immediate redraw."""
     bar = _make_bar({3: 100})
 
     force = bar._ingest(("progress", 3, 42))
@@ -185,7 +185,7 @@ def test_ingest_progress_updates_frame_count_without_forcing_redraw() -> None:
 
 
 def test_ingest_done_completes_known_video_and_forces_redraw() -> None:
-    """A done message fills the video to its full total, counts it done, and forces an immediate redraw."""
+    """Verifies that a done message fills the video to its full total, counts it done, and forces a redraw."""
     bar = _make_bar({1: 100})
 
     force = bar._ingest(("done", 1))
@@ -196,7 +196,7 @@ def test_ingest_done_completes_known_video_and_forces_redraw() -> None:
 
 
 def test_ingest_done_for_unknown_video_defaults_to_zero() -> None:
-    """A done message for a video absent from the totals defaults its frame count to zero."""
+    """Verifies that a done message for a video absent from the totals defaults its frame count to zero."""
     bar = _make_bar({1: 100})
 
     force = bar._ingest(("done", 7))
@@ -207,7 +207,7 @@ def test_ingest_done_for_unknown_video_defaults_to_zero() -> None:
 
 
 def test_ingest_unknown_message_kind_is_ignored() -> None:
-    """A message that is neither progress nor done leaves the state untouched and does not force a redraw."""
+    """Verifies that a message that is neither progress nor done leaves the state untouched and forces no redraw."""
     bar = _make_bar({1: 100})
 
     force = bar._ingest(("mystery", 9))
@@ -218,14 +218,14 @@ def test_ingest_unknown_message_kind_is_ignored() -> None:
 
 
 def test_is_preparing_true_before_any_work() -> None:
-    """A freshly constructed bar reports it is preparing, since no frames and no completions have arrived."""
+    """Verifies that a freshly constructed bar reports it is preparing, since no frames or completions have arrived."""
     bar = _make_bar({0: 100})
 
     assert bar._is_preparing() is True
 
 
 def test_is_preparing_false_after_first_progress() -> None:
-    """Once any frame count arrives, the bar is no longer preparing."""
+    """Verifies that once any frame count arrives, the bar is no longer preparing."""
     bar = _make_bar({0: 100})
     bar._ingest(("progress", 0, 5))
 
@@ -233,7 +233,7 @@ def test_is_preparing_false_after_first_progress() -> None:
 
 
 def test_is_preparing_false_after_completion() -> None:
-    """A completed video also takes the bar out of the preparing state."""
+    """Verifies that a completed video also takes the bar out of the preparing state."""
     bar = _make_bar({0: 100})
     bar._ingest(("done", 0))
 
@@ -241,7 +241,7 @@ def test_is_preparing_false_after_completion() -> None:
 
 
 def test_compose_preparing_shows_label_video_count_and_elapsed() -> None:
-    """The warm-up line carries the label, the queued video count, and the elapsed clock."""
+    """Verifies that the warm-up line carries the label, the queued video count, and the elapsed clock."""
     bar = _make_bar({0: 100, 1: 100}, total_video_count=2)
 
     line = bar._compose_preparing(elapsed=90.0)
@@ -253,7 +253,7 @@ def test_compose_preparing_shows_label_video_count_and_elapsed() -> None:
 
 
 def test_compose_active_reports_fraction_active_count_and_frames() -> None:
-    """The active line renders the completion percent, the decoding count, and the frames-read tally."""
+    """Verifies that the active line renders the completion percent, the decoding count, and the frames-read tally."""
     bar = _make_bar({0: 100, 1: 100}, total_video_count=2)
     bar._ingest(("progress", 0, 50))
     bar._ingest(("progress", 1, 30))
@@ -268,7 +268,7 @@ def test_compose_active_reports_fraction_active_count_and_frames() -> None:
 
 
 def test_compose_active_clamps_frames_and_zero_active_when_all_done() -> None:
-    """Over-reported frames clamp to the grand total, and a finished video contributes zero to the decoding count."""
+    """Verifies that over-reported frames clamp to the grand total, and a done video drops from the decoding count."""
     bar = _make_bar({0: 100}, total_video_count=1)
     # First an over-report, then completion: the sum would exceed the grand total but is clamped, and the finished
     # video drops out of the decoding count.

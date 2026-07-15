@@ -1,4 +1,4 @@
-"""Tests for the DeepLabCut inference-runner optimization wrappers in ``inference/runners.py``.
+"""Contains tests for the DeepLabCut inference-runner optimization wrappers in ``inference/runners.py``.
 
 The DeepLabCut runner classes are never fully constructed here: heavy runner objects are fabricated with
 ``object.__new__`` and given only the attributes the functions under test read, and the DLC apis-utils builder
@@ -182,13 +182,11 @@ def detector_items():
     ]
 
 
-# ----------------------------------------------------------------------------------------------------------------------
 # _optimize_inference_runner: dispatch and in-place enhancement
-# ----------------------------------------------------------------------------------------------------------------------
 
 
 def test_optimize_ctd_runner_is_left_stock_and_warns(capsys):
-    # Conditional-top-down runners must be returned untouched with a stderr warning.
+    """Verifies that conditional-top-down runners are returned untouched with a stderr warning."""
     runner = new_ctd_runner()
     result = runners._optimize_inference_runner(runner=runner, profile=make_profile())
     assert result is runner
@@ -198,7 +196,7 @@ def test_optimize_ctd_runner_is_left_stock_and_warns(capsys):
 
 
 def test_optimize_disables_stock_autocast_and_swaps_predict():
-    # A pose runner should have its stock autocast disabled and its predict replaced with a callable.
+    """Verifies that a pose runner has its stock autocast disabled and its predict replaced with a callable."""
     runner = new_pose_runner()
     result = runners._optimize_inference_runner(runner=runner, profile=make_profile())
     assert result is runner
@@ -208,24 +206,24 @@ def test_optimize_disables_stock_autocast_and_swaps_predict():
 
 
 def test_optimize_detector_dispatch_selects_detector_predict():
-    # A detector runner should be routed to the detector predict, whose output carries the "detection" head.
+    """Verifies that a detector runner is routed to the detector predict, whose output carries the "detection" head."""
     runner = new_detector_runner(items=detector_items())
     runners._optimize_inference_runner(runner=runner, profile=make_profile())
-    out = runner.predict(torch.zeros(2, 5))
-    assert [set(frame) for frame in out] == [{"detection"}, {"detection"}]
+    output = runner.predict(torch.zeros(2, 5))
+    assert [set(frame) for frame in output] == [{"detection"}, {"detection"}]
 
 
 def test_optimize_applies_channels_last_to_model():
-    # With channels_last enabled the model is converted via .to(memory_format=channels_last).
+    """Verifies that with channels_last enabled the model is converted via .to(memory_format=channels_last)."""
     runner = new_pose_runner()
     runners._optimize_inference_runner(runner=runner, profile=make_profile(channels_last=True))
     assert runner.model.to_calls == [((), {"memory_format": torch.channels_last})]
 
 
 def test_optimize_torch_compile_success(monkeypatch):
-    # When torch.compile succeeds the runner's model is REPLACED by the returned compiled object. Returning a distinct
-    # sentinel (rather than the same model) makes the store-back observable: a version that called compile but dropped
-    # the assignment would leave runner.model unchanged and fail here.
+    """Verifies that when torch.compile succeeds the runner's model is replaced by the returned compiled object."""
+    # Returning a distinct sentinel (rather than the same model) makes the store-back observable: a version that called
+    # compile but dropped the assignment would leave runner.model unchanged and fail here.
     compiled_sentinel = object()
     seen = {"model": None}
 
@@ -242,7 +240,8 @@ def test_optimize_torch_compile_success(monkeypatch):
 
 
 def test_optimize_torch_compile_failure_falls_back_with_warning(monkeypatch):
-    # A torch.compile backend error is swallowed and downgraded to a Python warning; eager execution continues.
+    """Verifies that a torch.compile backend error is swallowed and downgraded to a warning, with eager fallback."""
+
     def boom(_model):
         error_message = "backend go boom"
         raise RuntimeError(error_message)
@@ -256,10 +255,10 @@ def test_optimize_torch_compile_failure_falls_back_with_warning(monkeypatch):
 
 
 def test_optimize_cuda_device_type_branch(monkeypatch):
-    # A "cuda:N"-prefixed device string must collapse to the "cuda" autocast device type (torch.autocast rejects a
-    # bare "cuda:0"). Capture the arguments torch.autocast is actually called with, and drive the predict closure with
-    # a FakeBatch so no real GPU is needed. The assertion fails if the ternary took the else branch (device_type would
-    # be the full "cuda:0" string) or forwarded the wrong dtype.
+    """Verifies that a "cuda:N"-prefixed device string collapses to the "cuda" autocast device type."""
+    # torch.autocast rejects a bare "cuda:0". Capture the arguments torch.autocast is actually called with, and drive
+    # the predict closure with a FakeBatch so no real GPU is needed. The assertion fails if the ternary took the else
+    # branch (device_type would be the full "cuda:0" string) or forwarded the wrong dtype.
     recorded = {}
 
     def fake_autocast(*, device_type, dtype):
@@ -272,17 +271,18 @@ def test_optimize_cuda_device_type_branch(monkeypatch):
     runners._optimize_inference_runner(runner=runner, profile=make_profile(amp_dtype=torch.float16))
 
     batch = FakeBatch(length=2, moved=torch.zeros(2, 5))
-    out = runner.predict(batch)
+    output = runner.predict(batch)
 
     assert recorded["device_type"] == "cuda"  # cuda:0 -> "cuda", not the full device string
     assert recorded["dtype"] is torch.float16  # profile amp_dtype forwarded verbatim
     assert batch.to_device == "cuda:0"  # move_inputs targeted the runner's actual (full) device
-    assert len(out) == 2  # the predict body ran end-to-end under the injected autocast context
+    assert len(output) == 2  # the predict body ran end-to-end under the injected autocast context
 
 
 def test_optimize_non_cuda_device_type_passthrough(monkeypatch):
-    # The else branch of the device-type ternary: a non-"cuda" device string is forwarded to torch.autocast verbatim
-    # (e.g. "mps"), never collapsed. This pins the branch that the cuda test above deliberately does not exercise.
+    """Verifies that a non-"cuda" device string is forwarded to torch.autocast verbatim, never collapsed."""
+    # The else branch of the device-type ternary (e.g. "mps"). This pins the branch that the cuda test above
+    # deliberately does not exercise.
     recorded = {}
 
     def fake_autocast(*, device_type, dtype):
@@ -302,20 +302,18 @@ def test_optimize_non_cuda_device_type_passthrough(monkeypatch):
     assert batch.to_device == "mps"
 
 
-# ----------------------------------------------------------------------------------------------------------------------
 # pose predict path
-# ----------------------------------------------------------------------------------------------------------------------
 
 
 def test_pose_predict_no_dynamic_no_amp():
-    # Null-context (amp off), no dynamic cropper: predict returns one dict per frame with per-frame indexed arrays.
+    """Verifies that with amp off and no dynamic cropper, predict returns one dict per frame with indexed arrays."""
     runner = new_pose_runner(batch_size=3, dynamic=None)
     runners._optimize_inference_runner(runner=runner, profile=make_profile(amp_dtype=None))
     inputs = torch.zeros(3, 5)
-    out = runner.predict(inputs)
+    output = runner.predict(inputs)
 
-    assert len(out) == 3
-    for index, frame in enumerate(out):
+    assert len(output) == 3
+    for index, frame in enumerate(output):
         assert set(frame) == {"bodypart", "unique"}
         assert frame["bodypart"]["poses"].tolist() == [float(index * 2), float(index * 2 + 1)]
         assert frame["unique"]["poses"].tolist() == [float(index * 3), float(index * 3 + 1), float(index * 3 + 2)]
@@ -325,7 +323,7 @@ def test_pose_predict_no_dynamic_no_amp():
 
 
 def test_pose_predict_forwards_kwargs_to_model():
-    # Extra keyword arguments to predict are forwarded to the model forward call.
+    """Verifies that extra keyword arguments to predict are forwarded to the model forward call."""
     runner = new_pose_runner(batch_size=2)
     runners._optimize_inference_runner(runner=runner, profile=make_profile())
     runner.predict(torch.zeros(2, 4), extra="value")
@@ -333,68 +331,62 @@ def test_pose_predict_forwards_kwargs_to_model():
 
 
 def test_pose_predict_with_dynamic_channels_last_and_amp():
-    # Dynamic cropper present, channels_last on, bfloat16 autocast on: crop/update are invoked and the channels-last
-    # move path (contiguous on a 4D batch) runs under a real CPU autocast context.
+    """Verifies that a dynamic cropper, channels_last, and amp run crop/update under a real CPU autocast context."""
     dynamic = FakeDynamic()
     runner = new_pose_runner(batch_size=2, dynamic=dynamic)
     profile = make_profile(amp_dtype=torch.bfloat16, channels_last=True, pin_memory=True)
     runners._optimize_inference_runner(runner=runner, profile=profile)
 
     inputs = torch.zeros(2, 3, 4, 4)  # NCHW so the channels-last contiguous conversion is valid
-    out = runner.predict(inputs)
+    output = runner.predict(inputs)
 
     assert dynamic.cropped is inputs  # crop was called with the raw batch
     assert dynamic.updated is not None  # update was called with the bodypart poses
-    assert len(out) == 2
+    assert len(output) == 2
     # The update RESULT (poses + UPDATE_OFFSET) must be stored back into the bodypart poses, not discarded. The fake
     # model emits arange-valued bodypart poses ([[0, 1], [2, 3]] for batch_size 2), so after the offset each frame's
     # poses shift by exactly UPDATE_OFFSET. Non-bodypart heads (unique) are untouched by update.
     offset = FakeDynamic.UPDATE_OFFSET
-    assert out[0]["bodypart"]["poses"].tolist() == [0.0 + offset, 1.0 + offset]
-    assert out[1]["bodypart"]["poses"].tolist() == [2.0 + offset, 3.0 + offset]
-    assert out[0]["unique"]["poses"].tolist() == [0.0, 1.0, 2.0]  # unique head not shifted by the dynamic update
+    assert output[0]["bodypart"]["poses"].tolist() == [0.0 + offset, 1.0 + offset]
+    assert output[1]["bodypart"]["poses"].tolist() == [2.0 + offset, 3.0 + offset]
+    assert output[0]["unique"]["poses"].tolist() == [0.0, 1.0, 2.0]  # unique head not shifted by the dynamic update
     # The moved inputs carry the channels-last memory format.
     assert runner.model.last_inputs.is_contiguous(memory_format=torch.channels_last)
 
 
-# ----------------------------------------------------------------------------------------------------------------------
 # detector predict path
-# ----------------------------------------------------------------------------------------------------------------------
 
 
 def test_detector_predict_no_amp():
-    # Detector predict reshapes boxes to (-1, 4) and scores to (-1) per detection, returning host numpy arrays.
+    """Verifies that detector predict reshapes boxes to (-1, 4) and scores to (-1) per detection into host arrays."""
     items = detector_items()
     runner = new_detector_runner(items=items)
     runners._optimize_inference_runner(runner=runner, profile=make_profile(amp_dtype=None))
-    out = runner.predict(torch.zeros(2, 5))
+    output = runner.predict(torch.zeros(2, 5))
 
-    assert len(out) == 2
-    assert out[0]["detection"]["bboxes"].shape == (1, 4)
-    assert out[0]["detection"]["scores"].tolist() == pytest.approx([0.9])
-    assert out[1]["detection"]["bboxes"].shape == (2, 4)
-    assert out[1]["detection"]["scores"].tolist() == pytest.approx([0.8, 0.7])
+    assert len(output) == 2
+    assert output[0]["detection"]["bboxes"].shape == (1, 4)
+    assert output[0]["detection"]["scores"].tolist() == pytest.approx([0.9])
+    assert output[1]["detection"]["bboxes"].shape == (2, 4)
+    assert output[1]["detection"]["scores"].tolist() == pytest.approx([0.8, 0.7])
 
 
 def test_detector_predict_channels_last_and_amp():
-    # channels_last + bfloat16 autocast: the detector move path runs the contiguous conversion under autocast.
+    """Verifies that with channels_last and bfloat16 autocast the detector move path runs contiguous under autocast."""
     runner = new_detector_runner(items=detector_items())
     profile = make_profile(amp_dtype=torch.bfloat16, channels_last=True, pin_memory=True)
     runners._optimize_inference_runner(runner=runner, profile=profile)
     inputs = torch.zeros(2, 3, 4, 4)
-    out = runner.predict(inputs)
-    assert len(out) == 2
+    output = runner.predict(inputs)
+    assert len(output) == 2
     assert runner.model.last_inputs.is_contiguous(memory_format=torch.channels_last)
 
 
-# ----------------------------------------------------------------------------------------------------------------------
 # patch_dlc_runner_builders: context manager wrapping / restoration / reentrancy
-# ----------------------------------------------------------------------------------------------------------------------
 
 
 def test_patch_wraps_builders_and_restores(monkeypatch):
-    # Inside the context the DLC builders are replaced by wrappers that optimize their output; on exit the originals
-    # are restored exactly.
+    """Verifies that inside the context the DLC builders are replaced by optimizing wrappers and restored on exit."""
     pose_calls = {"n": 0}
     detector_calls = {"n": 0}
 
@@ -430,8 +422,8 @@ def test_patch_wraps_builders_and_restores(monkeypatch):
 
 
 def test_patch_reentrancy_guard_leaves_nested_build_stock(monkeypatch):
-    # A builder that recursively constructs another runner through the patched function must get a stock (unoptimized)
-    # nested runner, since only the outermost build is optimized.
+    """Verifies that a runner recursively built through the patched builder stays stock, not optimized."""
+    # Only the outermost build is optimized; the nested build hits the reentrancy guard and stays stock.
     nested = {}
 
     def outer_pose_builder(*args, **kwargs):

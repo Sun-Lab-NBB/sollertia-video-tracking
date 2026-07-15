@@ -1,11 +1,11 @@
-"""Tests for the DeepLabCut training pipeline orchestration.
+"""Contains tests for the DeepLabCut training pipeline orchestration.
 
 These tests drive the real orchestration logic in ``training.pipeline`` on a headless, GPU-free box by monkeypatching
 only the module-level bindings that would otherwise touch a real DLC runtime, CUDA device, multiprocessing pool, or the
 process's file descriptors. Every DLC handoff (``DLCLoader``, model builders, the training runner, evaluation) and every
 process-management call (``mp.spawn``, ``dist.*``, ``torch.cuda.set_device``) is replaced with a lightweight recording
-stub, so the pipeline's own branching, config assembly, worker wiring, and reporting run in-process without any GPU,
-network, or long-running training.
+stub. The pipeline's own branching, config assembly, worker wiring, and reporting therefore run in-process without any
+GPU, network, or long-running training.
 """
 
 import os
@@ -43,9 +43,7 @@ from sollertia_video_tracking.training.pipeline import (
 )
 from sollertia_video_tracking.training.optimization import MultiGpuStrategy, OptimizationProfile
 
-# --------------------------------------------------------------------------------------------------------------------
 # Shared helpers and fakes
-# --------------------------------------------------------------------------------------------------------------------
 
 
 def _profile(**overrides) -> OptimizationProfile:
@@ -110,13 +108,11 @@ def _make_launch(profile, **overrides) -> _TrainingLaunch:
     return _TrainingLaunch(**defaults)
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # TrainingSummary.describe
-# --------------------------------------------------------------------------------------------------------------------
 
 
 def test_training_summary_describe_cuda_with_evaluation():
-    """A CUDA run reports the strategy/world-size location and appends the evaluation line."""
+    """Verifies that a CUDA run reports the strategy/world-size location and appends the evaluation line."""
     summary = TrainingSummary(
         config=Path("c.yaml"),
         shuffle=3,
@@ -135,7 +131,7 @@ def test_training_summary_describe_cuda_with_evaluation():
 
 
 def test_training_summary_describe_cpu_no_tasks_no_evaluation():
-    """A CPU run with nothing trained reports 'nothing', omits the strategy suffix, and has no second line."""
+    """Verifies that a CPU run with nothing trained reports 'nothing', omits the strategy suffix, and has one line."""
     summary = TrainingSummary(
         config=Path("c.yaml"),
         shuffle=1,
@@ -153,13 +149,11 @@ def test_training_summary_describe_cpu_no_tasks_no_evaluation():
     assert "\n" not in text
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _is_positive_dimension / _has_fixed_dimensions / _augmentation_is_fixed_size
-# --------------------------------------------------------------------------------------------------------------------
 
 
 def test_is_positive_dimension_accepts_only_positive_ints():
-    """Only positive plain integers are dimensions; zero, negatives, bools, floats, and strings are rejected."""
+    """Verifies that only positive integers are dimensions; zero, negatives, bools, floats, and strings are rejected."""
     bool_value = True  # A boolean is an int subclass but must still be rejected as a dimension.
     assert _is_positive_dimension(5) is True
     assert _is_positive_dimension(0) is False
@@ -170,35 +164,33 @@ def test_is_positive_dimension_accepts_only_positive_ints():
 
 
 def test_has_fixed_dimensions_requires_both_positive():
-    """A block has fixed dimensions only when both width and height are positive integers."""
+    """Verifies that a block has fixed dimensions only when both width and height are positive integers."""
     assert _has_fixed_dimensions({"width": 10, "height": 20}) is True
     assert _has_fixed_dimensions({"width": 0, "height": 20}) is False
     assert _has_fixed_dimensions({"width": 10}) is False
 
 
 def test_augmentation_is_fixed_size_via_crop_sampling():
-    """A fixed crop-sampling block forces a single spatial size."""
+    """Verifies that a fixed crop-sampling block forces a single spatial size."""
     assert _augmentation_is_fixed_size({"crop_sampling": {"width": 64, "height": 64}}) is True
 
 
 def test_augmentation_is_fixed_size_via_resize_without_keep_ratio():
-    """A fixed resize without aspect-ratio preservation forces a single spatial size."""
+    """Verifies that a fixed resize without aspect-ratio preservation forces a single spatial size."""
     assert _augmentation_is_fixed_size({"resize": {"width": 64, "height": 48}}) is True
 
 
 def test_augmentation_is_fixed_size_resize_with_keep_ratio_is_not_fixed():
-    """A resize that preserves the aspect ratio does not force a single spatial size."""
+    """Verifies that a resize that preserves the aspect ratio does not force a single spatial size."""
     assert _augmentation_is_fixed_size({"resize": {"width": 64, "height": 48, "keep_ratio": True}}) is False
 
 
 def test_augmentation_is_fixed_size_empty_is_not_fixed():
-    """A pipeline that neither crops nor resizes leaves the size free to vary."""
+    """Verifies that a pipeline that neither crops nor resizes leaves the size free to vary."""
     assert _augmentation_is_fixed_size({}) is False
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # detect_fixed_input_size
-# --------------------------------------------------------------------------------------------------------------------
 
 
 def _patch_loader(monkeypatch, loader):
@@ -207,7 +199,7 @@ def _patch_loader(monkeypatch, loader):
 
 
 def test_detect_fixed_input_size_true_without_detector(monkeypatch):
-    """A bottom-up shuffle whose pose transform is fixed reports fixed size."""
+    """Verifies that a bottom-up shuffle whose pose transform is fixed reports fixed size."""
     loader = FakeLoader(
         model_cfg={"data": {"train": {"crop_sampling": {"width": 100, "height": 100}}}},
         pose_task=Task.BOTTOM_UP,
@@ -218,7 +210,7 @@ def test_detect_fixed_input_size_true_without_detector(monkeypatch):
 
 
 def test_detect_fixed_input_size_false_when_detector_variable_size(monkeypatch):
-    """A trained detector with a non-fixed transform forces the whole run to report not-fixed."""
+    """Verifies that a trained detector with a non-fixed transform forces the whole run to report not-fixed."""
     loader = FakeLoader(
         model_cfg={
             "detector": {"train_settings": {"epochs": 2}, "data": {"train": {}}},
@@ -232,7 +224,7 @@ def test_detect_fixed_input_size_false_when_detector_variable_size(monkeypatch):
 
 
 def test_detect_fixed_input_size_true_when_detector_and_pose_fixed(monkeypatch):
-    """A trained detector whose transform is fixed, alongside a fixed pose transform, reports fixed size."""
+    """Verifies that a trained detector whose transform is fixed, with a fixed pose transform, reports fixed size."""
     loader = FakeLoader(
         model_cfg={
             "detector": {"train_settings": {"epochs": 2}, "data": {"train": {"resize": {"width": 50, "height": 50}}}},
@@ -246,7 +238,7 @@ def test_detect_fixed_input_size_true_when_detector_and_pose_fixed(monkeypatch):
 
 
 def test_detect_fixed_input_size_untrained_detector_defers_to_pose(monkeypatch):
-    """A detector configured for zero epochs is not trained, so only the pose transform decides the result."""
+    """Verifies that a zero-epoch detector is not trained, so only the pose transform decides the result."""
     loader = FakeLoader(
         model_cfg={
             "detector": {"train_settings": {"epochs": 0}, "data": {"train": {}}},
@@ -260,7 +252,7 @@ def test_detect_fixed_input_size_untrained_detector_defers_to_pose(monkeypatch):
 
 
 def test_detect_fixed_input_size_swallows_loader_errors(monkeypatch):
-    """Any failure reading the configuration conservatively reports not-fixed."""
+    """Verifies that any failure reading the configuration conservatively reports not-fixed."""
 
     def boom(**_kwargs):
         message = "cannot read config"
@@ -270,13 +262,11 @@ def test_detect_fixed_input_size_swallows_loader_errors(monkeypatch):
     assert detect_fixed_input_size("cfg") is False
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _plan_training_tasks
-# --------------------------------------------------------------------------------------------------------------------
 
 
 def test_plan_training_tasks_top_down_trains_detector_then_pose():
-    """A top-down shuffle with a trained detector plans the detector before the pose model."""
+    """Verifies that a top-down shuffle with a trained detector plans the detector before the pose model."""
     loader = FakeLoader(
         model_cfg={"detector": {"train_settings": {"epochs": 3}}, "train_settings": {"epochs": 10}},
         pose_task=Task.TOP_DOWN,
@@ -286,7 +276,7 @@ def test_plan_training_tasks_top_down_trains_detector_then_pose():
 
 
 def test_plan_training_tasks_top_down_untrained_detector_is_pose_only():
-    """A top-down shuffle whose detector has zero epochs plans only the pose model."""
+    """Verifies that a top-down shuffle whose detector has zero epochs plans only the pose model."""
     loader = FakeLoader(
         model_cfg={"detector": {"train_settings": {"epochs": 0}}, "train_settings": {"epochs": 10}},
         pose_task=Task.TOP_DOWN,
@@ -296,7 +286,7 @@ def test_plan_training_tasks_top_down_untrained_detector_is_pose_only():
 
 
 def test_plan_training_tasks_bottom_up_is_pose_only():
-    """A bottom-up shuffle without a detector plans only the pose model."""
+    """Verifies that a bottom-up shuffle without a detector plans only the pose model."""
     loader = FakeLoader(
         model_cfg={"train_settings": {"epochs": 10}},
         pose_task=Task.BOTTOM_UP,
@@ -306,7 +296,7 @@ def test_plan_training_tasks_bottom_up_is_pose_only():
 
 
 def test_plan_training_tasks_detector_only_when_pose_epochs_zero():
-    """A top-down shuffle with a trained detector but zero pose epochs plans only the detector."""
+    """Verifies that a top-down shuffle with a trained detector but zero pose epochs plans only the detector."""
     loader = FakeLoader(
         model_cfg={"detector": {"train_settings": {"epochs": 3}}, "train_settings": {"epochs": 0}},
         pose_task=Task.TOP_DOWN,
@@ -315,47 +305,43 @@ def test_plan_training_tasks_detector_only_when_pose_epochs_zero():
     assert _plan_training_tasks(loader) == ("detector",)
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _resolve_process_placement
-# --------------------------------------------------------------------------------------------------------------------
 
 
 def test_resolve_process_placement_cpu():
-    """A CPU run uses the CPU device with no GPUs and no DDP."""
+    """Verifies that a CPU run uses the CPU device with no GPUs and no DDP."""
     assert _resolve_process_placement(_profile(device="cpu"), rank=0) == ("cpu", None, False, 0)
 
 
 def test_resolve_process_placement_mps_detector_falls_back_to_cpu():
-    """The detector cannot train on MPS, so it falls back to the CPU."""
+    """Verifies that the detector cannot train on MPS, so it falls back to the CPU."""
     assert _resolve_process_placement(_profile(device="mps"), rank=0, task=Task.DETECT) == ("cpu", None, False, 0)
 
 
 def test_resolve_process_placement_mps_pose_stays_on_mps():
-    """A non-detector task keeps the MPS device."""
+    """Verifies that a non-detector task keeps the MPS device."""
     assert _resolve_process_placement(_profile(device="mps"), rank=0, task=Task.BOTTOM_UP) == ("mps", None, False, 0)
 
 
 def test_resolve_process_placement_cuda_ddp_uses_per_rank_gpu():
-    """Under DDP the process's own GPU index drives the device, DDP flag, and local rank."""
+    """Verifies that under DDP the process's own GPU index drives the device, DDP flag, and local rank."""
     profile = _profile(device="cuda", gpus=(2, 3), multi_gpu_strategy=MultiGpuStrategy.DDP)
     assert _resolve_process_placement(profile, rank=1) == ("cuda", [3], True, 3)
 
 
 def test_resolve_process_placement_cuda_dp_uses_all_gpus():
-    """Under DataParallel one process holds every GPU and does not use DDP."""
+    """Verifies that under DataParallel one process holds every GPU and does not use DDP."""
     profile = _profile(device="cuda", gpus=(0, 1), multi_gpu_strategy=MultiGpuStrategy.DP)
     assert _resolve_process_placement(profile, rank=0) == ("cuda", [0, 1], False, 0)
 
 
 def test_resolve_process_placement_cuda_single_uses_first_gpu():
-    """A single-GPU run uses the first configured GPU without DDP."""
+    """Verifies that a single-GPU run uses the first configured GPU without DDP."""
     profile = _profile(device="cuda", gpus=(5,), multi_gpu_strategy=MultiGpuStrategy.SINGLE)
     assert _resolve_process_placement(profile, rank=0) == ("cuda", [5], False, 0)
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _build_pose_or_detector_model
-# --------------------------------------------------------------------------------------------------------------------
 
 
 class _FakeBuilder:
@@ -378,7 +364,7 @@ class _FakeWeightInit:
 
 
 def test_build_model_detector_with_transfer_weights(monkeypatch):
-    """A weight-init config disables pretrained and routes a detector task through DETECTORS.build."""
+    """Verifies that a weight-init config disables pretrained and routes a detector task through DETECTORS.build."""
     detectors = _FakeBuilder()
     pose = _FakeBuilder()
     monkeypatch.setattr(pipeline, "DETECTORS", detectors)
@@ -396,7 +382,7 @@ def test_build_model_detector_with_transfer_weights(monkeypatch):
 
 
 def test_build_model_pose_resumed_disables_pretrained_backbone(monkeypatch):
-    """Resuming from a snapshot without a weight-init config disables the pretrained backbone."""
+    """Verifies that resuming from a snapshot without a weight-init config disables the pretrained backbone."""
     pose = _FakeBuilder()
     monkeypatch.setattr(pipeline, "PoseModel", pose)
     monkeypatch.setattr(pipeline, "DETECTORS", _FakeBuilder())
@@ -408,7 +394,7 @@ def test_build_model_pose_resumed_disables_pretrained_backbone(monkeypatch):
 
 
 def test_build_model_pose_from_scratch_uses_pretrained_backbone(monkeypatch):
-    """A fresh pose model with neither weight-init nor a snapshot uses the pretrained backbone."""
+    """Verifies that a fresh pose model with neither weight-init nor a snapshot uses the pretrained backbone."""
     pose = _FakeBuilder()
     monkeypatch.setattr(pipeline, "PoseModel", pose)
     monkeypatch.setattr(pipeline, "DETECTORS", _FakeBuilder())
@@ -419,9 +405,7 @@ def test_build_model_pose_from_scratch_uses_pretrained_backbone(monkeypatch):
     assert pose.calls == [({"backbone": "resnet"}, {"weight_init": None, "pretrained_backbone": True})]
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _build_dataloaders
-# --------------------------------------------------------------------------------------------------------------------
 
 
 def _patch_dataloader_factories(monkeypatch):
@@ -454,7 +438,7 @@ def _patch_dataloader_factories(monkeypatch):
 
 
 def test_build_dataloaders_ddp_injects_distributed_sampler(monkeypatch):
-    """The DDP path builds a DistributedSampler, applies the collate function, and enables persistent workers."""
+    """Verifies that the DDP path builds a DistributedSampler, applies collate, and enables persistent workers."""
     dataloader_calls, sampler_calls, collate = _patch_dataloader_factories(monkeypatch)
     loader = FakeLoader(model_cfg={}, pose_task=Task.BOTTOM_UP, model_folder=Path("/m"))
     run_config = {
@@ -462,7 +446,7 @@ def test_build_dataloaders_ddp_injects_distributed_sampler(monkeypatch):
         "train_settings": {"batch_size": 4, "dataloader_workers": 2, "dataloader_pin_memory": True},
     }
 
-    train_dl, valid_dl = _build_dataloaders(loader, run_config, Task.BOTTOM_UP, ddp=True, rank=1, world_size=2)
+    train_loader, valid_loader = _build_dataloaders(loader, run_config, Task.BOTTOM_UP, ddp=True, rank=1, world_size=2)
 
     assert sampler_calls == [
         {
@@ -487,11 +471,11 @@ def test_build_dataloaders_ddp_injects_distributed_sampler(monkeypatch):
     assert dataloader_calls[1]["num_workers"] == 2
     assert dataloader_calls[1]["pin_memory"] is True
     assert dataloader_calls[1]["persistent_workers"] is True
-    assert (train_dl, valid_dl) == (("dataloader", 1), ("dataloader", 2))
+    assert (train_loader, valid_loader) == (("dataloader", 1), ("dataloader", 2))
 
 
 def test_build_dataloaders_single_process_shuffles_without_collate(monkeypatch):
-    """Without DDP the training loader shuffles itself, no sampler is built, and a missing collate stays None."""
+    """Verifies that without DDP the loader shuffles itself, no sampler is built, and a missing collate stays None."""
     dataloader_calls, sampler_calls, collate = _patch_dataloader_factories(monkeypatch)
     loader = FakeLoader(model_cfg={}, pose_task=Task.BOTTOM_UP, model_folder=Path("/m"))
     run_config = {
@@ -515,9 +499,7 @@ def test_build_dataloaders_single_process_shuffles_without_collate(monkeypatch):
     assert dataloader_calls[1]["persistent_workers"] is False
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _train_single_model
-# --------------------------------------------------------------------------------------------------------------------
 
 
 class _FakeModel:
@@ -580,7 +562,7 @@ def _patch_train_single_model_deps(monkeypatch, *, starting_epoch=0):
 
 
 def test_train_single_model_rank0_builds_logger_and_fits(monkeypatch):
-    """Rank 0 with a queue caps snapshots, resumes from the snapshot, logs the total budget, and fits."""
+    """Verifies that rank 0 with a queue caps snapshots, resumes from the snapshot, logs the total budget, and fits."""
     model, runner, runner_calls, logger_holder = _patch_train_single_model_deps(monkeypatch, starting_epoch=2)
     loader = FakeLoader(model_cfg={}, pose_task=Task.BOTTOM_UP, model_folder=Path("/m"))
     run_config = {
@@ -618,7 +600,7 @@ def test_train_single_model_rank0_builds_logger_and_fits(monkeypatch):
 
 
 def test_train_single_model_detector_logger_uses_detector_label(monkeypatch):
-    """A detector task with an explicit snapshot skips the cap and resume fallback and labels its logger 'detector'."""
+    """Verifies that an explicit-snapshot detector skips the cap and resume fallback, labeling its logger 'detector'."""
     _model, _runner, runner_calls, logger_holder = _patch_train_single_model_deps(monkeypatch)
     loader = FakeLoader(model_cfg={}, pose_task=Task.TOP_DOWN, model_folder=Path("/m"))
     run_config = {
@@ -647,7 +629,7 @@ def test_train_single_model_detector_logger_uses_detector_label(monkeypatch):
 
 
 def test_train_single_model_non_rank0_has_no_logger(monkeypatch):
-    """A non-rank-0 process attaches no logger and reports no epoch budget."""
+    """Verifies that a non-rank-0 process attaches no logger and reports no epoch budget."""
     _model, runner, runner_calls, logger_holder = _patch_train_single_model_deps(monkeypatch)
     loader = FakeLoader(model_cfg={}, pose_task=Task.BOTTOM_UP, model_folder=Path("/m"))
     run_config = {"runner": {"snapshots": {"max_snapshots": 1}}, "train_settings": {"epochs": 4, "display_iters": 20}}
@@ -670,9 +652,7 @@ def test_train_single_model_non_rank0_has_no_logger(monkeypatch):
     assert runner.fit_kwargs["epochs"] == 4
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _run_training_worker
-# --------------------------------------------------------------------------------------------------------------------
 
 
 def _patch_worker_deps(monkeypatch, loader):
@@ -692,7 +672,7 @@ def _patch_worker_deps(monkeypatch, loader):
 
 
 def test_run_training_worker_single_process_top_down(monkeypatch, tmp_path):
-    """The single-process top-down worker seeds, optimizes, routes logging, and trains the detector then the pose."""
+    """Verifies that the single-process top-down worker seeds, optimizes, routes logs, and trains detector then pose."""
     loader = FakeLoader(
         model_cfg={
             "device": "cpu",
@@ -719,7 +699,7 @@ def test_run_training_worker_single_process_top_down(monkeypatch, tmp_path):
 
 
 def test_run_training_worker_ddp_initializes_and_tears_down_process_group(monkeypatch, tmp_path):
-    """A DDP worker initializes the process group, sets its device, barriers between models, and tears it down."""
+    """Verifies that a DDP worker inits the process group, sets its device, barriers models, and tears it down."""
     loader = FakeLoader(
         model_cfg={
             "device": "cuda",
@@ -755,9 +735,7 @@ def test_run_training_worker_ddp_initializes_and_tears_down_process_group(monkey
     assert [call["task"] for call in records.train] == [Task.DETECT, Task.TOP_DOWN]
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # train_model
-# --------------------------------------------------------------------------------------------------------------------
 
 
 class _FakeMonitor:
@@ -835,7 +813,7 @@ def _patch_train_model_deps(monkeypatch, loader, *, dup_stream, worker=None, eva
 
 
 def test_train_model_single_process_with_monitor_and_evaluation(monkeypatch, tmp_path):
-    """A single-process run starts and stops the monitor, runs the worker on rank 0, and evaluates the pose model."""
+    """Verifies that a single-process run starts and stops the monitor, runs the rank-0 worker, and evaluates pose."""
     loader = FakeLoader(
         model_cfg={"train_settings": {"epochs": 10}},
         pose_task=Task.BOTTOM_UP,
@@ -871,7 +849,7 @@ def test_train_model_single_process_with_monitor_and_evaluation(monkeypatch, tmp
 
 
 def test_train_model_without_progress_skips_monitor(monkeypatch, tmp_path):
-    """Disabling the progress display skips the monitor, manager, and stderr duplicate entirely."""
+    """Verifies that disabling the progress display skips the monitor, manager, and stderr duplicate entirely."""
     loader = FakeLoader(
         model_cfg={"train_settings": {"epochs": 3}},
         pose_task=Task.BOTTOM_UP,
@@ -890,7 +868,7 @@ def test_train_model_without_progress_skips_monitor(monkeypatch, tmp_path):
 
 
 def test_train_model_ddp_spawns_workers(monkeypatch, tmp_path):
-    """A DDP profile spawns one worker per GPU and reports the mixed-precision and strategy in the summary."""
+    """Verifies that a DDP profile spawns one worker per GPU and reports mixed-precision and strategy in the summary."""
     loader = FakeLoader(
         model_cfg={"train_settings": {"epochs": 100}},
         pose_task=Task.BOTTOM_UP,
@@ -918,7 +896,7 @@ def test_train_model_ddp_spawns_workers(monkeypatch, tmp_path):
 
 
 def test_train_model_applies_detector_and_all_overrides(monkeypatch, tmp_path):
-    """Every override is threaded into the config updates, including the detector-specific keys for a top-down run."""
+    """Verifies that every override is threaded into the config, including the detector-specific keys for top-down."""
     loader = FakeLoader(
         model_cfg={
             "train_settings": {"epochs": 5},
@@ -964,7 +942,7 @@ def test_train_model_applies_detector_and_all_overrides(monkeypatch, tmp_path):
 
 
 def test_train_model_skips_evaluation_without_pose(monkeypatch, tmp_path):
-    """A detector-only run does not run the post-training pose evaluation even when evaluation is requested."""
+    """Verifies that a detector-only run skips the post-training pose evaluation even when evaluation is requested."""
     loader = FakeLoader(
         model_cfg={
             "train_settings": {"epochs": 0},
@@ -983,7 +961,7 @@ def test_train_model_skips_evaluation_without_pose(monkeypatch, tmp_path):
 
 
 def test_train_model_rejects_memory_replay(monkeypatch, tmp_path):
-    """A SuperAnimal memory-replay shuffle is rejected before any training begins."""
+    """Verifies that a SuperAnimal memory-replay shuffle is rejected before any training begins."""
     loader = FakeLoader(
         model_cfg={"train_settings": {"epochs": 10, "weight_init": {"memory_replay": True}}},
         pose_task=Task.BOTTOM_UP,
@@ -1001,7 +979,7 @@ def test_train_model_rejects_memory_replay(monkeypatch, tmp_path):
 
 
 def test_train_model_reports_log_on_failure(monkeypatch, tmp_path):
-    """When the worker fails, the monitor is still cleaned up and the operator is pointed to the training log."""
+    """Verifies that when the worker fails, the monitor is still cleaned up and the operator is pointed to the log."""
     loader = FakeLoader(
         model_cfg={"train_settings": {"epochs": 10}},
         pose_task=Task.BOTTOM_UP,
@@ -1029,13 +1007,11 @@ def test_train_model_reports_log_on_failure(monkeypatch, tmp_path):
     assert dup_stream.closed
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _evaluate_after_training
-# --------------------------------------------------------------------------------------------------------------------
 
 
 def test_evaluate_after_training_cuda_success(monkeypatch):
-    """On CUDA the evaluation targets the first GPU and empties the cache first."""
+    """Verifies that on CUDA the evaluation targets the first GPU and empties the cache first."""
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     emptied = []
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: emptied.append(True))
@@ -1065,7 +1041,7 @@ def test_evaluate_after_training_cuda_success(monkeypatch):
 
 
 def test_evaluate_after_training_cpu_skips_cache_empty(monkeypatch):
-    """On a CPU run the device is passed through and the CUDA cache is not touched."""
+    """Verifies that on a CPU run the device is passed through and the CUDA cache is not touched."""
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     captured = {}
 
@@ -1090,7 +1066,7 @@ def test_evaluate_after_training_cpu_skips_cache_empty(monkeypatch):
 
 
 def test_evaluate_after_training_swallows_failure(monkeypatch, caplog):
-    """A failing evaluation is logged and swallowed so the completed training run is not lost."""
+    """Verifies that a failing evaluation is logged and swallowed so the completed training run is not lost."""
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
 
     def boom(*_args, **_kwargs):
@@ -1113,13 +1089,11 @@ def test_evaluate_after_training_swallows_failure(monkeypatch, caplog):
     assert any("Post-training evaluation failed" in record.message for record in caplog.records)
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _find_free_port / _route_logging_to_file / _duplicate_stderr / _redirect_worker_console / _report_training_log
-# --------------------------------------------------------------------------------------------------------------------
 
 
 def test_find_free_port_returns_positive_port():
-    """A free port is reserved, released, and returned as a genuinely bindable positive integer."""
+    """Verifies that a free port is reserved, released, and returned as a genuinely bindable positive integer."""
     port = _find_free_port()
     assert isinstance(port, int)
     assert 0 < port <= 65535
@@ -1130,7 +1104,7 @@ def test_find_free_port_returns_positive_port():
 
 
 def test_route_logging_to_file_quiet_removes_stream_handler(monkeypatch, tmp_path):
-    """Quieting the console detaches the plain stream handler while retaining the file handler."""
+    """Verifies that quieting the console detaches the plain stream handler while retaining the file handler."""
     recorded = []
     monkeypatch.setattr(pipeline, "setup_file_logging", recorded.append)
     root = logging.getLogger()
@@ -1149,7 +1123,7 @@ def test_route_logging_to_file_quiet_removes_stream_handler(monkeypatch, tmp_pat
 
 
 def test_route_logging_to_file_keeps_console_when_not_quiet(monkeypatch, tmp_path):
-    """Without quieting, the stream handler is left in place after the log file is configured."""
+    """Verifies that without quieting, the stream handler is left in place after the log file is configured."""
     recorded = []
     monkeypatch.setattr(pipeline, "setup_file_logging", recorded.append)
     root = logging.getLogger()
@@ -1165,7 +1139,7 @@ def test_route_logging_to_file_keeps_console_when_not_quiet(monkeypatch, tmp_pat
 
 
 def test_duplicate_stderr_returns_stream(monkeypatch, tmp_path):
-    """A distinct writable duplicate of stderr's descriptor is returned, and writes reach stderr's target file."""
+    """Verifies that a distinct writable duplicate of stderr's descriptor is returned, and writes reach its file."""
     backing_path = tmp_path / "stderr.txt"
     backing = backing_path.open("w")
     monkeypatch.setattr(pipeline.sys, "stderr", backing)
@@ -1184,7 +1158,7 @@ def test_duplicate_stderr_returns_stream(monkeypatch, tmp_path):
 
 
 def test_duplicate_stderr_returns_none_without_descriptor(monkeypatch):
-    """When stderr has no usable descriptor, None is returned instead of raising."""
+    """Verifies that when stderr has no usable descriptor, None is returned instead of raising."""
 
     class NoDescriptor:
         def fileno(self):
@@ -1196,7 +1170,7 @@ def test_duplicate_stderr_returns_none_without_descriptor(monkeypatch):
 
 
 def test_redirect_worker_console_inactive_is_noop(tmp_path):
-    """When inactive, the context manager runs its body without touching descriptors."""
+    """Verifies that when inactive, the context manager runs its body without touching descriptors."""
     ran = False
     with _redirect_worker_console(tmp_path / "unused.log", active=False):
         ran = True
@@ -1204,7 +1178,7 @@ def test_redirect_worker_console_inactive_is_noop(tmp_path):
 
 
 def test_redirect_worker_console_active_captures_descriptor_output(tmp_path):
-    """When active, descriptor-level stdout and stderr are appended to the log and restored on exit."""
+    """Verifies that when active, descriptor-level stdout and stderr are appended to the log and restored on exit."""
     log_path = tmp_path / "worker.log"
     with _redirect_worker_console(log_path, active=True):
         os.write(1, b"redirected-stdout\n")
@@ -1215,7 +1189,7 @@ def test_redirect_worker_console_active_captures_descriptor_output(tmp_path):
 
 
 def test_report_training_log_writes_notice(capsys):
-    """The failure notice names the training log and explains what it captured."""
+    """Verifies that the failure notice names the training log and explains what it captured."""
     _report_training_log(Path("/models/run/train.txt"))
     err = capsys.readouterr().err
     assert "Training did not complete" in err

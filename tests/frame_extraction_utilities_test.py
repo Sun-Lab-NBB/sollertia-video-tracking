@@ -1,4 +1,4 @@
-"""Tests for the shared frame-extraction utilities the k-means and outlier pipelines both build on."""
+"""Contains tests for the shared frame-extraction utilities the k-means and outlier pipelines both build on."""
 
 import queue
 from typing import ClassVar
@@ -29,9 +29,7 @@ from sollertia_video_tracking.frame_extraction.utilities import (
 )
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # Helpers
-# --------------------------------------------------------------------------------------------------------------------
 def _write_config(path, data) -> None:
     """Writes a minimal DeepLabCut config.yaml holding the given mapping."""
     with path.open("w") as config_file:
@@ -94,11 +92,9 @@ def _build_purge_project(tmp_path, *, scorer="S", with_video_sets=False):
     return config_path, video_a, video_b, labeled
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # Dataclasses and their properties
-# --------------------------------------------------------------------------------------------------------------------
 def test_purge_summary_count_properties():
-    """PurgeSummary reports the removed and human-labeled directory counts from its stored tuples."""
+    """Verifies that PurgeSummary reports the removed and human-labeled directory counts from its stored tuples."""
     summary = PurgeSummary(
         config_path=Path("cfg.yaml"),
         executed=False,
@@ -112,7 +108,7 @@ def test_purge_summary_count_properties():
 
 
 def test_refinement_status_summary_properties_and_describe():
-    """RefinementStatusSummary aggregates directory and frame counts, success, and a human-readable description."""
+    """Verifies that RefinementStatusSummary aggregates directory and frame counts, success, and its description."""
     pending = (
         RefinementDirectoryStatus(directory=Path("d1"), unrefined_frame_count=2),
         RefinementDirectoryStatus(directory=Path("d2"), unrefined_frame_count=3),
@@ -129,7 +125,7 @@ def test_refinement_status_summary_properties_and_describe():
 
 
 def test_refinement_status_summary_unsuccessful_when_unreadable():
-    """A summary carrying an unreadable directory reports itself as not fully successful."""
+    """Verifies that a summary carrying an unreadable directory reports itself as not fully successful."""
     summary = RefinementStatusSummary(
         config_path=Path("cfg.yaml"),
         iteration=0,
@@ -140,11 +136,9 @@ def test_refinement_status_summary_unsuccessful_when_unreadable():
     assert summary.pending_frame_count == 0
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # normalize_project_config
-# --------------------------------------------------------------------------------------------------------------------
 def test_normalize_project_config_rewrites_project_path(tmp_path):
-    """A project_path that differs from the config's own directory is normalized and persisted."""
+    """Verifies that a project_path that differs from the config's own directory is normalized and persisted."""
     config_path = tmp_path / "config.yaml"
     _write_config(config_path, {"project_path": "/wrong/place", "scorer": "S"})
 
@@ -158,7 +152,7 @@ def test_normalize_project_config_rewrites_project_path(tmp_path):
 
 
 def test_normalize_project_config_sets_frame_count(tmp_path):
-    """A positive frames_per_video is written as numframes2pick alongside an already-correct project_path."""
+    """Verifies that a positive frames_per_video is written as numframes2pick beside a correct project_path."""
     config_path = tmp_path / "config.yaml"
     _write_config(config_path, {"project_path": str(tmp_path), "scorer": "S"})
 
@@ -170,7 +164,7 @@ def test_normalize_project_config_sets_frame_count(tmp_path):
 
 
 def test_normalize_project_config_no_change_skips_rewrite(tmp_path):
-    """When nothing needs changing, the config file is left byte-for-byte untouched."""
+    """Verifies that when nothing needs changing, the config file is left byte-for-byte untouched."""
     config_path = tmp_path / "config.yaml"
     _write_config(config_path, {"project_path": str(tmp_path), "scorer": "S"})
     before = config_path.read_text()
@@ -182,7 +176,7 @@ def test_normalize_project_config_no_change_skips_rewrite(tmp_path):
 
 
 def test_normalize_project_config_rejects_bad_frame_count(tmp_path):
-    """A frame count below one that is not the -1 sentinel raises a ValueError naming the operation."""
+    """Verifies that a frame count below one that is not the -1 sentinel raises a ValueError naming the operation."""
     config_path = tmp_path / "config.yaml"
     _write_config(config_path, {"project_path": str(tmp_path), "scorer": "S"})
 
@@ -190,9 +184,7 @@ def test_normalize_project_config_rejects_bad_frame_count(tmp_path):
         normalize_project_config(config_path, frames_per_video=0, error_context="Ctx.")
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # iter_pinned_extraction (multiprocessing driven synchronously via fakes)
-# --------------------------------------------------------------------------------------------------------------------
 class _FakeManager:
     """A stand-in multiprocessing manager handing out plain thread-safe queues and recording its shutdown."""
 
@@ -297,7 +289,7 @@ def _patch_pinned_extraction(monkeypatch):
 
 
 def test_iter_pinned_extraction_with_progress(monkeypatch):
-    """With progress on, the loop starts and tears down the bar, streams done messages, and shuts the manager down."""
+    """Verifies that with progress on, the loop manages the bar, streams done messages, and shuts the manager down."""
     fake_context = _patch_pinned_extraction(monkeypatch)
 
     videos = ["/v/a.mp4", "/v/b.mp4"]
@@ -356,7 +348,7 @@ def test_iter_pinned_extraction_with_progress(monkeypatch):
 
 
 def test_iter_pinned_extraction_without_progress(monkeypatch):
-    """With progress off, the bar is never started, make_tasks gets None, and the manager is still shut down."""
+    """Verifies that with progress off, the bar never starts, make_tasks gets None, and the manager still shuts down."""
     fake_context = _patch_pinned_extraction(monkeypatch)
 
     captured = {}
@@ -393,7 +385,7 @@ def test_iter_pinned_extraction_without_progress(monkeypatch):
 
 
 def test_iter_pinned_extraction_tears_down_when_consumption_stops_early(monkeypatch):
-    """Abandoning the generator after one result still stops the bar and shuts the manager down via the finally block.
+    """Verifies that abandoning the generator early still tears down the bar and manager via the finally block.
 
     The loop documents that the bar and manager are always torn down even when the caller stops consuming results (or
     raises) mid-stream. Consuming a single result and then closing the still-suspended generator throws GeneratorExit
@@ -434,16 +426,14 @@ def test_iter_pinned_extraction_tears_down_when_consumption_stops_early(monkeypa
     assert fake_context.manager.shutdown_called is True
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # prune_empty_labeled_data_directories
-# --------------------------------------------------------------------------------------------------------------------
 def test_prune_no_labeled_data_directory(tmp_path):
-    """A project without a labeled-data tree prunes nothing and reports zero."""
+    """Verifies that a project without a labeled-data tree prunes nothing and reports zero."""
     assert prune_empty_labeled_data_directories(tmp_path) == 0
 
 
 def test_prune_removes_only_empty_real_directories(tmp_path, capsys):
-    """Only empty real directories are pruned; populated dirs, symlinks, and stray files are left alone."""
+    """Verifies that only empty real directories are pruned; populated dirs, symlinks, and stray files are kept."""
     labeled = tmp_path / "labeled-data"
     labeled.mkdir()
 
@@ -470,16 +460,14 @@ def test_prune_removes_only_empty_real_directories(tmp_path, capsys):
     assert "pruned 1 empty labeled-data directory(ies)" in capsys.readouterr().err
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # extracted_frame_paths
-# --------------------------------------------------------------------------------------------------------------------
 def test_extracted_frame_paths_missing_directory(tmp_path):
-    """A directory that does not exist yields an empty list."""
+    """Verifies that a directory that does not exist yields an empty list."""
     assert extracted_frame_paths(tmp_path / "nope") == []
 
 
 def test_extracted_frame_paths_excludes_labeled_overlays(tmp_path):
-    """Prediction overlays and non-image files are excluded from the sorted extracted-frame listing."""
+    """Verifies that prediction overlays and non-image files are excluded from the sorted extracted-frame listing."""
     directory = tmp_path / "vid"
     directory.mkdir()
     (directory / "img0001.png").touch()
@@ -490,11 +478,9 @@ def test_extracted_frame_paths_excludes_labeled_overlays(tmp_path):
     assert extracted_frame_paths(directory) == [directory / "img0001.png", directory / "img0010.png"]
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # frame_names_from_index
-# --------------------------------------------------------------------------------------------------------------------
 def test_frame_names_from_index_handles_tuple_and_flat_entries():
-    """Both the MultiIndex tuple form and the legacy flat-path-string form yield the trailing image name."""
+    """Verifies that both the MultiIndex tuple form and the flat-path-string form yield the trailing image name."""
     names = frame_names_from_index(
         [
             ("labeled-data", "vid", "img0001.png"),
@@ -504,27 +490,23 @@ def test_frame_names_from_index_handles_tuple_and_flat_entries():
     assert names == {"img0001.png", "img0002.png"}
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # finite_labeled_frame_names
-# --------------------------------------------------------------------------------------------------------------------
 def test_finite_labeled_frame_names_missing_file(tmp_path):
-    """A missing CollectedData file yields an empty set."""
+    """Verifies that a missing CollectedData file yields an empty set."""
     assert finite_labeled_frame_names(tmp_path / "nope.h5") == set()
 
 
 def test_finite_labeled_frame_names_filters_all_nan_rows(tmp_path):
-    """Only frames carrying at least one finite coordinate count as human-labeled."""
+    """Verifies that only frames carrying at least one finite coordinate count as human-labeled."""
     path = tmp_path / "CollectedData_S.h5"
     _write_label_table(path, ["img0001.png", "img0002.png"], finite_names={"img0001.png"})
 
     assert finite_labeled_frame_names(path) == {"img0001.png"}
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # machine_label_frame_names
-# --------------------------------------------------------------------------------------------------------------------
 def test_machine_label_frame_names_unions_all_tables(tmp_path):
-    """Every machinelabels iteration table and the refine table contribute their referenced frame names."""
+    """Verifies that every machinelabels iteration table and the refine table contribute their frame names."""
     directory = tmp_path / "vid"
     directory.mkdir()
     _write_label_table(directory / "machinelabels-iter0.h5", ["img0001.png"])
@@ -535,17 +517,15 @@ def test_machine_label_frame_names_unions_all_tables(tmp_path):
 
 
 def test_machine_label_frame_names_empty_directory(tmp_path):
-    """A directory with no machine-label tables yields an empty set."""
+    """Verifies that a directory with no machine-label tables yields an empty set."""
     directory = tmp_path / "empty"
     directory.mkdir()
     assert machine_label_frame_names(directory) == set()
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # has_outlier_refinement_data
-# --------------------------------------------------------------------------------------------------------------------
 def test_has_outlier_refinement_data(tmp_path):
-    """A machinelabels iteration table or a refine table marks a directory as holding outlier-refinement data."""
+    """Verifies that a machinelabels iteration table or a refine table marks a directory as holding refinement data."""
     with_iteration = tmp_path / "with_iter"
     with_iteration.mkdir()
     (with_iteration / "machinelabels-iter3.h5").touch()
@@ -561,48 +541,44 @@ def test_has_outlier_refinement_data(tmp_path):
     assert has_outlier_refinement_data(empty) is False
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # select_registered_videos
-# --------------------------------------------------------------------------------------------------------------------
 def test_select_registered_videos_matches_and_reports_unmatched(tmp_path):
-    """Requests matching a registered video by resolved path are returned in order; the rest are unmatched."""
+    """Verifies that requests matching a registered video by resolved path return in order; the rest are unmatched."""
     video_a = tmp_path / "a.mp4"
     video_b = tmp_path / "b.mp4"
     registered = [str(video_a), str(video_b)]
     bogus = "/nonexistent/z.mp4"
 
-    matched, unmatched = select_registered_videos(registered, (str(video_a), bogus, str(video_a)))
+    matched, unmatched = select_registered_videos(
+        registered_videos=registered, requested_videos=(str(video_a), bogus, str(video_a))
+    )
 
     assert matched == [str(video_a)]
     assert unmatched == [bogus]
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # ensure_unique_video_stems
-# --------------------------------------------------------------------------------------------------------------------
 def test_ensure_unique_video_stems_allows_distinct_and_duplicate_paths():
-    """Distinct stems and an exact duplicate path do not collide."""
+    """Verifies that distinct stems and an exact duplicate path do not collide."""
     # The repeated identical path must not be treated as a collision.
     ensure_unique_video_stems(["/x/a.mp4", "/x/a.mp4", "/y/b.mp4"], error_context="Ctx.")
 
 
 def test_ensure_unique_video_stems_raises_on_collision():
-    """Two different paths sharing a file-name stem raise a ValueError."""
+    """Verifies that two different paths sharing a file-name stem raise a ValueError."""
     with pytest.raises(ValueError, match="share the file-name stem"):
         ensure_unique_video_stems(["/x/vid.mp4", "/y/vid.mp4"], error_context="Ctx.")
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # purge_labeled_data
-# --------------------------------------------------------------------------------------------------------------------
 def test_purge_missing_config_raises(tmp_path):
-    """A config path that is not a file raises FileNotFoundError."""
+    """Verifies that a config path that is not a file raises FileNotFoundError."""
     with pytest.raises(FileNotFoundError, match="does not point to a file"):
         purge_labeled_data(tmp_path / "missing.yaml")
 
 
 def test_purge_whole_project_dry_run(tmp_path):
-    """A dry run over the whole project reports every real per-video directory without deleting anything."""
+    """Verifies that a dry run over the whole project reports every real per-video directory and deletes nothing."""
     config_path, _, _, labeled = _build_purge_project(tmp_path)
 
     summary = purge_labeled_data(config_path)
@@ -621,7 +597,7 @@ def test_purge_whole_project_dry_run(tmp_path):
 
 
 def test_purge_whole_project_execute(tmp_path):
-    """An executed whole-project purge removes the per-video directories but leaves the excluded entries alone."""
+    """Verifies that an executed purge removes the per-video directories but leaves the excluded entries alone."""
     config_path, _, _, labeled = _build_purge_project(tmp_path)
 
     summary = purge_labeled_data(config_path, execute=True)
@@ -636,7 +612,7 @@ def test_purge_whole_project_execute(tmp_path):
 
 
 def test_purge_selected_videos_with_unmatched(tmp_path):
-    """Selecting specific videos purges only their directories and reports videos that matched nothing."""
+    """Verifies that selecting specific videos purges only their directories and reports videos that matched nothing."""
     config_path, video_a, _, labeled = _build_purge_project(tmp_path, with_video_sets=True)
     bogus = tmp_path / "videos" / "nope.mp4"
 
@@ -648,7 +624,7 @@ def test_purge_selected_videos_with_unmatched(tmp_path):
 
 
 def test_purge_whole_project_without_labeled_data(tmp_path):
-    """A project whose labeled-data tree does not exist purges nothing."""
+    """Verifies that a project whose labeled-data tree does not exist purges nothing."""
     config_path = tmp_path / "config.yaml"
     _write_config(config_path, {"scorer": "S", "project_path": str(tmp_path)})
 
@@ -659,17 +635,15 @@ def test_purge_whole_project_without_labeled_data(tmp_path):
     assert summary.labeled_directories == ()
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # summarize_refinement_status
-# --------------------------------------------------------------------------------------------------------------------
 def test_summarize_missing_config_raises(tmp_path):
-    """A config path that is not a file raises FileNotFoundError."""
+    """Verifies that a config path that is not a file raises FileNotFoundError."""
     with pytest.raises(FileNotFoundError, match="does not point to a file"):
         summarize_refinement_status(tmp_path / "missing.yaml")
 
 
 def test_summarize_whole_project(tmp_path):
-    """The whole-project scan lists directories with unrefined machine frames and records unreadable ones."""
+    """Verifies that the whole-project scan lists directories with unrefined frames and records unreadable ones."""
     scorer = "S"
     config_path = tmp_path / "config.yaml"
     _write_config(config_path, {"scorer": scorer, "iteration": 0, "project_path": str(tmp_path)})
@@ -716,7 +690,7 @@ def test_summarize_whole_project(tmp_path):
 
 
 def test_summarize_selected_videos(tmp_path):
-    """Selecting specific videos inspects only their directories and reports unmatched requests."""
+    """Verifies that selecting specific videos inspects only their directories and reports unmatched requests."""
     scorer = "S"
     videos_directory = tmp_path / "videos"
     videos_directory.mkdir()
@@ -751,7 +725,7 @@ def test_summarize_selected_videos(tmp_path):
 
 
 def test_summarize_without_labeled_data(tmp_path):
-    """A project whose labeled-data tree does not exist reports no pending directories."""
+    """Verifies that a project whose labeled-data tree does not exist reports no pending directories."""
     config_path = tmp_path / "config.yaml"
     _write_config(config_path, {"scorer": "S", "iteration": 2, "project_path": str(tmp_path)})
 

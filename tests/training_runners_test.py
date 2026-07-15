@@ -1,4 +1,4 @@
-"""Tests for the mixed-precision / DistributedDataParallel training-runner wrappers in ``training/runners.py``.
+"""Contains tests for the mixed-precision / DistributedDataParallel training-runner wrappers in ``training/runners.py``.
 
 The DeepLabCut runner classes are never fully constructed for the method-level tests: heavy runner objects are
 fabricated with ``object.__new__`` and given only the attributes the method under test reads. Multi-GPU and
@@ -21,9 +21,7 @@ from deeplabcut.pose_estimation_pytorch.runners.logger import ImageLoggerMixin
 
 from sollertia_video_tracking.training import runners
 
-# ----------------------------------------------------------------------------------------------------------------------
 # Shared fakes
-# ----------------------------------------------------------------------------------------------------------------------
 
 
 class FakeOptimizer:
@@ -59,7 +57,7 @@ class FakeScaler:
         self.calls.append("update")
 
 
-class FakePrepModel:
+class FakePreparationModel:
     """Minimal model stand-in for the ``_prepare_model_for_training`` and ``fit`` paths."""
 
     def __init__(self):
@@ -121,9 +119,7 @@ def new_detector_runner():
     return object.__new__(runners._OptimizedDetectorTrainingRunner)
 
 
-# ----------------------------------------------------------------------------------------------------------------------
 # build_optimized_training_runner: real end-to-end construction on the CPU
-# ----------------------------------------------------------------------------------------------------------------------
 
 
 def _base_runner_config():
@@ -137,8 +133,7 @@ def _base_runner_config():
 
 
 def test_build_pose_runner_defaults_prefix_and_gradient_scaler(tmp_path):
-    # A BOTTOM_UP task builds a pose runner; with no snapshot_prefix it falls back to the task default, and
-    # use_gradient_scaler=True constructs a real GradScaler (line 179), while load_head_weights threads through.
+    """Verifies that a BOTTOM_UP task builds a pose runner that uses the task-default snapshot prefix."""
     runner = runners.build_optimized_training_runner(
         runner_config=_base_runner_config(),
         model_folder=tmp_path,
@@ -150,16 +145,15 @@ def test_build_pose_runner_defaults_prefix_and_gradient_scaler(tmp_path):
         load_head_weights=False,
     )
     assert isinstance(runner, runners._OptimizedPoseTrainingRunner)
-    assert runner._load_head_weights is False
-    assert runner._gradient_scaler is not None
+    assert runner._load_head_weights is False  # load_head_weights threads through
+    assert runner._gradient_scaler is not None  # use_gradient_scaler=True constructs a real GradScaler (line 179)
     assert runner._amp_dtype is torch.bfloat16
     assert runner.snapshot_manager.snapshot_prefix == "snapshot"  # task default
     assert runner.scheduler is not None
 
 
 def test_build_detector_runner_custom_prefix_no_scaler(tmp_path):
-    # A DETECT task builds a detector runner; an explicit snapshot_prefix wins, a None scheduler stays None, and
-    # use_gradient_scaler defaults to False so no scaler is built.
+    """Verifies that a DETECT task builds a detector runner with an explicit prefix and no scheduler or scaler."""
     config = _base_runner_config()
     config["scheduler"] = None
     config["snapshot_prefix"] = "custom-prefix"
@@ -177,12 +171,11 @@ def test_build_detector_runner_custom_prefix_no_scaler(tmp_path):
     assert runner.scheduler is None
 
 
-# ----------------------------------------------------------------------------------------------------------------------
 # _is_main
-# ----------------------------------------------------------------------------------------------------------------------
 
 
 def test_is_main_without_ddp_is_always_main():
+    """Verifies that _is_main is True when DDP is disabled, regardless of the stored rank."""
     runner = new_pose_runner()
     runner._ddp = False
     runner._rank = 7  # ignored when DDP is off
@@ -190,6 +183,7 @@ def test_is_main_without_ddp_is_always_main():
 
 
 def test_is_main_with_ddp_rank_zero():
+    """Verifies that _is_main is True for the rank-zero process when DDP is enabled."""
     runner = new_pose_runner()
     runner._ddp = True
     runner._rank = 0
@@ -197,18 +191,18 @@ def test_is_main_with_ddp_rank_zero():
 
 
 def test_is_main_with_ddp_nonzero_rank_is_not_main():
+    """Verifies that _is_main is False for a non-zero rank when DDP is enabled."""
     runner = new_pose_runner()
     runner._ddp = True
     runner._rank = 3
     assert runner._is_main is False
 
 
-# ----------------------------------------------------------------------------------------------------------------------
 # _unwrap
-# ----------------------------------------------------------------------------------------------------------------------
 
 
 def test_unwrap_plain_model_returns_itself():
+    """Verifies that _unwrap returns a plain, unwrapped model unchanged."""
     runner = new_pose_runner()
     model = nn.Linear(2, 2)
     runner.model = model
@@ -216,14 +210,14 @@ def test_unwrap_plain_model_returns_itself():
 
 
 def test_unwrap_peels_torch_compile_orig_mod():
-    # A compiled model exposes ``_orig_mod``; _unwrap peels it so snapshot keys stay clean.
+    """Verifies that _unwrap peels a torch.compile model's _orig_mod so snapshot keys stay clean."""
     runner = new_pose_runner()
     runner.model = SimpleNamespace(_orig_mod="ORIGINAL")
     assert runner._unwrap() == "ORIGINAL"
 
 
 def test_unwrap_data_parallel_then_orig_mod():
-    # A DataParallel wrapper is peeled to ``.module``; a compiled inner model then has ``_orig_mod`` peeled too.
+    """Verifies that _unwrap peels a DataParallel wrapper to .module and then peels the inner _orig_mod."""
     runner = new_pose_runner()
     dp = object.__new__(DataParallel)
     dp.module = SimpleNamespace(_orig_mod="INNER")
@@ -232,6 +226,7 @@ def test_unwrap_data_parallel_then_orig_mod():
 
 
 def test_unwrap_distributed_data_parallel_module():
+    """Verifies that _unwrap returns the .module of a DistributedDataParallel wrapper that has no _orig_mod."""
     runner = new_pose_runner()
     ddp = object.__new__(DistributedDataParallel)
     # A plain sentinel (not an nn.Module) avoids torch's "assign module before __init__" guard; without an
@@ -242,12 +237,11 @@ def test_unwrap_distributed_data_parallel_module():
     assert runner._unwrap() is inner
 
 
-# ----------------------------------------------------------------------------------------------------------------------
 # _build_autocast_context
-# ----------------------------------------------------------------------------------------------------------------------
 
 
 def test_autocast_context_float32_is_nullcontext():
+    """Verifies that _build_autocast_context returns a nullcontext when the AMP dtype is None."""
     runner = new_pose_runner()
     runner._amp_dtype = None
     runner.device = "cpu"
@@ -255,6 +249,7 @@ def test_autocast_context_float32_is_nullcontext():
 
 
 def test_autocast_context_disabled_flag_forces_nullcontext():
+    """Verifies that _build_autocast_context returns a nullcontext when called with enabled=False."""
     runner = new_pose_runner()
     runner._amp_dtype = torch.bfloat16
     runner.device = "cpu"
@@ -262,38 +257,38 @@ def test_autocast_context_disabled_flag_forces_nullcontext():
 
 
 def test_autocast_context_cpu_device_type_enters():
+    """Verifies that _build_autocast_context builds a CPU autocast that downcasts a wrapped matmul on entry."""
     runner = new_pose_runner()
     runner._amp_dtype = torch.bfloat16
     runner.device = "cpu"
-    ctx = runner._build_autocast_context(enabled=True)
-    assert isinstance(ctx, torch.autocast)
+    autocast_context = runner._build_autocast_context(enabled=True)
+    assert isinstance(autocast_context, torch.autocast)
     # The context must carry the runner's device and compute dtype, not just be some autocast object.
-    assert ctx.device == "cpu"
-    assert ctx.fast_dtype == torch.bfloat16
+    assert autocast_context.device == "cpu"
+    assert autocast_context.fast_dtype == torch.bfloat16
     a = torch.ones(2, 2)
     b = torch.ones(2, 2)
     assert (a @ b).dtype == torch.float32  # baseline: no autocast in force
-    with ctx:  # entering on a CPU box is valid; autocast must actually downcast the matmul it wraps
+    with autocast_context:  # entering on a CPU box is valid; autocast must actually downcast the matmul it wraps
         assert (a @ b).dtype == torch.bfloat16
 
 
 def test_autocast_context_cuda_device_type_resolved():
-    # A "cuda"-prefixed device resolves the autocast device type to "cuda"; the context is only constructed, not
-    # entered, so no real GPU is required.
+    """Verifies that a cuda-prefixed device resolves the autocast device type to cuda."""
     runner = new_pose_runner()
     runner._amp_dtype = torch.float16
     runner.device = "cuda:1"
-    ctx = runner._build_autocast_context(enabled=True)
-    assert isinstance(ctx, torch.autocast)
-    assert ctx.device == "cuda"
+    # The context is only constructed, not entered, so no real GPU is required.
+    autocast_context = runner._build_autocast_context(enabled=True)
+    assert isinstance(autocast_context, torch.autocast)
+    assert autocast_context.device == "cuda"
 
 
-# ----------------------------------------------------------------------------------------------------------------------
 # _backward_and_step
-# ----------------------------------------------------------------------------------------------------------------------
 
 
 def test_backward_and_step_without_scaler():
+    """Verifies that _backward_and_step steps the optimizer directly and back-propagates when no scaler is set."""
     runner = new_pose_runner()
     runner._gradient_scaler = None
     optimizer = FakeOptimizer()
@@ -306,6 +301,7 @@ def test_backward_and_step_without_scaler():
 
 
 def test_backward_and_step_with_scaler():
+    """Verifies that _backward_and_step routes through the gradient scaler's scale/step/update sequence when set."""
     runner = new_pose_runner()
     scaler = FakeScaler()
     runner._gradient_scaler = scaler
@@ -319,15 +315,13 @@ def test_backward_and_step_with_scaler():
     assert param.grad.item() == pytest.approx(5.0)
 
 
-# ----------------------------------------------------------------------------------------------------------------------
 # _prepare_model_for_training
-# ----------------------------------------------------------------------------------------------------------------------
 
 
-def _prep_runner(cls, *, torch_compile=False, ddp=False, data_parallel=False, gpus=None, local_rank=0):
+def _prepare_runner(cls, *, torch_compile=False, ddp=False, data_parallel=False, gpus=None, local_rank=0):
     """Fabricates a runner with just the flags ``_prepare_model_for_training`` reads."""
     runner = object.__new__(cls)
-    runner.model = FakePrepModel()
+    runner.model = FakePreparationModel()
     runner.device = "cpu"
     runner._torch_compile = torch_compile
     runner._ddp = ddp
@@ -338,7 +332,8 @@ def _prep_runner(cls, *, torch_compile=False, ddp=False, data_parallel=False, gp
 
 
 def test_prepare_moves_model_to_device_only():
-    runner = _prep_runner(runners._OptimizedPoseTrainingRunner)
+    """Verifies that _prepare_model_for_training only moves the model to the device when no wrapping is requested."""
+    runner = _prepare_runner(runners._OptimizedPoseTrainingRunner)
     model = runner.model
     runner._prepare_model_for_training()
     assert runner.model is model
@@ -346,50 +341,55 @@ def test_prepare_moves_model_to_device_only():
 
 
 def test_prepare_applies_torch_compile(monkeypatch):
-    runner = _prep_runner(runners._OptimizedPoseTrainingRunner, torch_compile=True)
+    """Verifies that _prepare_model_for_training applies torch.compile when the torch-compile flag is set."""
+    runner = _prepare_runner(runners._OptimizedPoseTrainingRunner, torch_compile=True)
     monkeypatch.setattr(runners.torch, "compile", lambda model: ("COMPILED", model))
     runner._prepare_model_for_training()
     assert runner.model[0] == "COMPILED"
 
 
 def test_prepare_ddp_static_graph_for_pose(monkeypatch):
+    """Verifies that _prepare_model_for_training wraps the pose runner in DDP with the static-graph options."""
     captured = {}
 
-    def fake_ddp(module, device_ids, output_device, **opts):
+    def fake_ddp(module, device_ids, output_device, **options):
         captured["module"] = module
         captured["device_ids"] = device_ids
         captured["output_device"] = output_device
-        captured["opts"] = opts
+        captured["options"] = options
         return "DDP_WRAPPED"
 
     monkeypatch.setattr(runners, "DistributedDataParallel", fake_ddp)
-    runner = _prep_runner(runners._OptimizedPoseTrainingRunner, ddp=True, local_rank=2)
+    runner = _prepare_runner(runners._OptimizedPoseTrainingRunner, ddp=True, local_rank=2)
     runner._prepare_model_for_training()
     assert runner.model == "DDP_WRAPPED"
     assert captured["device_ids"] == [2]
     assert captured["output_device"] == 2
-    assert captured["opts"] == {"broadcast_buffers": False, "static_graph": True}
+    assert captured["options"] == {"broadcast_buffers": False, "static_graph": True}
 
 
 def test_prepare_ddp_find_unused_parameters_for_detector(monkeypatch):
+    """Verifies that _prepare_model_for_training wraps the detector runner in DDP with find_unused_parameters set."""
     captured = {}
 
-    def fake_ddp(module, device_ids, output_device, **opts):
+    def fake_ddp(module, device_ids, output_device, **options):
         captured["module"] = module
         captured["device_ids"] = device_ids
         captured["output_device"] = output_device
-        captured["opts"] = opts
+        captured["options"] = options
         return "DDP_DETECTOR"
 
     monkeypatch.setattr(runners, "DistributedDataParallel", fake_ddp)
     # The detector subclass sets _ddp_static_graph = False, so the data-dependent-graph branch runs instead.
-    runner = _prep_runner(runners._OptimizedDetectorTrainingRunner, ddp=True, local_rank=0)
+    runner = _prepare_runner(runners._OptimizedDetectorTrainingRunner, ddp=True, local_rank=0)
     runner._prepare_model_for_training()
     assert runner.model == "DDP_DETECTOR"
-    assert captured["opts"] == {"broadcast_buffers": False, "find_unused_parameters": True}
+    assert captured["options"] == {"broadcast_buffers": False, "find_unused_parameters": True}
 
 
 def test_prepare_data_parallel_branch(monkeypatch):
+    """Verifies that _prepare_model_for_training takes the DataParallel branch and moves the wrapped model to CUDA."""
+
     class FakeDP:
         def __init__(self, module, device_ids):
             self.module = module
@@ -399,17 +399,16 @@ def test_prepare_data_parallel_branch(monkeypatch):
             return ("DP_CUDA", self.device_ids)
 
     monkeypatch.setattr(runners, "DataParallel", FakeDP)
-    runner = _prep_runner(runners._OptimizedPoseTrainingRunner, data_parallel=True, gpus=[0, 1])
+    runner = _prepare_runner(runners._OptimizedPoseTrainingRunner, data_parallel=True, gpus=[0, 1])
     runner._prepare_model_for_training()
     assert runner.model == ("DP_CUDA", [0, 1])
 
 
-# ----------------------------------------------------------------------------------------------------------------------
 # state_dict
-# ----------------------------------------------------------------------------------------------------------------------
 
 
 def test_state_dict_without_scheduler():
+    """Verifies that state_dict omits the scheduler entry when no scheduler is set."""
     runner = new_pose_runner()
     model = nn.Linear(2, 2)
     runner.model = model
@@ -424,6 +423,7 @@ def test_state_dict_without_scheduler():
 
 
 def test_state_dict_with_scheduler():
+    """Verifies that state_dict serializes the scheduler state when a scheduler is set."""
     runner = new_pose_runner()
     model = nn.Linear(2, 2)
     runner.model = model
@@ -439,26 +439,23 @@ def test_state_dict_with_scheduler():
     assert set(state["model"].keys()) == set(model.state_dict().keys())
 
 
-# ----------------------------------------------------------------------------------------------------------------------
 # _epoch: invalid mode
-# ----------------------------------------------------------------------------------------------------------------------
 
 
 def test_epoch_invalid_mode_raises():
+    """Verifies that _epoch raises a ValueError when given an invalid mode."""
     runner = new_pose_runner()
     with pytest.raises(ValueError, match="must be 'train' or 'eval'"):
         runner._epoch(loader=[], mode="bogus")
 
 
-# ----------------------------------------------------------------------------------------------------------------------
 # fit (drives _epoch for both train and eval)
-# ----------------------------------------------------------------------------------------------------------------------
 
 
 def _fit_runner(cls, *, ddp=False, rank=0, starting_epoch=0, logger=None, print_valid_loss=True):
     """Fabricates a runner ready for ``fit``, shadowing the heavy hooks so no real model/snapshot work happens."""
     runner = object.__new__(cls)
-    runner.model = FakePrepModel()
+    runner.model = FakePreparationModel()
     runner.device = "cpu"
     runner.optimizer = FakeOptimizer()
     runner.scheduler = SimpleNamespace(step=lambda: steps.append("scheduler"))
@@ -478,7 +475,7 @@ def _fit_runner(cls, *, ddp=False, rank=0, starting_epoch=0, logger=None, print_
         update=lambda epoch, state_dict, last: snapshots.append((epoch, state_dict, last)),
     )
     # Shadow the class methods that would otherwise pull in a real model / snapshot serialization.
-    runner._prepare_model_for_training = lambda: prep.append(True)
+    runner._prepare_model_for_training = lambda: preparations.append(True)
     runner.state_dict = lambda: {"fake": 1}
     runner._compute_epoch_metrics = lambda: {"metrics/test.mAP": 55.5}
 
@@ -494,16 +491,16 @@ def _fit_runner(cls, *, ddp=False, rank=0, starting_epoch=0, logger=None, print_
 steps: list = []
 csv_logs: list = []
 snapshots: list = []
-prep: list = []
+preparations: list = []
 step_batches: list = []
 
 
 def test_fit_single_process_with_image_logger_and_metrics():
-    # Non-DDP, main process, an ImageLoggerMixin logger, a scheduler, an evaluation epoch and metric printing.
+    """Verifies that fit runs a single-process train and eval epoch with image logging and metric printing."""
     steps.clear()
     csv_logs.clear()
     snapshots.clear()
-    prep.clear()
+    preparations.clear()
     step_batches.clear()
 
     logger = FakeImageLogger()
@@ -513,7 +510,7 @@ def test_fit_single_process_with_image_logger_and_metrics():
 
     runner.fit(train_loader=train_loader, valid_loader=valid_loader, epochs=1, display_iters=1)
 
-    assert prep == [True]  # _prepare_model_for_training ran
+    assert preparations == [True]  # _prepare_model_for_training ran
     assert logger.selected == (train_loader, valid_loader)  # ImageLoggerMixin image selection ran
     assert len(logger.logged) == 2  # _epoch logged once for the train pass and once for the eval pass
     assert len(csv_logs) == 2  # the csv logger mirrors those two epoch logs
@@ -526,12 +523,11 @@ def test_fit_single_process_with_image_logger_and_metrics():
 
 
 def test_fit_ddp_resumes_and_barriers(monkeypatch):
-    # DDP main process resuming from a snapshot: epoch budget extends, the sampler epoch is set, and the group
-    # barrier fires at the end of the epoch.
+    """Verifies that fit resumes from a snapshot under DDP, sets the sampler epoch, and fires the group barrier."""
     steps.clear()
     csv_logs.clear()
     snapshots.clear()
-    prep.clear()
+    preparations.clear()
     step_batches.clear()
     barriers = []
     set_epochs = []
@@ -552,9 +548,7 @@ def test_fit_ddp_resumes_and_barriers(monkeypatch):
     assert barriers == [True]
 
 
-# ----------------------------------------------------------------------------------------------------------------------
 # _OptimizedPoseTrainingRunner.step
-# ----------------------------------------------------------------------------------------------------------------------
 
 
 class FakePoseModel:
@@ -601,12 +595,14 @@ def _pose_runner_for_step(*, logger=None, epoch_predictions=None):
 
 
 def test_pose_step_invalid_mode_raises():
+    """Verifies that the pose runner's step raises a ValueError when given an invalid mode."""
     runner = new_pose_runner()
     with pytest.raises(ValueError, match="must be 'train' or 'eval'"):
         runner.step(batch={}, mode="bogus")
 
 
 def test_pose_step_train_with_cond_keypoints_and_image_logger():
+    """Verifies that the pose runner's train step forwards conditional keypoints, logs images, and back-propagates."""
     logger = FakeImageLogger()
     runner = _pose_runner_for_step(logger=logger)
     batch = {
@@ -628,6 +624,7 @@ def test_pose_step_train_with_cond_keypoints_and_image_logger():
 
 
 def test_pose_step_eval_updates_predictions_with_center_and_unique():
+    """Verifies that the pose runner's eval step trims the center keypoint and stores bodypart/unique predictions."""
     runner = _pose_runner_for_step(logger=None)
     batch = {
         "image": torch.zeros(2, 3, 4, 4),
@@ -649,19 +646,17 @@ def test_pose_step_eval_updates_predictions_with_center_and_unique():
 
     # The center-keypoint trim (ground_truth[..., :-1, :]) must actually drop the trailing keypoint: the stored
     # bodypart ground truth has 3 keypoints, not the 4 that were passed in, while the predictions keep all 4.
-    gt_sample = runner._epoch_ground_truth["bodyparts"]["sample000000001"]
-    pred_sample = runner._epoch_predictions["bodyparts"]["sample000000001"]
-    assert gt_sample.shape == (3, 3)
-    assert pred_sample.shape == (4, 3)
+    ground_truth_sample = runner._epoch_ground_truth["bodyparts"]["sample000000001"]
+    prediction_sample = runner._epoch_predictions["bodyparts"]["sample000000001"]
+    assert ground_truth_sample.shape == (3, 3)
+    assert prediction_sample.shape == (4, 3)
     # The per-sample offsets threaded from batch["offsets"] land on the stored (zero) ground truth: 0*scale + offset.
-    assert gt_sample[0, :2].tolist() == [1.0, 2.0]  # offsets[0]
+    assert ground_truth_sample[0, :2].tolist() == [1.0, 2.0]  # offsets[0]
     # The unique-bodypart branch stored its own (untrimmed) 1-keypoint prediction.
     assert runner._epoch_predictions["unique_bodyparts"]["sample000000001"].shape == (1, 3)
 
 
-# ----------------------------------------------------------------------------------------------------------------------
 # _OptimizedDetectorTrainingRunner.step
-# ----------------------------------------------------------------------------------------------------------------------
 
 
 class FakeDetectorModel:
@@ -704,12 +699,14 @@ def _detector_runner_for_step():
 
 
 def test_detector_step_invalid_mode_raises():
+    """Verifies that the detector runner's step raises a ValueError when given an invalid mode."""
     runner = new_detector_runner()
     with pytest.raises(ValueError, match="must be 'train' or 'eval'"):
         runner.step(batch={}, mode="bogus")
 
 
 def test_detector_step_train_sums_losses_and_backpropagates():
+    """Verifies that the detector runner's train step sums the loss terms and back-propagates the total."""
     runner = _detector_runner_for_step()
     batch = {"image": torch.zeros(1, 3, 4, 4), "annotations": {"boxes": [torch.zeros(1, 4)]}}
     result = runner.step(batch=batch, mode="train")
@@ -726,6 +723,7 @@ def test_detector_step_train_sums_losses_and_backpropagates():
 
 
 def test_detector_step_eval_updates_predictions():
+    """Verifies that the detector runner's eval step stores ground-truth and prediction records from the batch."""
     runner = _detector_runner_for_step()
     batch = {
         "image": torch.zeros(1, 3, 4, 4),
@@ -745,11 +743,11 @@ def test_detector_step_eval_updates_predictions():
     # The stored record must reflect the arguments the step threaded through (sizes, bboxes, predictions), not just
     # that some key was created. original_size=[480, 640] -> stored width/height; the zero-area second gt box is
     # dropped, leaving the single visible box; the predicted box converts to COCO xywh ([5,5,15,15] -> [5,5,10,10]).
-    gt_record = runner._epoch_ground_truth["image-0"]
-    pred_record = runner._epoch_predictions["image-0"]
-    assert int(gt_record["width"]) == 640
-    assert int(gt_record["height"]) == 480
-    assert gt_record["bboxes"].shape == (1, 4)  # the [0,0,0,0] box was masked out
-    assert gt_record["bboxes"][0].tolist() == [10.0, 10.0, 20.0, 20.0]
-    assert pred_record["bboxes"][0].tolist() == [5.0, 5.0, 10.0, 10.0]
-    assert pred_record["scores"].tolist() == [pytest.approx(0.9)]
+    ground_truth_record = runner._epoch_ground_truth["image-0"]
+    prediction_record = runner._epoch_predictions["image-0"]
+    assert int(ground_truth_record["width"]) == 640
+    assert int(ground_truth_record["height"]) == 480
+    assert ground_truth_record["bboxes"].shape == (1, 4)  # the [0,0,0,0] box was masked out
+    assert ground_truth_record["bboxes"][0].tolist() == [10.0, 10.0, 20.0, 20.0]
+    assert prediction_record["bboxes"][0].tolist() == [5.0, 5.0, 10.0, 10.0]
+    assert prediction_record["scores"].tolist() == [pytest.approx(0.9)]

@@ -1,4 +1,4 @@
-"""Tests for the DeepLabCut training-dataset creation wrapper.
+"""Contains tests for the DeepLabCut training-dataset creation wrapper.
 
 Every DeepLabCut handoff (``available_models``/``available_detectors``, ``build_weight_init``, the two
 ``create_training_dataset`` entry points, ``get_existing_shuffle_indices``, and the augmentation catalog through
@@ -30,11 +30,9 @@ from sollertia_video_tracking.training.dataset import (
 )
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # WeightInitializationMethod enum
-# --------------------------------------------------------------------------------------------------------------------
 def test_weight_initialization_method_values() -> None:
-    """Each enum member carries the exact string the DeepLabCut GUI uses and behaves as a string."""
+    """Verifies that each enum member carries the exact string the DeepLabCut GUI uses and behaves as a string."""
     assert WeightInitializationMethod.IMAGENET == "imagenet"
     assert WeightInitializationMethod.TRANSFER == "transfer"
     assert WeightInitializationMethod.FINE_TUNE == "fine-tune"
@@ -43,11 +41,11 @@ def test_weight_initialization_method_values() -> None:
     assert f"{WeightInitializationMethod.FINE_TUNE}" == "fine-tune"
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # TrainingDatasetSummary.describe
-# --------------------------------------------------------------------------------------------------------------------
 def test_summary_describe_full_detail() -> None:
-    """With every optional field set, the description names the model, detector, weights, split, and config."""
+    """Verifies that with every optional field set, the description names the model, detector, weights, split, and
+    config.
+    """
     summary = TrainingDatasetSummary(
         config=Path("/proj/config.yaml"),
         shuffle=3,
@@ -65,7 +63,9 @@ def test_summary_describe_full_detail() -> None:
 
 
 def test_summary_describe_defaults() -> None:
-    """With no net_type, detector, or split source, the description falls back to the project-default wording."""
+    """Verifies that with no net_type, detector, or split source, the description falls back to the project-default
+    wording.
+    """
     summary = TrainingDatasetSummary(
         config=Path("config.yaml"),
         shuffle=1,
@@ -82,7 +82,7 @@ def test_summary_describe_defaults() -> None:
 
 
 def test_summary_describe_from_shuffle_zero_still_shows_split() -> None:
-    """A ``from_shuffle`` of 0 is falsy but not None, so the split note must still appear."""
+    """Verifies that a ``from_shuffle`` of 0 is falsy but not None, so the split note must still appear."""
     summary = TrainingDatasetSummary(
         config=Path("c.yaml"),
         shuffle=5,
@@ -95,23 +95,21 @@ def test_summary_describe_from_shuffle_zero_still_shows_split() -> None:
     assert "(split from shuffle 0)" in summary.describe()
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # Catalog accessors
-# --------------------------------------------------------------------------------------------------------------------
 def test_get_available_pose_models_sorted(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The pose-model catalog is returned sorted and as an immutable tuple."""
+    """Verifies that the pose-model catalog is returned sorted and as an immutable tuple."""
     monkeypatch.setattr(dataset, "available_models", lambda: ["zeb", "alpha", "mid"])
     assert get_available_pose_models() == ("alpha", "mid", "zeb")
 
 
 def test_get_available_object_detectors_sorted(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The detector catalog is returned sorted and as an immutable tuple."""
+    """Verifies that the detector catalog is returned sorted and as an immutable tuple."""
     monkeypatch.setattr(dataset, "available_detectors", lambda: ["ssd", "fasterrcnn"])
     assert get_available_object_detectors() == ("fasterrcnn", "ssd")
 
 
 def test_get_available_augmenters(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The augmenter catalog is read from DLC's compat layer for the PyTorch engine."""
+    """Verifies that the augmenter catalog is read from DLC's compat layer for the PyTorch engine."""
     seen_engine: list[object] = []
 
     def fake_aug_methods(engine: object) -> list[str]:
@@ -125,7 +123,7 @@ def test_get_available_augmenters(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_get_available_super_animals() -> None:
-    """The SuperAnimal list is the module constant, matching the GUI's fixed options."""
+    """Verifies that the SuperAnimal list is the module constant, matching the GUI's fixed options."""
     assert get_available_super_animals() == _SUPER_ANIMAL_DATASETS
     assert get_available_super_animals() == (
         "superanimal_bird",
@@ -134,11 +132,11 @@ def test_get_available_super_animals() -> None:
     )
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # build_superanimal_weight_init
-# --------------------------------------------------------------------------------------------------------------------
 def test_build_superanimal_weight_init_strips_top_down_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A ``top_down_`` network prefix is stripped to recover the SuperAnimal pose-model name; all args forward."""
+    """Verifies that a ``top_down_`` network prefix is stripped to recover the SuperAnimal pose-model name
+    and all args forward.
+    """
     recorded: dict[str, object] = {}
     sentinel = object()
 
@@ -169,7 +167,9 @@ def test_build_superanimal_weight_init_strips_top_down_prefix(monkeypatch: pytes
 
 
 def test_build_superanimal_weight_init_without_prefix_and_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A network name without the prefix passes through untouched, and the optional args default correctly."""
+    """Verifies that a network name without the prefix passes through untouched, and the optional args default
+    correctly.
+    """
     recorded: dict[str, object] = {}
 
     def fake_build(**kwargs: object) -> str:
@@ -191,48 +191,48 @@ def test_build_superanimal_weight_init_without_prefix_and_defaults(monkeypatch: 
     assert recorded["customized_detector_checkpoint"] is None
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # build_conditional_top_down_conditions
-# --------------------------------------------------------------------------------------------------------------------
 def test_ctd_conditions_h5_returns_path_unchanged() -> None:
-    """An ``.h5`` predictions file is returned as a Path, unchanged."""
+    """Verifies that an ``.h5`` predictions file is returned as a Path, unchanged."""
     result = build_conditional_top_down_conditions("/p/preds.h5")
     assert result == Path("/p/preds.h5")
     assert isinstance(result, Path)
 
 
 def test_ctd_conditions_json_returns_path_unchanged() -> None:
-    """A ``.json`` predictions file is returned as a Path, unchanged."""
+    """Verifies that a ``.json`` predictions file is returned as a Path, unchanged."""
     result = build_conditional_top_down_conditions(Path("/p/preds.json"))
     assert result == Path("/p/preds.json")
 
 
 def test_ctd_conditions_suffix_comparison_is_case_insensitive() -> None:
-    """An uppercase suffix still matches the predictions extensions (the suffix is lowercased before comparison)."""
+    """Verifies that an uppercase suffix still matches the predictions extensions (the suffix is lowercased before
+    comparison).
+    """
     assert build_conditional_top_down_conditions("/p/PREDS.H5") == Path("/p/PREDS.H5")
 
 
 def test_ctd_conditions_snapshot_returns_shuffle_and_name() -> None:
-    """A ``.pt`` snapshot path yields a ``(shuffle, snapshot_name)`` pair parsed from its ``shuffleN`` segment."""
+    """Verifies that a ``.pt`` snapshot path yields a ``(shuffle, snapshot_name)`` pair parsed from its ``shuffleN``
+    segment.
+    """
     result = build_conditional_top_down_conditions("/p/dlc-models/iteration-0/shuffle3/snapshot-050.pt")
     assert result == (3, "snapshot-050.pt")
 
 
 def test_ctd_conditions_snapshot_without_shuffle_raises() -> None:
-    """A snapshot path with no ``shuffleN`` segment cannot be parsed and raises."""
+    """Verifies that a snapshot path with no ``shuffleN`` segment cannot be parsed and raises."""
     with pytest.raises(ValueError, match="must contain a 'shuffleN' segment"):
         build_conditional_top_down_conditions("/p/snapshot-050.pt")
 
 
 def test_ctd_conditions_unsupported_suffix_raises() -> None:
-    """A suffix that is neither a predictions file nor a snapshot raises."""
+    """Verifies that a suffix that is neither a predictions file nor a snapshot raises."""
     with pytest.raises(ValueError, match=r"must be a \.h5 or \.json"):
         build_conditional_top_down_conditions("/p/weights.pth")
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # create_training_dataset
-# --------------------------------------------------------------------------------------------------------------------
 def _patch_dlc(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -250,18 +250,18 @@ def _patch_dlc(
         SimpleNamespace(get_available_aug_methods=lambda _engine: list(augmenters)),
     )
     calls: dict[str, list[dict[str, object]]] = {"fresh": [], "existing_split": []}
-    monkeypatch.setattr(dataset, "dlc_create_training_dataset", lambda **kw: calls["fresh"].append(kw))
+    monkeypatch.setattr(dataset, "dlc_create_training_dataset", lambda **kwargs: calls["fresh"].append(kwargs))
     monkeypatch.setattr(
         dataset,
         "dlc_create_training_dataset_from_existing_split",
-        lambda **kw: calls["existing_split"].append(kw),
+        lambda **kwargs: calls["existing_split"].append(kwargs),
     )
     monkeypatch.setattr(dataset, "get_existing_shuffle_indices", lambda _cfg: list(existing))
     return calls
 
 
 def test_create_training_dataset_fresh_split_imagenet(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A default run draws a fresh split, uses ImageNet weights, and returns a matching summary."""
+    """Verifies that a default run draws a fresh split, uses ImageNet weights, and returns a matching summary."""
     calls = _patch_dlc(monkeypatch, existing=(1,))
     summary = create_training_dataset(
         "/p/config.yaml",
@@ -293,7 +293,9 @@ def test_create_training_dataset_fresh_split_imagenet(monkeypatch: pytest.Monkey
 
 
 def test_create_training_dataset_from_shuffle_reuses_split(monkeypatch: pytest.MonkeyPatch) -> None:
-    """from_shuffle routes to the existing-split entry point, forwards every arg, and disables feedback on overwrite."""
+    """Verifies that from_shuffle routes to the existing-split entry point, forwards every arg, and disables feedback
+    on overwrite.
+    """
     calls = _patch_dlc(monkeypatch, existing=(2,))
     weight_init = SimpleNamespace(with_decoder=False, dataset="superanimal_quadruped")
     ctd = Path("/p/preds.h5")
@@ -329,7 +331,9 @@ def test_create_training_dataset_from_shuffle_reuses_split(monkeypatch: pytest.M
 
 
 def test_create_training_dataset_transfer_weight_init(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A weight initialization without a decoder head is described as transfer learning and forwarded to DLC."""
+    """Verifies that a weight initialization without a decoder head is described as transfer learning and forwarded
+    to DLC.
+    """
     calls = _patch_dlc(monkeypatch, existing=(1,))
     weight_init = SimpleNamespace(with_decoder=False, dataset="superanimal_quadruped")
     summary = create_training_dataset("/p/config.yaml", weight_initialization=weight_init)
@@ -339,7 +343,9 @@ def test_create_training_dataset_transfer_weight_init(monkeypatch: pytest.Monkey
 
 
 def test_create_training_dataset_fine_tune_weight_init(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A weight initialization that loads the decoder head is described as fine-tuning and forwarded to DLC."""
+    """Verifies that a weight initialization that loads the decoder head is described as fine-tuning and forwarded
+    to DLC.
+    """
     calls = _patch_dlc(monkeypatch, existing=(1,))
     weight_init = SimpleNamespace(with_decoder=True, dataset="superanimal_bird")
     summary = create_training_dataset("/p/config.yaml", weight_initialization=weight_init)
@@ -350,7 +356,9 @@ def test_create_training_dataset_fine_tune_weight_init(monkeypatch: pytest.Monke
 def test_create_training_dataset_fresh_forwards_ctd_conditions_and_coerces_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The fresh-split path forwards conditional-top-down conditions verbatim and coerces a Path config to a string."""
+    """Verifies that the fresh-split path forwards conditional-top-down conditions verbatim and coerces a Path config
+    to a string.
+    """
     calls = _patch_dlc(monkeypatch, existing=(1,))
     ctd = (3, "snapshot-050.pt")
     create_training_dataset(
@@ -365,37 +373,35 @@ def test_create_training_dataset_fresh_forwards_ctd_conditions_and_coerces_confi
 
 
 def test_create_training_dataset_invalid_network_type_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An unknown network_type is rejected before any DLC call."""
+    """Verifies that an unknown network_type is rejected before any DLC call."""
     _patch_dlc(monkeypatch, models=("resnet50",))
     with pytest.raises(ValueError, match="network_type must be one of"):
         create_training_dataset("/p/config.yaml", network_type="bogus")
 
 
 def test_create_training_dataset_invalid_detector_type_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An unknown detector_type is rejected before any DLC call."""
+    """Verifies that an unknown detector_type is rejected before any DLC call."""
     _patch_dlc(monkeypatch, detectors=("ssdlite",))
     with pytest.raises(ValueError, match="detector_type must be"):
         create_training_dataset("/p/config.yaml", network_type="resnet50", detector_type="bogus")
 
 
 def test_create_training_dataset_invalid_augmenter_type_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An unknown augmenter_type is rejected before any DLC call."""
+    """Verifies that an unknown augmenter_type is rejected before any DLC call."""
     _patch_dlc(monkeypatch, augmenters=("albumentations",))
     with pytest.raises(ValueError, match="augmenter_type must be"):
         create_training_dataset("/p/config.yaml", augmenter_type="bogus")
 
 
 def test_create_training_dataset_missing_shuffle_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When DLC silently creates no shuffle, the wrapper detects the missing index and raises."""
+    """Verifies that when DLC silently creates no shuffle, the wrapper detects the missing index and raises."""
     # The requested shuffle never appears in the existing-index listing.
     _patch_dlc(monkeypatch, existing=())
     with pytest.raises(ValueError, match="DeepLabCut created no shuffle"):
         create_training_dataset("/p/config.yaml", shuffle=1)
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _UnannotatedNoticeFilter
-# --------------------------------------------------------------------------------------------------------------------
 class _RecordingStream:
     """A minimal text stream that records writes and flush calls for filter assertions."""
 
@@ -413,7 +419,7 @@ class _RecordingStream:
 
 
 def test_filter_write_buffers_until_newline() -> None:
-    """Text without a line break is buffered and only forwarded once the line completes."""
+    """Verifies that text without a line break is buffered and only forwarded once the line completes."""
     target = _RecordingStream()
     stream_filter = _UnannotatedNoticeFilter(target=target, marker="DROP")
     accepted = stream_filter.write("partial")
@@ -424,7 +430,7 @@ def test_filter_write_buffers_until_newline() -> None:
 
 
 def test_filter_write_drops_marker_lines_forwards_others() -> None:
-    """Completed lines containing the marker are dropped; other completed lines are forwarded verbatim."""
+    """Verifies that completed lines containing the marker are dropped; other completed lines are forwarded verbatim."""
     target = _RecordingStream()
     stream_filter = _UnannotatedNoticeFilter(target=target, marker="DROP")
     stream_filter.write("keep me\nplease DROP this\nkeep two\n")
@@ -432,7 +438,7 @@ def test_filter_write_drops_marker_lines_forwards_others() -> None:
 
 
 def test_filter_flush_delegates_to_target() -> None:
-    """Flushing the filter flushes the underlying target stream."""
+    """Verifies that flushing the filter flushes the underlying target stream."""
     target = _RecordingStream()
     stream_filter = _UnannotatedNoticeFilter(target=target, marker="DROP")
     stream_filter.flush()
@@ -440,7 +446,7 @@ def test_filter_flush_delegates_to_target() -> None:
 
 
 def test_filter_drain_forwards_incomplete_trailing_line() -> None:
-    """Draining forwards a buffered trailing line that never got a newline, then clears the buffer."""
+    """Verifies that draining forwards a buffered trailing line that never got a newline, then clears the buffer."""
     target = _RecordingStream()
     stream_filter = _UnannotatedNoticeFilter(target=target, marker="DROP")
     stream_filter.write("trailing no newline")
@@ -452,7 +458,7 @@ def test_filter_drain_forwards_incomplete_trailing_line() -> None:
 
 
 def test_filter_drain_drops_marker_trailing_line() -> None:
-    """Draining drops a buffered trailing line that contains the marker."""
+    """Verifies that draining drops a buffered trailing line that contains the marker."""
     target = _RecordingStream()
     stream_filter = _UnannotatedNoticeFilter(target=target, marker="DROP")
     stream_filter.write("this has DROP in it")
@@ -461,17 +467,17 @@ def test_filter_drain_drops_marker_trailing_line() -> None:
 
 
 def test_filter_getattr_delegates_to_target() -> None:
-    """Attributes the filter does not define are read from the target stream."""
+    """Verifies that attributes the filter does not define are read from the target stream."""
     target = _RecordingStream()
     stream_filter = _UnannotatedNoticeFilter(target=target, marker="DROP")
     assert stream_filter.encoding == "utf-8"  # resolved via __getattr__ on the target
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _suppress_unannotated_video_notices
-# --------------------------------------------------------------------------------------------------------------------
 def test_suppress_unannotated_notices_filters_marker_lines(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Inside the context, marker lines are dropped, plain lines pass through, and trailing text is drained on exit."""
+    """Verifies that inside the context, marker lines are dropped, plain lines pass through, and trailing text is
+    drained on exit.
+    """
     captured = io.StringIO()
     monkeypatch.setattr(sys, "stdout", captured)
     with _suppress_unannotated_video_notices():

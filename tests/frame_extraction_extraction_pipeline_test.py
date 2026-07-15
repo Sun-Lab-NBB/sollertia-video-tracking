@@ -1,4 +1,5 @@
-"""Tests for the parallel k-means frame-extraction pipeline that prepares a DeepLabCut project's training frames."""
+"""Contains tests for the parallel k-means frame-extraction pipeline that prepares a DeepLabCut project's training
+frames."""
 
 from pathlib import Path
 
@@ -10,13 +11,11 @@ import deeplabcut
 from ruamel.yaml import YAML
 import deeplabcut.utils.frameselectiontools as frame_selection_tools
 
-from sollertia_video_tracking.frame_extraction import extraction_pipeline as ep
+from sollertia_video_tracking.frame_extraction import extraction_pipeline
 from sollertia_video_tracking.frame_extraction.video_sampling import VideoSamplingPlan
 
 
-# ---------------------------------------------------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------------------------------------------------
 def _write_config(
     project_directory: Path,
     video_paths: list[str],
@@ -119,12 +118,10 @@ def _fake_iter_factory(statuses: list[str] | None = None):
     return _fake_iter
 
 
-# ---------------------------------------------------------------------------------------------------------------------
 # FrameExtractionSummary dataclass
-# ---------------------------------------------------------------------------------------------------------------------
 def test_summary_properties_no_errors() -> None:
-    """A summary with no errors reports zero failures and success."""
-    summary = ep.FrameExtractionSummary(
+    """Verifies that a summary with no errors reports zero failures and success."""
+    summary = extraction_pipeline.FrameExtractionSummary(
         extracted_video_count=2,
         cleared_frame_count=0,
         total_video_count=2,
@@ -138,8 +135,8 @@ def test_summary_properties_no_errors() -> None:
 
 
 def test_summary_properties_with_errors() -> None:
-    """A summary carrying errors reports the failure count and unsuccessful status."""
-    summary = ep.FrameExtractionSummary(
+    """Verifies that a summary carrying errors reports the failure count and unsuccessful status."""
+    summary = extraction_pipeline.FrameExtractionSummary(
         extracted_video_count=1,
         cleared_frame_count=3,
         total_video_count=2,
@@ -153,84 +150,81 @@ def test_summary_properties_with_errors() -> None:
     assert summary.successful is False
 
 
-# ---------------------------------------------------------------------------------------------------------------------
 # extract_frames_kmeans: option-validation errors (all raised before any config read)
-# ---------------------------------------------------------------------------------------------------------------------
 def test_overwrite_and_reset_are_mutually_exclusive(tmp_path: Path) -> None:
-    """Setting overwrite and reset together is rejected."""
+    """Verifies that setting overwrite and reset together is rejected."""
     config_path = tmp_path / "config.yaml"
     with pytest.raises(ValueError, match="mutually exclusive"):
-        ep.extract_frames_kmeans(config_path, overwrite=True, reset=True)
+        extraction_pipeline.extract_frames_kmeans(config_path, overwrite=True, reset=True)
 
 
 def test_exclusive_requires_requested_videos(tmp_path: Path) -> None:
-    """Exclusive extraction without any requested video is rejected."""
+    """Verifies that exclusive extraction without any requested video is rejected."""
     config_path = tmp_path / "config.yaml"
     with pytest.raises(ValueError, match="requires at least one requested video"):
-        ep.extract_frames_kmeans(config_path, exclusive=True)
+        extraction_pipeline.extract_frames_kmeans(config_path, exclusive=True)
 
 
 def test_exclusive_and_reset_are_contradictory(tmp_path: Path) -> None:
-    """Exclusive and reset together are rejected as contradictory."""
+    """Verifies that exclusive and reset together are rejected as contradictory."""
     config_path = tmp_path / "config.yaml"
     with pytest.raises(ValueError, match="contradictory"):
-        ep.extract_frames_kmeans(config_path, exclusive=True, reset=True, requested_videos=("/videos/a.mp4",))
+        extraction_pipeline.extract_frames_kmeans(
+            config_path, exclusive=True, reset=True, requested_videos=("/videos/a.mp4",)
+        )
 
 
 def test_total_frame_budget_below_one_rejected(tmp_path: Path) -> None:
-    """A non-sentinel total frame budget below one is rejected."""
+    """Verifies that a non-sentinel total frame budget below one is rejected."""
     config_path = tmp_path / "config.yaml"
     with pytest.raises(ValueError, match="total frame budget must be at least one"):
-        ep.extract_frames_kmeans(config_path, total_frame_budget=0)
+        extraction_pipeline.extract_frames_kmeans(config_path, total_frame_budget=0)
 
 
 def test_clustering_stride_below_one_rejected(tmp_path: Path) -> None:
-    """A clustering stride below one is rejected."""
+    """Verifies that a clustering stride below one is rejected."""
     config_path = tmp_path / "config.yaml"
     with pytest.raises(ValueError, match="clustering stride must be at least one"):
-        ep.extract_frames_kmeans(config_path, clustering_stride=0)
+        extraction_pipeline.extract_frames_kmeans(config_path, clustering_stride=0)
 
 
-# ---------------------------------------------------------------------------------------------------------------------
 # extract_frames_kmeans: config-shape errors
-# ---------------------------------------------------------------------------------------------------------------------
 def test_missing_video_sets_rejected(tmp_path: Path) -> None:
-    """A config that defines no video_sets is rejected."""
+    """Verifies that a config that defines no video_sets is rejected."""
     project = tmp_path / "project"
     config_path = _write_config(project, [], include_video_sets=False)
     with pytest.raises(ValueError, match="does not define any video_sets"):
-        ep.extract_frames_kmeans(config_path)
+        extraction_pipeline.extract_frames_kmeans(config_path)
 
 
 def test_empty_video_sets_rejected(tmp_path: Path) -> None:
-    """A config whose video_sets is present but empty is rejected."""
+    """Verifies that a config whose video_sets is present but empty is rejected."""
     project = tmp_path / "project"
     config_path = _write_config(project, [])
     with pytest.raises(ValueError, match="does not list any videos"):
-        ep.extract_frames_kmeans(config_path)
+        extraction_pipeline.extract_frames_kmeans(config_path)
 
 
 def test_numframes2pick_must_be_positive_integer(tmp_path: Path) -> None:
-    """A non-integer numframes2pick is rejected."""
+    """Verifies that a non-integer numframes2pick is rejected."""
     project = tmp_path / "project"
     videos = _make_videos(project, ["a.mp4", "b.mp4"])
     config_path = _write_config(project, videos, numframes2pick="lots")
     with pytest.raises(ValueError, match="numframes2pick must be a positive integer"):
-        ep.extract_frames_kmeans(config_path)
+        extraction_pipeline.extract_frames_kmeans(config_path)
 
 
-# ---------------------------------------------------------------------------------------------------------------------
 # extract_frames_kmeans: full runs through the (faked) worker pool
-# ---------------------------------------------------------------------------------------------------------------------
 def test_unbudgeted_run_extracts_all_below_ceiling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """An unbudgeted run tops up every below-ceiling video and reports the plan when progress is displayed."""
+    """Verifies that an unbudgeted run tops up every below-ceiling video and reports the plan when progress is
+    displayed."""
     project = tmp_path / "project"
     videos = _make_videos(project, ["a.mp4", "b.mp4"])
     config_path = _write_config(project, videos, numframes2pick=5, cropping=True)
     _patch_capture(monkeypatch, frame_count=100)
-    monkeypatch.setattr(ep, "iter_pinned_extraction", _fake_iter_factory())
+    monkeypatch.setattr(extraction_pipeline, "iter_pinned_extraction", _fake_iter_factory())
 
-    summary = ep.extract_frames_kmeans(config_path, display_progress=True)
+    summary = extraction_pipeline.extract_frames_kmeans(config_path, display_progress=True)
 
     assert summary.extracted_video_count == 2
     assert summary.total_video_count == 2
@@ -243,14 +237,17 @@ def test_unbudgeted_run_extracts_all_below_ceiling(tmp_path: Path, monkeypatch: 
 
 
 def test_unbudgeted_run_collects_worker_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A worker error is recorded in the summary rather than aborting the run, and progress can be disabled."""
+    """Verifies that a worker error is recorded in the summary rather than aborting the run, and progress can be
+    disabled."""
     project = tmp_path / "project"
     videos = _make_videos(project, ["a.mp4", "b.mp4"])
     config_path = _write_config(project, videos, numframes2pick=5)
     _patch_capture(monkeypatch, frame_count=10)
-    monkeypatch.setattr(ep, "iter_pinned_extraction", _fake_iter_factory(statuses=["ok", "error:\nboom"]))
+    monkeypatch.setattr(
+        extraction_pipeline, "iter_pinned_extraction", _fake_iter_factory(statuses=["ok", "error:\nboom"])
+    )
 
-    summary = ep.extract_frames_kmeans(config_path, display_progress=False)
+    summary = extraction_pipeline.extract_frames_kmeans(config_path, display_progress=False)
 
     assert summary.extracted_video_count == 1
     assert summary.failed_video_count == 1
@@ -259,16 +256,16 @@ def test_unbudgeted_run_collects_worker_errors(tmp_path: Path, monkeypatch: pyte
 
 
 def test_nothing_to_extract_when_all_videos_at_ceiling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """When every candidate already holds the ceiling of frames the run extracts nothing."""
+    """Verifies that when every candidate already holds the ceiling of frames the run extracts nothing."""
     project = tmp_path / "project"
     videos = _make_videos(project, ["a.mp4", "b.mp4"])
     config_path = _write_config(project, videos, numframes2pick=5)
     for video in videos:
         _touch_frames(project / "labeled-data" / Path(video).stem, 5)
     _patch_capture(monkeypatch, frame_count=10)
-    monkeypatch.setattr(ep, "iter_pinned_extraction", _fake_iter_factory())
+    monkeypatch.setattr(extraction_pipeline, "iter_pinned_extraction", _fake_iter_factory())
 
-    summary = ep.extract_frames_kmeans(config_path)
+    summary = extraction_pipeline.extract_frames_kmeans(config_path)
 
     assert summary.extracted_video_count == 0
     assert summary.total_video_count == 0
@@ -277,7 +274,7 @@ def test_nothing_to_extract_when_all_videos_at_ceiling(tmp_path: Path, monkeypat
 
 
 def test_reset_clears_and_reextracts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Reset clears every candidate video's pre-existing bootstrap frames before re-extraction."""
+    """Verifies that reset clears every candidate video's pre-existing bootstrap frames before re-extraction."""
     project = tmp_path / "project"
     videos = _make_videos(project, ["a.mp4", "b.mp4"])
     config_path = _write_config(project, videos, numframes2pick=5)
@@ -286,9 +283,9 @@ def test_reset_clears_and_reextracts(tmp_path: Path, monkeypatch: pytest.MonkeyP
     for video in videos:
         _touch_frames(project / "labeled-data" / Path(video).stem, 2)
     _patch_capture(monkeypatch, frame_count=10)
-    monkeypatch.setattr(ep, "iter_pinned_extraction", _fake_iter_factory())
+    monkeypatch.setattr(extraction_pipeline, "iter_pinned_extraction", _fake_iter_factory())
 
-    summary = ep.extract_frames_kmeans(config_path, reset=True, display_progress=False)
+    summary = extraction_pipeline.extract_frames_kmeans(config_path, reset=True, display_progress=False)
 
     assert summary.extracted_video_count == 2
     assert summary.cleared_frame_count == 4  # Two bare frames per video were cleared before selection.
@@ -298,7 +295,8 @@ def test_reset_clears_and_reextracts(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 
 def test_overwrite_clears_selected_videos(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Overwrite clears the selected videos' pre-existing bootstrap frames after selection, then re-extracts them."""
+    """Verifies that overwrite clears the selected videos' pre-existing bootstrap frames after selection, then
+    re-extracts them."""
     project = tmp_path / "project"
     videos = _make_videos(project, ["a.mp4", "b.mp4"])
     config_path = _write_config(project, videos, numframes2pick=5)
@@ -306,9 +304,9 @@ def test_overwrite_clears_selected_videos(tmp_path: Path, monkeypatch: pytest.Mo
     for video in videos:
         _touch_frames(project / "labeled-data" / Path(video).stem, 3)
     _patch_capture(monkeypatch, frame_count=10)
-    monkeypatch.setattr(ep, "iter_pinned_extraction", _fake_iter_factory())
+    monkeypatch.setattr(extraction_pipeline, "iter_pinned_extraction", _fake_iter_factory())
 
-    summary = ep.extract_frames_kmeans(config_path, overwrite=True, display_progress=False)
+    summary = extraction_pipeline.extract_frames_kmeans(config_path, overwrite=True, display_progress=False)
 
     assert summary.extracted_video_count == 2
     assert summary.cleared_frame_count == 6  # Three bare frames per selected video were cleared before re-extraction.
@@ -320,14 +318,14 @@ def test_overwrite_clears_selected_videos(tmp_path: Path, monkeypatch: pytest.Mo
 def test_budgetless_options_warn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    """Budget-only options passed without a budget or exclusive emit a warning."""
+    """Verifies that budget-only options passed without a budget or exclusive emit a warning."""
     project = tmp_path / "project"
     videos = _make_videos(project, ["a.mp4", "b.mp4"])
     config_path = _write_config(project, videos, numframes2pick=5)
     _patch_capture(monkeypatch, frame_count=10)
-    monkeypatch.setattr(ep, "iter_pinned_extraction", _fake_iter_factory())
+    monkeypatch.setattr(extraction_pipeline, "iter_pinned_extraction", _fake_iter_factory())
 
-    ep.extract_frames_kmeans(config_path, balance_groups=True, display_progress=False)
+    extraction_pipeline.extract_frames_kmeans(config_path, balance_groups=True, display_progress=False)
 
     captured = capsys.readouterr()
     assert "only apply when sampling toward a frame budget" in captured.err
@@ -336,14 +334,14 @@ def test_budgetless_options_warn(
 def test_exclusive_run_tops_up_requested_videos(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    """Exclusive extraction restricts the run to the requested videos and ignores group balancing."""
+    """Verifies that exclusive extraction restricts the run to the requested videos and ignores group balancing."""
     project = tmp_path / "project"
     videos = _make_videos(project, ["a.mp4", "b.mp4"])
     config_path = _write_config(project, videos, numframes2pick=5)
     _patch_capture(monkeypatch, frame_count=10)
-    monkeypatch.setattr(ep, "iter_pinned_extraction", _fake_iter_factory())
+    monkeypatch.setattr(extraction_pipeline, "iter_pinned_extraction", _fake_iter_factory())
 
-    summary = ep.extract_frames_kmeans(
+    summary = extraction_pipeline.extract_frames_kmeans(
         config_path, exclusive=True, requested_videos=(videos[0],), balance_groups=True, display_progress=True
     )
 
@@ -356,15 +354,16 @@ def test_exclusive_run_tops_up_requested_videos(
 def test_exclusive_run_with_no_match_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    """An exclusive run whose requested videos match nothing is rejected, warning about the unmatched request."""
+    """Verifies that an exclusive run whose requested videos match nothing is rejected, warning about the
+    unmatched request."""
     project = tmp_path / "project"
     videos = _make_videos(project, ["a.mp4", "b.mp4"])
     config_path = _write_config(project, videos, numframes2pick=5)
     _patch_capture(monkeypatch, frame_count=10)
-    monkeypatch.setattr(ep, "iter_pinned_extraction", _fake_iter_factory())
+    monkeypatch.setattr(extraction_pipeline, "iter_pinned_extraction", _fake_iter_factory())
 
     with pytest.raises(ValueError, match="None of the requested videos matched"):
-        ep.extract_frames_kmeans(
+        extraction_pipeline.extract_frames_kmeans(
             config_path, exclusive=True, requested_videos=("/nowhere/missing.mp4",), display_progress=False
         )
     captured = capsys.readouterr()
@@ -372,14 +371,14 @@ def test_exclusive_run_with_no_match_rejected(
 
 
 def test_budgeted_run_selects_toward_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A budgeted run selects just enough videos to grow toward the frame budget."""
+    """Verifies that a budgeted run selects just enough videos to grow toward the frame budget."""
     project = tmp_path / "project"
     videos = _make_videos(project, ["a.mp4", "b.mp4", "c.mp4"])
     config_path = _write_config(project, videos, numframes2pick=5)
     _patch_capture(monkeypatch, frame_count=10)
-    monkeypatch.setattr(ep, "iter_pinned_extraction", _fake_iter_factory())
+    monkeypatch.setattr(extraction_pipeline, "iter_pinned_extraction", _fake_iter_factory())
 
-    summary = ep.extract_frames_kmeans(config_path, total_frame_budget=5, display_progress=False)
+    summary = extraction_pipeline.extract_frames_kmeans(config_path, total_frame_budget=5, display_progress=False)
 
     assert summary.target_frame_count == 5
     assert summary.existing_frame_count == 0
@@ -387,14 +386,16 @@ def test_budgeted_run_selects_toward_budget(tmp_path: Path, monkeypatch: pytest.
 
 
 def test_budgeted_run_with_groups(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A budgeted run with group balancing computes groups and reports the per-group breakdown."""
+    """Verifies that a budgeted run with group balancing computes groups and reports the per-group breakdown."""
     project = tmp_path / "project"
     videos = _make_videos(project, ["M01_2024-01-15.mp4", "M02_2024-01-16.mp4", "M03_2024-01-17.mp4"])
     config_path = _write_config(project, videos, numframes2pick=5)
     _patch_capture(monkeypatch, frame_count=10)
-    monkeypatch.setattr(ep, "iter_pinned_extraction", _fake_iter_factory())
+    monkeypatch.setattr(extraction_pipeline, "iter_pinned_extraction", _fake_iter_factory())
 
-    summary = ep.extract_frames_kmeans(config_path, total_frame_budget=5, balance_groups=True, display_progress=False)
+    summary = extraction_pipeline.extract_frames_kmeans(
+        config_path, total_frame_budget=5, balance_groups=True, display_progress=False
+    )
 
     assert summary.target_frame_count == 5
     assert summary.extracted_video_count == 1
@@ -403,16 +404,16 @@ def test_budgeted_run_with_groups(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 def test_budgeted_run_already_met_extracts_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    """A budget already met by existing frames extracts nothing and warns."""
+    """Verifies that a budget already met by existing frames extracts nothing and warns."""
     project = tmp_path / "project"
     videos = _make_videos(project, ["a.mp4", "b.mp4"])
     config_path = _write_config(project, videos, numframes2pick=5)
     for video in videos:
         _touch_frames(project / "labeled-data" / Path(video).stem, 5)
     _patch_capture(monkeypatch, frame_count=10)
-    monkeypatch.setattr(ep, "iter_pinned_extraction", _fake_iter_factory())
+    monkeypatch.setattr(extraction_pipeline, "iter_pinned_extraction", _fake_iter_factory())
 
-    summary = ep.extract_frames_kmeans(config_path, total_frame_budget=8, display_progress=False)
+    summary = extraction_pipeline.extract_frames_kmeans(config_path, total_frame_budget=8, display_progress=False)
 
     assert summary.extracted_video_count == 0
     assert summary.existing_frame_count == 10
@@ -422,19 +423,19 @@ def test_budgeted_run_already_met_extracts_nothing(
 
 
 def test_budgeted_run_unreachable_target_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A budget unreachable even by topping every eligible video is rejected."""
+    """Verifies that a budget unreachable even by topping every eligible video is rejected."""
     project = tmp_path / "project"
     videos = _make_videos(project, ["a.mp4", "b.mp4"])
     config_path = _write_config(project, videos, numframes2pick=5)
     _patch_capture(monkeypatch, frame_count=10)
-    monkeypatch.setattr(ep, "iter_pinned_extraction", _fake_iter_factory())
+    monkeypatch.setattr(extraction_pipeline, "iter_pinned_extraction", _fake_iter_factory())
 
     with pytest.raises(ValueError, match="Unable to reach the requested total"):
-        ep.extract_frames_kmeans(config_path, total_frame_budget=100, display_progress=False)
+        extraction_pipeline.extract_frames_kmeans(config_path, total_frame_budget=100, display_progress=False)
 
 
 def test_requested_refined_video_with_overwrite_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A requested video already in outlier refinement cannot be re-extracted under overwrite."""
+    """Verifies that a requested video already in outlier refinement cannot be re-extracted under overwrite."""
     project = tmp_path / "project"
     videos = _make_videos(project, ["a.mp4", "b.mp4"])
     config_path = _write_config(project, videos, numframes2pick=5)
@@ -442,16 +443,17 @@ def test_requested_refined_video_with_overwrite_rejected(tmp_path: Path, monkeyp
     refined_directory.mkdir(parents=True, exist_ok=True)
     (refined_directory / "machinelabels-iter0.h5").write_bytes(b"x")
     _patch_capture(monkeypatch, frame_count=10)
-    monkeypatch.setattr(ep, "iter_pinned_extraction", _fake_iter_factory())
+    monkeypatch.setattr(extraction_pipeline, "iter_pinned_extraction", _fake_iter_factory())
 
     with pytest.raises(ValueError, match="already in outlier refinement"):
-        ep.extract_frames_kmeans(config_path, overwrite=True, requested_videos=(videos[0],))
+        extraction_pipeline.extract_frames_kmeans(config_path, overwrite=True, requested_videos=(videos[0],))
 
 
 def test_requested_refined_video_without_overwrite_skipped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    """A requested refined video is skipped with a warning in budgeted mode, leaving the rest to sample."""
+    """Verifies that a requested refined video is skipped with a warning in budgeted mode, leaving the rest
+    to sample."""
     project = tmp_path / "project"
     videos = _make_videos(project, ["a.mp4", "b.mp4", "c.mp4"])
     config_path = _write_config(project, videos, numframes2pick=5)
@@ -459,9 +461,9 @@ def test_requested_refined_video_without_overwrite_skipped(
     refined_directory.mkdir(parents=True, exist_ok=True)
     (refined_directory / "MachineLabelsRefine.h5").write_bytes(b"x")
     _patch_capture(monkeypatch, frame_count=10)
-    monkeypatch.setattr(ep, "iter_pinned_extraction", _fake_iter_factory())
+    monkeypatch.setattr(extraction_pipeline, "iter_pinned_extraction", _fake_iter_factory())
 
-    summary = ep.extract_frames_kmeans(
+    summary = extraction_pipeline.extract_frames_kmeans(
         config_path, total_frame_budget=5, requested_videos=(videos[0],), display_progress=False
     )
 
@@ -470,12 +472,10 @@ def test_requested_refined_video_without_overwrite_skipped(
     assert "is already in outlier refinement and was skipped" in captured.err
 
 
-# ---------------------------------------------------------------------------------------------------------------------
 # _report_plan / _report_sampling_plan
-# ---------------------------------------------------------------------------------------------------------------------
 def test_report_plan_writes_header(capsys: pytest.CaptureFixture) -> None:
-    """The run header names the plan and core usage."""
-    ep._report_plan(
+    """Verifies that the run header names the plan and core usage."""
+    extraction_pipeline._report_plan(
         video_count=2,
         configured_frames_per_video=5,
         clustering_stride=1,
@@ -493,7 +493,7 @@ def test_report_plan_writes_header(capsys: pytest.CaptureFixture) -> None:
 
 
 def test_report_sampling_plan_budget_met(capsys: pytest.CaptureFixture) -> None:
-    """The budget-already-met plan warns and reports nothing to extract."""
+    """Verifies that the budget-already-met plan warns and reports nothing to extract."""
     plan = VideoSamplingPlan(
         selected_videos=(),
         existing_frame_count=100,
@@ -502,13 +502,13 @@ def test_report_sampling_plan_budget_met(capsys: pytest.CaptureFixture) -> None:
         budget_already_met=True,
         target_unreachable=False,
     )
-    ep._report_sampling_plan(plan=plan)
+    extraction_pipeline._report_sampling_plan(plan=plan)
     captured = capsys.readouterr()
     assert "already holds 100 frames" in captured.err
 
 
 def test_report_sampling_plan_without_groups(capsys: pytest.CaptureFixture) -> None:
-    """An ungrouped sampling plan reports the existing-to-projected frame growth."""
+    """Verifies that an ungrouped sampling plan reports the existing-to-projected frame growth."""
     plan = VideoSamplingPlan(
         selected_videos=("a", "b"),
         existing_frame_count=10,
@@ -517,14 +517,14 @@ def test_report_sampling_plan_without_groups(capsys: pytest.CaptureFixture) -> N
         budget_already_met=False,
         target_unreachable=False,
     )
-    ep._report_sampling_plan(plan=plan)
+    extraction_pipeline._report_sampling_plan(plan=plan)
     captured = capsys.readouterr()
     assert "sampling 2 video(s)" in captured.err
     assert "10 existing -> 30 projected" in captured.err
 
 
 def test_report_sampling_plan_with_groups_and_overshoot(capsys: pytest.CaptureFixture) -> None:
-    """A grouped plan reports the distribution, flags starved groups, and warns on pinned overshoot."""
+    """Verifies that a grouped plan reports the distribution, flags starved groups, and warns on pinned overshoot."""
     per_group = (
         ("g1", 0, 2, 10, 3),  # Sampled: two videos added.
         ("g2", 5, 0, 5, 1),  # Starved: below-ceiling videos available but none added.
@@ -540,7 +540,7 @@ def test_report_sampling_plan_with_groups_and_overshoot(capsys: pytest.CaptureFi
         per_group=per_group,
         always_included_overshoot=True,
     )
-    ep._report_sampling_plan(plan=plan)
+    extraction_pipeline._report_sampling_plan(plan=plan)
     captured = capsys.readouterr()
     assert "group balancing: 1/3 groups sampled" in captured.err
     assert "g1+2" in captured.err
@@ -548,23 +548,23 @@ def test_report_sampling_plan_with_groups_and_overshoot(capsys: pytest.CaptureFi
     assert "videos named with --videos alone exceeded the frame budget" in captured.err
 
 
-# ---------------------------------------------------------------------------------------------------------------------
 # _count_extracted_frames / _count_clustering_frames
-# ---------------------------------------------------------------------------------------------------------------------
 def test_count_extracted_frames_excludes_overlays(tmp_path: Path) -> None:
-    """Extracted-frame counts exclude prediction overlays and cover absent directories."""
+    """Verifies that extracted-frame counts exclude prediction overlays and cover absent directories."""
     project = tmp_path / "project"
     labeled = project / "labeled-data"
     _touch_frames(labeled / "a", 3)
     (labeled / "a" / "img0000labeled.png").write_bytes(b"")  # Overlay, must not be counted.
-    counts = ep._count_extracted_frames(videos=["/videos/a.mp4", "/videos/b.mp4"], project_directory=project)
+    counts = extraction_pipeline._count_extracted_frames(
+        videos=["/videos/a.mp4", "/videos/b.mp4"], project_directory=project
+    )
     assert counts == {"/videos/a.mp4": 3, "/videos/b.mp4": 0}
 
 
 def test_count_clustering_frames_uses_bounds_and_stride(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The clustering-frame count mirrors DeepLabCut's start/stop/stride sampling per video."""
+    """Verifies that the clustering-frame count mirrors DeepLabCut's start/stop/stride sampling per video."""
     _patch_capture(monkeypatch, frame_count=100)
-    totals = ep._count_clustering_frames(
+    totals = extraction_pipeline._count_clustering_frames(
         videos=["/videos/a.mp4", "/videos/b.mp4"], start_fraction=0.0, stop_fraction=1.0, clustering_stride=3
     )
     # range(0, 100, 3) -> 34 frames sampled for each video.
@@ -572,19 +572,18 @@ def test_count_clustering_frames_uses_bounds_and_stride(monkeypatch: pytest.Monk
 
 
 def test_count_clustering_frames_clamps_to_one(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A video whose bounds yield no strided frames still contributes at least one frame."""
+    """Verifies that a video whose bounds yield no strided frames still contributes at least one frame."""
     _patch_capture(monkeypatch, frame_count=0)
-    totals = ep._count_clustering_frames(
+    totals = extraction_pipeline._count_clustering_frames(
         videos=["/videos/a.mp4"], start_fraction=0.0, stop_fraction=1.0, clustering_stride=1
     )
     assert totals == {0: 1}
 
 
-# ---------------------------------------------------------------------------------------------------------------------
 # _clear_bare_frames / _clear_bare_frames_in_directory / _drop_collected_data_rows
-# ---------------------------------------------------------------------------------------------------------------------
 def test_clear_bare_frames_in_directory_preserves_labeled_and_machine_frames(tmp_path: Path) -> None:
-    """Clearing removes only unlabeled bootstrap frames, keeping human-labeled and machine-labeled ones."""
+    """Verifies that clearing removes only unlabeled bootstrap frames, keeping human-labeled and
+    machine-labeled ones."""
     directory = tmp_path / "labeled-data" / "vid"
     _touch_frames(directory, 4)  # img0000..img0003
     (directory / "img0002labeled.png").write_bytes(b"")  # Overlay for a bare frame, dropped defensively.
@@ -594,7 +593,7 @@ def test_clear_bare_frames_in_directory_preserves_labeled_and_machine_frames(tmp
     )
     _write_machine_labels(directory / "machinelabels-iter0.h5", image_names=["img0001.png"])  # img0001 kept.
 
-    removed = ep._clear_bare_frames_in_directory(directory=directory, scorer="tester")
+    removed = extraction_pipeline._clear_bare_frames_in_directory(directory=directory, scorer="tester")
 
     assert removed == 2  # img0002 and img0003 were bare.
     assert (directory / "img0000.png").exists()
@@ -608,14 +607,14 @@ def test_clear_bare_frames_in_directory_preserves_labeled_and_machine_frames(tmp
 
 
 def test_clear_bare_frames_in_directory_empty_directory(tmp_path: Path) -> None:
-    """A directory with no extracted frames clears nothing."""
+    """Verifies that a directory with no extracted frames clears nothing."""
     directory = tmp_path / "labeled-data" / "vid"
     directory.mkdir(parents=True)
-    assert ep._clear_bare_frames_in_directory(directory=directory, scorer="tester") == 0
+    assert extraction_pipeline._clear_bare_frames_in_directory(directory=directory, scorer="tester") == 0
 
 
 def test_clear_bare_frames_reports_and_survives_unreadable(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
-    """The clearing wrapper aggregates removals across directories and warns on an unreadable one."""
+    """Verifies that the clearing wrapper aggregates removals across directories and warns on an unreadable one."""
     project = tmp_path / "project"
     labeled = project / "labeled-data"
     # A clean directory with two bare frames and no labels: both are removed.
@@ -624,7 +623,7 @@ def test_clear_bare_frames_reports_and_survives_unreadable(tmp_path: Path, capsy
     _touch_frames(labeled / "broken", 1)
     (labeled / "broken" / "CollectedData_tester.h5").write_bytes(b"not a real hdf file")
 
-    removed_count, cleared_stems = ep._clear_bare_frames(
+    removed_count, cleared_stems = extraction_pipeline._clear_bare_frames(
         project_directory=project, video_stems=["clean", "broken"], scorer="tester", scope_label="--reset"
     )
 
@@ -636,48 +635,51 @@ def test_clear_bare_frames_reports_and_survives_unreadable(tmp_path: Path, capsy
 
 
 def test_drop_collected_data_rows_missing_file_is_noop(tmp_path: Path) -> None:
-    """Dropping rows from an absent label table does nothing."""
-    ep._drop_collected_data_rows(collected_data_path=tmp_path / "absent.h5", removed_frame_names={"img0000.png"})
+    """Verifies that dropping rows from an absent label table does nothing."""
+    extraction_pipeline._drop_collected_data_rows(
+        collected_data_path=tmp_path / "absent.h5", removed_frame_names={"img0000.png"}
+    )
     assert not (tmp_path / "absent.h5").exists()
 
 
 def test_drop_collected_data_rows_keeps_all_when_none_removed(tmp_path: Path) -> None:
-    """When no row references a removed frame the table is left untouched."""
+    """Verifies that when no row references a removed frame the table is left untouched."""
     path = tmp_path / "CollectedData_tester.h5"
     _write_collected_data(path, rows=[("img0000.png", True), ("img0001.png", True)])
-    ep._drop_collected_data_rows(collected_data_path=path, removed_frame_names={"img9999.png"})
+    extraction_pipeline._drop_collected_data_rows(collected_data_path=path, removed_frame_names={"img9999.png"})
     remaining = pd.read_hdf(path, "df_with_missing")
     assert len(remaining) == 2
 
 
 def test_drop_collected_data_rows_deletes_emptied_table(tmp_path: Path) -> None:
-    """Dropping every remaining row deletes both the h5 and its csv sibling."""
+    """Verifies that dropping every remaining row deletes both the h5 and its csv sibling."""
     path = tmp_path / "CollectedData_tester.h5"
     csv_path = path.with_suffix(".csv")
     _write_collected_data(path, rows=[("img0000.png", True), ("img0001.png", False)])
     csv_path.write_text("placeholder csv\n")
-    ep._drop_collected_data_rows(collected_data_path=path, removed_frame_names={"img0000.png", "img0001.png"})
+    extraction_pipeline._drop_collected_data_rows(
+        collected_data_path=path, removed_frame_names={"img0000.png", "img0001.png"}
+    )
     assert not path.exists()
     assert not csv_path.exists()
 
 
 def test_drop_collected_data_rows_flat_index_partial_removal(tmp_path: Path) -> None:
-    """A flat-string index row is parsed by file name, and the surviving rows are rewritten to h5 and csv."""
+    """Verifies that a flat-string index row is parsed by file name, and the surviving rows are rewritten
+    to h5 and csv."""
     path = tmp_path / "CollectedData_tester.h5"
     frame = pd.DataFrame(
         {"x": [1.0, 2.0]},
         index=pd.Index(["labeled-data/vid/img0000.png", "labeled-data/vid/img0001.png"]),
     )
     frame.to_hdf(path, key="df_with_missing", mode="w")
-    ep._drop_collected_data_rows(collected_data_path=path, removed_frame_names={"img0000.png"})
+    extraction_pipeline._drop_collected_data_rows(collected_data_path=path, removed_frame_names={"img0000.png"})
     remaining = pd.read_hdf(path, "df_with_missing")
     assert [Path(str(entry)).name for entry in remaining.index] == ["img0001.png"]
     assert path.with_suffix(".csv").is_file()
 
 
-# ---------------------------------------------------------------------------------------------------------------------
 # _extract_one_video (the per-video worker)
-# ---------------------------------------------------------------------------------------------------------------------
 def _install_worker_stubs(
     monkeypatch: pytest.MonkeyPatch, *, write_count: int, raise_exc: Exception | None = None
 ) -> tuple[list[dict], list[dict], list[tuple[int, int]]]:
@@ -707,8 +709,8 @@ def _install_worker_stubs(
         return "REPORTER"
 
     monkeypatch.setattr(deeplabcut, "extract_frames", _stub_extract_frames)
-    monkeypatch.setattr(ep, "make_fast_kmeans_selector", _stub_selector)
-    monkeypatch.setattr(ep, "make_progress_reporter", _stub_reporter)
+    monkeypatch.setattr(extraction_pipeline, "make_fast_kmeans_selector", _stub_selector)
+    monkeypatch.setattr(extraction_pipeline, "make_progress_reporter", _stub_reporter)
     # Track the module attribute the worker overwrites so monkeypatch restores it after the test.
     monkeypatch.setattr(frame_selection_tools, "KmeansbasedFrameselectioncv2", object(), raising=False)
     return extract_calls, selector_calls, reporter_calls
@@ -731,13 +733,15 @@ def _worker_task(config_path: Path, video_path: str, *, progress_queue: object, 
 
 
 def test_extract_one_video_success_without_progress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A successful extraction with no progress queue reports the freshly written frame count."""
+    """Verifies that a successful extraction with no progress queue reports the freshly written frame count."""
     project = tmp_path / "project"
     config_path = _write_config(project, [], include_video_sets=False)
     video_path = str(project / "videos" / "a.mp4")
     extract_calls, selector_calls, reporter_calls = _install_worker_stubs(monkeypatch, write_count=2)
 
-    result = ep._extract_one_video(_worker_task(config_path, video_path, progress_queue=None, crop_frames=True))
+    result = extraction_pipeline._extract_one_video(
+        _worker_task(config_path, video_path, progress_queue=None, crop_frames=True)
+    )
 
     assert result == (video_path, 2, "ok")
     assert selector_calls == [{"progress": None, "frame_count": 7}]  # No queue -> no reporter.
@@ -755,13 +759,13 @@ def test_extract_one_video_success_without_progress(tmp_path: Path, monkeypatch:
 
 
 def test_extract_one_video_success_with_progress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A progress queue routes the k-means selector through the streaming progress reporter."""
+    """Verifies that a progress queue routes the k-means selector through the streaming progress reporter."""
     project = tmp_path / "project"
     config_path = _write_config(project, [], include_video_sets=False)
     video_path = str(project / "videos" / "a.mp4")
     _extract_calls, selector_calls, reporter_calls = _install_worker_stubs(monkeypatch, write_count=1)
 
-    result = ep._extract_one_video(_worker_task(config_path, video_path, progress_queue=object()))
+    result = extraction_pipeline._extract_one_video(_worker_task(config_path, video_path, progress_queue=object()))
 
     assert result == (video_path, 1, "ok")
     assert reporter_calls == [(0, 50)]
@@ -769,25 +773,27 @@ def test_extract_one_video_success_with_progress(tmp_path: Path, monkeypatch: py
 
 
 def test_extract_one_video_empty_when_no_frames_written(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """An extraction that writes no frames is reported as empty."""
+    """Verifies that an extraction that writes no frames is reported as empty."""
     project = tmp_path / "project"
     config_path = _write_config(project, [], include_video_sets=False)
     video_path = str(project / "videos" / "a.mp4")
     _install_worker_stubs(monkeypatch, write_count=0)
 
-    result = ep._extract_one_video(_worker_task(config_path, video_path, progress_queue=None))
+    result = extraction_pipeline._extract_one_video(_worker_task(config_path, video_path, progress_queue=None))
 
     assert result == (video_path, 0, "empty")
 
 
 def test_extract_one_video_captures_exception(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A failing extraction returns an error status carrying the traceback rather than raising."""
+    """Verifies that a failing extraction returns an error status carrying the traceback rather than raising."""
     project = tmp_path / "project"
     config_path = _write_config(project, [], include_video_sets=False)
     video_path = str(project / "videos" / "a.mp4")
     _install_worker_stubs(monkeypatch, write_count=0, raise_exc=RuntimeError("decode failed"))
 
-    video, written, status = ep._extract_one_video(_worker_task(config_path, video_path, progress_queue=None))
+    video, written, status = extraction_pipeline._extract_one_video(
+        _worker_task(config_path, video_path, progress_queue=None)
+    )
 
     assert video == video_path
     assert written == 0

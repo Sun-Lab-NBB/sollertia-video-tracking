@@ -1,4 +1,5 @@
-"""Tests for the parallel outlier-frame extraction pipeline that refines a DeepLabCut model on likely-wrong frames.
+"""Contains tests for the parallel outlier-frame extraction pipeline that refines a DeepLabCut model on
+likely-wrong frames.
 
 The DeepLabCut runtime boundary (``read_config``, ``load_analyzed_data``, the frame writer, the multiprocessing pool)
 is stubbed so the whole pipeline runs headless, deterministically, and without a GPU, network, or real decode. Worker
@@ -23,9 +24,7 @@ from sollertia_video_tracking.frame_extraction.outlier_pipeline import (
 from sollertia_video_tracking.frame_extraction.outlier_detection import OutlierAlgorithm
 
 
-# ---------------------------------------------------------------------------------------------------------------------
 # Builders shared across tests.
-# ---------------------------------------------------------------------------------------------------------------------
 def _predictions(n_frames: int = 4, bodyparts: tuple[str, ...] = ("nose",), scorer: str = "S") -> pd.DataFrame:
     """Builds a prediction table with a ``scorer / bodyparts / coords`` column MultiIndex filled with zeros."""
     columns = pd.MultiIndex.from_tuples(
@@ -75,18 +74,16 @@ class _FakeContext:
         return _FakePool(processes)
 
 
-# ---------------------------------------------------------------------------------------------------------------------
 # Enums and the summary dataclass.
-# ---------------------------------------------------------------------------------------------------------------------
 def test_extraction_and_tracking_enums_expose_expected_values() -> None:
-    """The string enums carry the wire values the CLI and DeepLabCut exchange."""
+    """Verifies that the string enums carry the wire values the CLI and DeepLabCut exchange."""
     assert ExtractionAlgorithm.KMEANS == "kmeans"
     assert ExtractionAlgorithm.UNIFORM == "uniform"
     assert {member.value for member in TrackingMethod} == {"box", "skeleton", "ellipse"}
 
 
 def test_summary_properties_and_describe_clean_run() -> None:
-    """A clean run reports success, zero failures, and a describe line without a failure tail."""
+    """Verifies that a clean run reports success, zero failures, and a describe line without a failure tail."""
     summary = OutlierExtractionSummary(
         config_path=Path("/p/config.yaml"),
         outlier_algorithm=OutlierAlgorithm.JUMP,
@@ -108,7 +105,7 @@ def test_summary_properties_and_describe_clean_run() -> None:
 
 
 def test_summary_describe_includes_unanalyzed_and_failed_tail() -> None:
-    """Unanalyzed and failed videos surface in the describe tail and flip ``successful`` off."""
+    """Verifies that unanalyzed and failed videos surface in the describe tail and flip ``successful`` off."""
     summary = OutlierExtractionSummary(
         config_path=Path("/p/config.yaml"),
         outlier_algorithm=OutlierAlgorithm.UNCERTAIN,
@@ -130,32 +127,28 @@ def test_summary_describe_includes_unanalyzed_and_failed_tail() -> None:
     assert "1 failed" in description
 
 
-# ---------------------------------------------------------------------------------------------------------------------
 # _video_cropping_offset
-# ---------------------------------------------------------------------------------------------------------------------
 def test_video_cropping_offset_uncropped_returns_origin() -> None:
-    """A video with no crop specification yields the zero origin."""
+    """Verifies that a video with no crop specification yields the zero origin."""
     assert op._video_cropping_offset(configuration={}, video="/v/v1.mp4") == (0, 0)
 
 
 def test_video_cropping_offset_reads_top_left_origin() -> None:
-    """A valid ``x1,x2,y1,y2`` crop yields the ``(x1, y1)`` top-left origin."""
+    """Verifies that a valid ``x1,x2,y1,y2`` crop yields the ``(x1, y1)`` top-left origin."""
     configuration = {"video_sets": {"/v/v1.mp4": {"crop": "1,2,3,4"}}}
     assert op._video_cropping_offset(configuration=configuration, video="/v/v1.mp4") == (1, 3)
 
 
 def test_video_cropping_offset_rejects_malformed_crop() -> None:
-    """A crop that is not four comma-separated integers raises a descriptive ValueError."""
+    """Verifies that a crop that is not four comma-separated integers raises a descriptive ValueError."""
     configuration = {"video_sets": {"/v/v1.mp4": {"crop": "1,2,3"}}}
     with pytest.raises(ValueError, match="four comma-separated integers"):
         op._video_cropping_offset(configuration=configuration, video="/v/v1.mp4")
 
 
-# ---------------------------------------------------------------------------------------------------------------------
 # _load_sliced_predictions
-# ---------------------------------------------------------------------------------------------------------------------
 def test_load_sliced_predictions_applies_crop_offset(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A cropped video's predictions are shifted by the metadata origin minus the output-crop origin."""
+    """Verifies that a cropped video's predictions are shifted by the metadata origin minus the output-crop origin."""
     video = "/v/v1.mp4"
     predictions = _predictions(n_frames=4)
     metadata = {"data": {"cropping": True, "cropping_parameters": (10, 200, 20, 200)}}
@@ -179,7 +172,9 @@ def test_load_sliced_predictions_applies_crop_offset(monkeypatch: pytest.MonkeyP
 
 
 def test_load_sliced_predictions_slices_window_without_cropping(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An uncropped video is only sliced to the configured start/stop window and its positions are unchanged."""
+    """Verifies that an uncropped video is only sliced to the configured start/stop window and its positions are
+    unchanged.
+    """
     video = "/v/v1.mp4"
     predictions = _predictions(n_frames=4)
     metadata = {"data": {"cropping": False}}
@@ -200,11 +195,11 @@ def test_load_sliced_predictions_slices_window_without_cropping(monkeypatch: pyt
     assert (result.to_numpy() == 0).all()
 
 
-# ---------------------------------------------------------------------------------------------------------------------
 # _discover_analyzed_videos
-# ---------------------------------------------------------------------------------------------------------------------
 def test_discover_analyzed_videos_keeps_only_videos_with_predictions(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Videos whose prediction probe raises FileNotFoundError are dropped, the rest kept in configuration order."""
+    """Verifies that videos whose prediction probe raises FileNotFoundError are dropped, the rest kept in
+    configuration order.
+    """
 
     def fake_find(*, videoname, **_kwargs):
         if videoname == "v2":
@@ -218,9 +213,7 @@ def test_discover_analyzed_videos_keeps_only_videos_with_predictions(monkeypatch
     assert result == ["/a/v1.mp4", "/c/v3.mp4"]
 
 
-# ---------------------------------------------------------------------------------------------------------------------
 # _detect_all_videos
-# ---------------------------------------------------------------------------------------------------------------------
 def _detect(monkeypatch: pytest.MonkeyPatch, load_stub, algorithm, **overrides):
     """Drives ``_detect_all_videos`` with a stubbed slice loader and sensible defaults."""
     monkeypatch.setattr(op, "_load_sliced_predictions", load_stub)
@@ -245,7 +238,7 @@ def _detect(monkeypatch: pytest.MonkeyPatch, load_stub, algorithm, **overrides):
 
 
 def test_detect_all_videos_list_uses_explicit_indices(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The ``list`` algorithm returns the sorted, de-duplicated explicit frame indices."""
+    """Verifies that the ``list`` algorithm returns the sorted, de-duplicated explicit frame indices."""
     candidates, unanalyzed, errors = _detect(
         monkeypatch,
         load_stub=lambda **_k: _predictions(),
@@ -258,7 +251,7 @@ def test_detect_all_videos_list_uses_explicit_indices(monkeypatch: pytest.Monkey
 
 
 def test_detect_all_videos_uncertain_flags_low_confidence(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The ``uncertain`` algorithm flags a frame whose likelihood falls below the confidence bound."""
+    """Verifies that the ``uncertain`` algorithm flags a frame whose likelihood falls below the confidence bound."""
     predictions = _predictions(n_frames=3)
     predictions.iloc[:, predictions.columns.get_level_values("coords") == "likelihood"] = 0.9
     # Drop frame 1 below the 0.6 confidence bound.
@@ -273,7 +266,7 @@ def test_detect_all_videos_uncertain_flags_low_confidence(monkeypatch: pytest.Mo
 
 
 def test_detect_all_videos_jump_flags_large_step(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The ``jump`` algorithm flags the frames straddling an over-threshold position jump."""
+    """Verifies that the ``jump`` algorithm flags the frames straddling an over-threshold position jump."""
     predictions = _predictions(n_frames=4)
     predictions.loc[2, ("S", "nose", "x")] = 100.0  # a jump into and back out of frame 2.
 
@@ -284,7 +277,7 @@ def test_detect_all_videos_jump_flags_large_step(monkeypatch: pytest.MonkeyPatch
 
 
 def test_detect_all_videos_fitting_reduces_via_pool(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The ``fitting`` algorithm defers to the shared-pool reduction after validating numframes2pick."""
+    """Verifies that the ``fitting`` algorithm defers to the shared-pool reduction after validating numframes2pick."""
     monkeypatch.setattr(op, "_detect_fitting_outliers", lambda **_k: {"v1": [2]})
 
     candidates, unanalyzed, errors = _detect(
@@ -299,7 +292,7 @@ def test_detect_all_videos_fitting_reduces_via_pool(monkeypatch: pytest.MonkeyPa
 
 
 def test_detect_all_videos_fitting_rejects_bad_numframes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A missing or non-positive ``numframes2pick`` fails the fitting path with a clean ValueError."""
+    """Verifies that a missing or non-positive ``numframes2pick`` fails the fitting path with a clean ValueError."""
     with pytest.raises(ValueError, match="numframes2pick must be a positive integer"):
         _detect(
             monkeypatch,
@@ -310,7 +303,9 @@ def test_detect_all_videos_fitting_rejects_bad_numframes(monkeypatch: pytest.Mon
 
 
 def test_detect_all_videos_records_missing_and_failed_per_video(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A missing prediction file is recorded as unanalyzed and a malformed table as a per-video error, not raised."""
+    """Verifies that a missing prediction file is recorded as unanalyzed and a malformed table as a per-video error,
+    not raised.
+    """
     good = _predictions(n_frames=3)
     good.iloc[:, good.columns.get_level_values("coords") == "likelihood"] = 0.9
 
@@ -335,9 +330,7 @@ def test_detect_all_videos_records_missing_and_failed_per_video(monkeypatch: pyt
     assert "detection error" in errors[0][1]
 
 
-# ---------------------------------------------------------------------------------------------------------------------
 # _detect_fitting_outliers
-# ---------------------------------------------------------------------------------------------------------------------
 def _fit_series() -> dict[str, list]:
     """Builds two videos' worth of zeroed keypoint trajectories for the fitting pool."""
     keypoint = (np.zeros(5), np.zeros(5), np.ones(5))
@@ -347,7 +340,9 @@ def _fit_series() -> dict[str, list]:
 def test_detect_fitting_outliers_auto_workers_reports_progress(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Automatic worker sizing fills the usable cores (clamped to the task count) and reduces to outlier frames."""
+    """Verifies that automatic worker sizing fills the usable cores (clamped to the task count) and reduces to outlier
+    frames.
+    """
     context = _FakeContext()
     # Pin the visible core count so the auto worker-sizing arithmetic is deterministic and can be asserted exactly.
     monkeypatch.setattr(op.os, "cpu_count", lambda: 8)
@@ -375,7 +370,9 @@ def test_detect_fitting_outliers_auto_workers_reports_progress(
 def test_detect_fitting_outliers_explicit_workers_no_progress(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """An explicit fitting worker count is honored verbatim and the progress line is suppressed when disabled."""
+    """Verifies that an explicit fitting worker count is honored verbatim and the progress line is suppressed when
+    disabled.
+    """
     context = _FakeContext()
     # With 8 - 2 = 6 usable cores the auto path would size the pool at 3 (the task count); an explicit 2 must win.
     monkeypatch.setattr(op.os, "cpu_count", lambda: 8)
@@ -401,9 +398,7 @@ def test_detect_fitting_outliers_explicit_workers_no_progress(
     assert "fitting" not in capsys.readouterr().err
 
 
-# ---------------------------------------------------------------------------------------------------------------------
 # _extract_all_videos (and _report_plan through it)
-# ---------------------------------------------------------------------------------------------------------------------
 def _fake_iter_factory(results):
     """Builds a fake ``iter_pinned_extraction`` that exercises ``make_tasks`` and yields canned results."""
 
@@ -420,7 +415,9 @@ def _fake_iter_factory(results):
 def test_extract_all_videos_aggregates_results_and_reports_plan(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The three worker outcomes are aggregated into the summary and the plan header is written when displaying."""
+    """Verifies that the three worker outcomes are aggregated into the summary and the plan header is written when
+    displaying.
+    """
     results = [("v1", 7, "ok"), ("v2", 0, "not_analyzed"), ("v3", 0, "error:\ntb")]
     monkeypatch.setattr(op, "iter_pinned_extraction", _fake_iter_factory(results))
 
@@ -457,7 +454,7 @@ def test_extract_all_videos_aggregates_results_and_reports_plan(
 
 
 def test_extract_all_videos_suppresses_plan_when_progress_off(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """With progress disabled the plan header is skipped while the results still aggregate."""
+    """Verifies that with progress disabled the plan header is skipped while the results still aggregate."""
     monkeypatch.setattr(op, "iter_pinned_extraction", _fake_iter_factory([("v1", 3, "ok")]))
 
     summary = op._extract_all_videos(
@@ -485,11 +482,11 @@ def test_extract_all_videos_suppresses_plan_when_progress_off(monkeypatch: pytes
     assert summary.successful is True
 
 
-# ---------------------------------------------------------------------------------------------------------------------
 # _count_directory_frames and _skip_video_registration
-# ---------------------------------------------------------------------------------------------------------------------
 def test_count_directory_frames_ignores_overlays(tmp_path: Path) -> None:
-    """Only ``img*.png`` frames are counted; ``*labeled.png`` overlays and missing directories are ignored."""
+    """Verifies that only ``img*.png`` frames are counted; ``*labeled.png`` overlays and missing directories are
+    ignored.
+    """
     assert op._count_directory_frames(tmp_path / "missing") == 0
     (tmp_path / "img0001.png").write_bytes(b"")
     (tmp_path / "img0002.png").write_bytes(b"")
@@ -498,13 +495,11 @@ def test_count_directory_frames_ignores_overlays(tmp_path: Path) -> None:
 
 
 def test_skip_video_registration_reports_success() -> None:
-    """The registration neutralizer always reports a successful add so the frame writer proceeds."""
+    """Verifies that the registration neutralizer always reports a successful add so the frame writer proceeds."""
     assert op._skip_video_registration(video="anything", cfg={}) is True
 
 
-# ---------------------------------------------------------------------------------------------------------------------
 # _extract_one_video
-# ---------------------------------------------------------------------------------------------------------------------
 def _install_extract_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     """Neutralizes the two DeepLabCut module attributes the worker reassigns so they restore after the test."""
     monkeypatch.setattr(op.frameselectiontools, "KmeansbasedFrameselectioncv2", object(), raising=False)
@@ -512,7 +507,9 @@ def _install_extract_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_extract_one_video_writes_frames_and_reports_ok(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A successful extraction writes frames into the labeled-data directory and reports the freshly written count."""
+    """Verifies that a successful extraction writes frames into the labeled-data directory and reports the freshly
+    written count.
+    """
     _install_extract_stubs(monkeypatch)
     configuration = {"project_path": str(tmp_path)}
     monkeypatch.setattr(op.auxiliaryfunctions, "read_config", lambda _p: configuration)
@@ -546,7 +543,7 @@ def test_extract_one_video_writes_frames_and_reports_ok(monkeypatch: pytest.Monk
 
 
 def test_extract_one_video_without_progress_queue(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A None progress queue leaves the reporter unset while the extraction still succeeds."""
+    """Verifies that a None progress queue leaves the reporter unset while the extraction still succeeds."""
     _install_extract_stubs(monkeypatch)
     configuration = {"project_path": str(tmp_path)}
     monkeypatch.setattr(op.auxiliaryfunctions, "read_config", lambda _p: configuration)
@@ -573,7 +570,7 @@ def test_extract_one_video_without_progress_queue(monkeypatch: pytest.MonkeyPatc
 
 
 def test_extract_one_video_missing_predictions_is_not_analyzed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A missing prediction file surfaces as the ``not_analyzed`` status rather than raising."""
+    """Verifies that a missing prediction file surfaces as the ``not_analyzed`` status rather than raising."""
     _install_extract_stubs(monkeypatch)
     monkeypatch.setattr(op.auxiliaryfunctions, "read_config", lambda _p: {"project_path": str(tmp_path)})
 
@@ -599,7 +596,9 @@ def test_extract_one_video_missing_predictions_is_not_analyzed(monkeypatch: pyte
 
 
 def test_extract_one_video_captures_extraction_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """An error raised by the frame writer is captured as an ``error:`` traceback status, not propagated."""
+    """Verifies that an error raised by the frame writer is captured as an ``error:`` traceback status, not
+    propagated.
+    """
     _install_extract_stubs(monkeypatch)
     monkeypatch.setattr(op.auxiliaryfunctions, "read_config", lambda _p: {"project_path": str(tmp_path)})
     monkeypatch.setattr(op, "_load_sliced_predictions", lambda **_k: _predictions())
@@ -631,16 +630,14 @@ def test_extract_one_video_captures_extraction_error(monkeypatch: pytest.MonkeyP
     assert "decode blew up" in status
 
 
-# ---------------------------------------------------------------------------------------------------------------------
 # _clear_video_iteration_outliers
-# ---------------------------------------------------------------------------------------------------------------------
 def test_clear_video_iteration_outliers_no_machine_labels_is_noop(tmp_path: Path) -> None:
-    """A directory without a machine-label table for the iteration removes nothing."""
+    """Verifies that a directory without a machine-label table for the iteration removes nothing."""
     assert op._clear_video_iteration_outliers(directory=tmp_path, iteration=0, scorer="human") == (0, False)
 
 
 def test_clear_video_iteration_outliers_keeps_labeled_and_drops_refinement(tmp_path: Path) -> None:
-    """Only unlabeled outlier frames are removed; overlays, bookkeeping, and refinements go too."""
+    """Verifies that only unlabeled outlier frames are removed; overlays, bookkeeping, and refinements go too."""
     directory = tmp_path / "labeled-data" / "video"
     directory.mkdir(parents=True)
     _write_labels(directory / "machinelabels-iter0.h5", ["img0001.png", "img0002.png"])
@@ -663,7 +660,7 @@ def test_clear_video_iteration_outliers_keeps_labeled_and_drops_refinement(tmp_p
 
 
 def test_clear_video_iteration_outliers_without_collected_data_removes_all(tmp_path: Path) -> None:
-    """With no human CollectedData table, every outlier frame is removed and no refinement is reported."""
+    """Verifies that with no human CollectedData table, every outlier frame is removed and no refinement is reported."""
     directory = tmp_path / "labeled-data" / "video"
     directory.mkdir(parents=True)
     _write_labels(directory / "machinelabels-iter0.h5", ["img0001.png", "img0002.png"])
@@ -677,9 +674,7 @@ def test_clear_video_iteration_outliers_without_collected_data_removes_all(tmp_p
     assert not (directory / "img0002.png").exists()
 
 
-# ---------------------------------------------------------------------------------------------------------------------
 # _clear_iteration_outliers
-# ---------------------------------------------------------------------------------------------------------------------
 def _make_iteration_dir(root: Path, name: str, frame: str, *, refinement: bool = False) -> Path:
     """Fabricates one labeled-data video directory with a single-frame machine-label table for iteration 0."""
     directory = root / "labeled-data" / name
@@ -692,7 +687,9 @@ def _make_iteration_dir(root: Path, name: str, frame: str, *, refinement: bool =
 
 
 def test_clear_iteration_outliers_reset_scans_all_and_warns(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """Reset clears every iteration directory on disk, warns on unreadable ones and on discarded refinements."""
+    """Verifies that reset clears every iteration directory on disk, warns on unreadable ones and on discarded
+    refinements.
+    """
     config_path = tmp_path / "config.yaml"
     _make_iteration_dir(tmp_path, "v1", "img0001.png", refinement=True)  # a discarded refinement -> warning.
     _make_iteration_dir(tmp_path, "v2", "img0002.png")
@@ -717,7 +714,7 @@ def test_clear_iteration_outliers_reset_scans_all_and_warns(tmp_path: Path, caps
 def test_clear_iteration_outliers_reset_without_labeled_data(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Reset on a project with no labeled-data tree clears nothing and reports a zero count."""
+    """Verifies that reset on a project with no labeled-data tree clears nothing and reports a zero count."""
     op._clear_iteration_outliers(
         config_path=tmp_path / "config.yaml",
         configuration={"iteration": 0, "scorer": "human"},
@@ -730,7 +727,9 @@ def test_clear_iteration_outliers_reset_without_labeled_data(
 def test_clear_iteration_outliers_overwrite_targets_selected_videos(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Overwrite clears only the selected videos' directories, skipping any that hold no iteration outliers."""
+    """Verifies that overwrite clears only the selected videos' directories, skipping any that hold no iteration
+    outliers.
+    """
     config_path = tmp_path / "config.yaml"
     _make_iteration_dir(tmp_path, "v1", "img0001.png")
 
@@ -747,9 +746,7 @@ def test_clear_iteration_outliers_overwrite_targets_selected_videos(
     assert "discarded manual outlier refinements" not in stderr
 
 
-# ---------------------------------------------------------------------------------------------------------------------
 # Orchestrator: the extract_outlier_frames_parallel entry point.
-# ---------------------------------------------------------------------------------------------------------------------
 def _patch_dlc_boundary(monkeypatch: pytest.MonkeyPatch, configuration: dict) -> None:
     """Stubs the DeepLabCut config/scorer boundary the orchestrator calls before any per-video work."""
     monkeypatch.setattr(op.auxiliaryfunctions, "read_config", lambda _p: configuration)
@@ -776,87 +773,87 @@ def _base_config(video: str) -> dict:
 
 
 def test_orchestrator_rejects_missing_config(tmp_path: Path) -> None:
-    """A config path that is not a file raises FileNotFoundError before any work begins."""
+    """Verifies that a config path that is not a file raises FileNotFoundError before any work begins."""
     with pytest.raises(FileNotFoundError, match="does not point to a file"):
-        op.extract_outlier_frames_parallel(tmp_path / "nope.yaml", [])
+        op.extract_outlier_frames_parallel(config_path=tmp_path / "nope.yaml", videos=[])
 
 
 def test_orchestrator_rejects_overwrite_and_reset(tmp_path: Path) -> None:
-    """The overwrite and reset options are mutually exclusive."""
+    """Verifies that the overwrite and reset options are mutually exclusive."""
     config_path = _write_config(tmp_path)
     with pytest.raises(ValueError, match="mutually exclusive"):
-        op.extract_outlier_frames_parallel(config_path, [], overwrite=True, reset=True)
+        op.extract_outlier_frames_parallel(config_path=config_path, videos=[], overwrite=True, reset=True)
 
 
 def test_orchestrator_rejects_unknown_outlier_algorithm(tmp_path: Path) -> None:
-    """An unknown outlier algorithm raises listing the valid choices."""
+    """Verifies that an unknown outlier algorithm raises listing the valid choices."""
     config_path = _write_config(tmp_path)
     with pytest.raises(ValueError, match="outlier algorithm must be one of"):
-        op.extract_outlier_frames_parallel(config_path, [], outlier_algorithm="bogus")  # type: ignore[arg-type]
+        op.extract_outlier_frames_parallel(config_path=config_path, videos=[], outlier_algorithm="bogus")  # type: ignore[arg-type]
 
 
 def test_orchestrator_rejects_unknown_extraction_algorithm(tmp_path: Path) -> None:
-    """An unknown extraction algorithm raises listing the valid choices."""
+    """Verifies that an unknown extraction algorithm raises listing the valid choices."""
     config_path = _write_config(tmp_path)
     with pytest.raises(ValueError, match="extraction algorithm must be one of"):
-        op.extract_outlier_frames_parallel(config_path, [], extraction_algorithm="bogus")  # type: ignore[arg-type]
+        op.extract_outlier_frames_parallel(config_path=config_path, videos=[], extraction_algorithm="bogus")  # type: ignore[arg-type]
 
 
 def test_orchestrator_list_requires_explicit_indices(tmp_path: Path) -> None:
-    """The list algorithm requires an explicit list of frame indices."""
+    """Verifies that the list algorithm requires an explicit list of frame indices."""
     config_path = _write_config(tmp_path)
     with pytest.raises(ValueError, match="requires an explicit list of frames"):
-        op.extract_outlier_frames_parallel(config_path, [], outlier_algorithm=OutlierAlgorithm.LIST)
+        op.extract_outlier_frames_parallel(config_path=config_path, videos=[], outlier_algorithm=OutlierAlgorithm.LIST)
 
 
 def test_orchestrator_rejects_non_positive_candidate_step(tmp_path: Path) -> None:
-    """A candidate step below one is rejected."""
+    """Verifies that a candidate step below one is rejected."""
     config_path = _write_config(tmp_path)
     with pytest.raises(ValueError, match="candidate step must be at least one"):
-        op.extract_outlier_frames_parallel(config_path, [], candidate_step=0)
+        op.extract_outlier_frames_parallel(config_path=config_path, videos=[], candidate_step=0)
 
 
 def test_orchestrator_rejects_empty_comparison_bodyparts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Comparison bodyparts that resolve to none are rejected."""
+    """Verifies that comparison bodyparts that resolve to none are rejected."""
     config_path = _write_config(tmp_path)
     monkeypatch.setattr(op.auxiliaryfunctions, "read_config", lambda _p: {"video_sets": {"/v/v1.mp4": {}}})
     monkeypatch.setattr(op.auxiliaryfunctions, "intersection_of_body_parts_and_ones_given_by_user", lambda **_k: [])
     with pytest.raises(ValueError, match="comparison bodyparts matched none"):
-        op.extract_outlier_frames_parallel(config_path, [])
+        op.extract_outlier_frames_parallel(config_path=config_path, videos=[])
 
 
 def test_orchestrator_rejects_project_without_registered_videos(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A project whose config lists no videos in video_sets is rejected."""
+    """Verifies that a project whose config lists no videos in video_sets is rejected."""
     config_path = _write_config(tmp_path)
     _patch_dlc_boundary(monkeypatch, {"video_sets": {}, "TrainingFraction": [0.95]})
     with pytest.raises(ValueError, match="does not list any videos in video_sets"):
-        op.extract_outlier_frames_parallel(config_path, [])
+        op.extract_outlier_frames_parallel(config_path=config_path, videos=[])
 
 
 def test_orchestrator_warns_and_raises_when_no_requested_video_matches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Requested videos that match no registered video are warned about, then the run raises."""
+    """Verifies that requested videos that match no registered video are warned about, then the run raises."""
     config_path = _write_config(tmp_path)
     _patch_dlc_boundary(monkeypatch, _base_config("/registered/v1.mp4"))
     with pytest.raises(ValueError, match="None of the requested videos matched"):
-        op.extract_outlier_frames_parallel(config_path, ["/other/nope.mp4"])
+        op.extract_outlier_frames_parallel(config_path=config_path, videos=["/other/nope.mp4"])
     assert "is not registered in the project's config.yaml and was skipped" in capsys.readouterr().err
 
 
 def test_orchestrator_no_videos_and_none_analyzed_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """With no named videos and no analyzed videos, the run raises pointing at the analyze step."""
+    """Verifies that with no named videos and no analyzed videos, the run raises pointing at the analyze step."""
     config_path = _write_config(tmp_path)
     _patch_dlc_boundary(monkeypatch, _base_config("/registered/v1.mp4"))
     monkeypatch.setattr(op, "_discover_analyzed_videos", lambda **_k: [])
     with pytest.raises(ValueError, match="No registered project video has predictions"):
-        op.extract_outlier_frames_parallel(config_path, [])
+        op.extract_outlier_frames_parallel(config_path=config_path, videos=[])
 
 
 def test_orchestrator_matched_videos_run_extraction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A requested, registered video flows through detection into the extraction phase."""
+    """Verifies that a requested, registered video flows through detection into the extraction phase."""
     video_path = tmp_path / "videos" / "v1.mp4"
     video_path.parent.mkdir(parents=True)
     video_path.write_bytes(b"")
@@ -872,7 +869,9 @@ def test_orchestrator_matched_videos_run_extraction(tmp_path: Path, monkeypatch:
 
     monkeypatch.setattr(op, "_extract_all_videos", fake_extract)
 
-    result = op.extract_outlier_frames_parallel(config_path, [str(video_path)], display_progress=False)
+    result = op.extract_outlier_frames_parallel(
+        config_path=config_path, videos=[str(video_path)], display_progress=False
+    )
 
     assert result is sentinel
     assert captured["videos"] == [str(video_path)]
@@ -880,7 +879,7 @@ def test_orchestrator_matched_videos_run_extraction(tmp_path: Path, monkeypatch:
 
 
 def test_orchestrator_discovers_videos_when_none_named(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """With no named videos the discovered analyzed set drives the default refinement pass."""
+    """Verifies that with no named videos the discovered analyzed set drives the default refinement pass."""
     video_path = "/registered/v1.mp4"
     config_path = _write_config(tmp_path)
     _patch_dlc_boundary(monkeypatch, _base_config(video_path))
@@ -889,11 +888,13 @@ def test_orchestrator_discovers_videos_when_none_named(tmp_path: Path, monkeypat
     sentinel = object()
     monkeypatch.setattr(op, "_extract_all_videos", lambda **_k: sentinel)
 
-    assert op.extract_outlier_frames_parallel(config_path, [], display_progress=False) is sentinel
+    assert op.extract_outlier_frames_parallel(config_path=config_path, videos=[], display_progress=False) is sentinel
 
 
 def test_orchestrator_empty_candidates_returns_early_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """When detection flags no candidates, an early zero-worker summary carries the unanalyzed and failed videos."""
+    """Verifies that when detection flags no candidates, an early zero-worker summary carries the unanalyzed and
+    failed videos.
+    """
     video_path = "/registered/v1.mp4"
     config_path = _write_config(tmp_path)
     _patch_dlc_boundary(monkeypatch, _base_config(video_path))
@@ -909,7 +910,7 @@ def test_orchestrator_empty_candidates_returns_early_summary(tmp_path: Path, mon
 
     monkeypatch.setattr(op, "_extract_all_videos", fail_if_called)
 
-    summary = op.extract_outlier_frames_parallel(config_path, [], display_progress=False)
+    summary = op.extract_outlier_frames_parallel(config_path=config_path, videos=[], display_progress=False)
 
     assert extract_called is False
     assert summary.worker_count == 0
@@ -921,7 +922,7 @@ def test_orchestrator_empty_candidates_returns_early_summary(tmp_path: Path, mon
 
 
 def test_orchestrator_candidate_step_subsamples(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A candidate step above one thins the flagged candidates before extraction."""
+    """Verifies that a candidate step above one thins the flagged candidates before extraction."""
     video_path = "/registered/v1.mp4"
     config_path = _write_config(tmp_path)
     _patch_dlc_boundary(monkeypatch, _base_config(video_path))
@@ -935,13 +936,13 @@ def test_orchestrator_candidate_step_subsamples(tmp_path: Path, monkeypatch: pyt
 
     monkeypatch.setattr(op, "_extract_all_videos", fake_extract)
 
-    op.extract_outlier_frames_parallel(config_path, [], candidate_step=2, display_progress=False)
+    op.extract_outlier_frames_parallel(config_path=config_path, videos=[], candidate_step=2, display_progress=False)
 
     assert captured["candidates"] == {video_path: [0, 2, 4]}
 
 
 def test_orchestrator_overwrite_clears_iteration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The overwrite option clears this iteration's outliers for the selected videos before detection."""
+    """Verifies that the overwrite option clears this iteration's outliers for the selected videos before detection."""
     video_path = tmp_path / "videos" / "v1.mp4"
     video_path.parent.mkdir(parents=True)
     video_path.write_bytes(b"")
@@ -952,7 +953,9 @@ def test_orchestrator_overwrite_clears_iteration(tmp_path: Path, monkeypatch: py
     # No candidates keeps the run in the early-summary path so no extraction pool is needed.
     monkeypatch.setattr(op, "_detect_all_videos", lambda **_k: ({str(video_path): []}, [], []))
 
-    op.extract_outlier_frames_parallel(config_path, [str(video_path)], overwrite=True, display_progress=False)
+    op.extract_outlier_frames_parallel(
+        config_path=config_path, videos=[str(video_path)], overwrite=True, display_progress=False
+    )
 
     assert len(clear_calls) == 1
     assert clear_calls[0]["reset"] is False
@@ -960,7 +963,7 @@ def test_orchestrator_overwrite_clears_iteration(tmp_path: Path, monkeypatch: py
 
 
 def test_orchestrator_reset_clears_iteration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The reset option clears the iteration across every project video before detection."""
+    """Verifies that the reset option clears the iteration across every project video before detection."""
     video_path = "/registered/v1.mp4"
     config_path = _write_config(tmp_path)
     _patch_dlc_boundary(monkeypatch, _base_config(video_path))
@@ -969,7 +972,7 @@ def test_orchestrator_reset_clears_iteration(tmp_path: Path, monkeypatch: pytest
     monkeypatch.setattr(op, "_clear_iteration_outliers", lambda **kwargs: clear_calls.append(kwargs))
     monkeypatch.setattr(op, "_detect_all_videos", lambda **_k: ({video_path: []}, [], []))
 
-    op.extract_outlier_frames_parallel(config_path, [], reset=True, display_progress=False)
+    op.extract_outlier_frames_parallel(config_path=config_path, videos=[], reset=True, display_progress=False)
 
     assert len(clear_calls) == 1
     assert clear_calls[0]["reset"] is True

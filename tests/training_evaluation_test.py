@@ -1,4 +1,4 @@
-"""Tests for the trained-shuffle evaluation feather writer.
+"""Contains tests for the trained-shuffle evaluation feather writer.
 
 The module hands off to DeepLabCut for loading, inference-runner construction, snapshot resolution, scoring, and
 prediction/ground-truth matching. Every such handoff is monkeypatched at the exact module binding
@@ -45,9 +45,7 @@ def _raising_stub(exception: Exception):
     return _stub
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _SplitMetrics and EvaluationSummary dataclasses
-# --------------------------------------------------------------------------------------------------------------------
 def _make_split_metrics(rmse_px: float) -> _SplitMetrics:
     return _SplitMetrics(
         images=3,
@@ -60,7 +58,7 @@ def _make_split_metrics(rmse_px: float) -> _SplitMetrics:
 
 
 def test_split_metrics_fields() -> None:
-    """The metrics dataclass stores each canonical value verbatim."""
+    """Verifies that the metrics dataclass stores each canonical value verbatim."""
     metrics = _SplitMetrics(images=5, rmse_px=2.0, rmse_pcutoff_px=1.5, map=90.0, mar=88.0, unmatched_images=1)
     assert metrics.images == 5
     assert metrics.rmse_px == 2.0
@@ -71,7 +69,7 @@ def test_split_metrics_fields() -> None:
 
 
 def test_evaluation_summary_gap_and_describe() -> None:
-    """The generalization gap is test-minus-train RMSE and the one-line description names both errors."""
+    """Verifies that the generalization gap is test-minus-train RMSE and the one-line description names both errors."""
     train = _make_split_metrics(2.0)
     test = _make_split_metrics(5.0)
     summary = EvaluationSummary(
@@ -93,35 +91,31 @@ def test_evaluation_summary_gap_and_describe() -> None:
     assert "snapshot-190_evaluation.feather" in text
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _derive_relative_image_path
-# --------------------------------------------------------------------------------------------------------------------
 def test_derive_relative_image_path_with_labeled_data() -> None:
-    """A path under ``labeled-data`` yields the video directory and the project-relative posix path."""
+    """Verifies that a path under ``labeled-data`` yields the video directory and the project-relative posix path."""
     video, relative = _derive_relative_image_path("/proj/labeled-data/vidX/img001.png")
     assert video == "vidX"
     assert relative == "labeled-data/vidX/img001.png"
 
 
 def test_derive_relative_image_path_labeled_data_is_leaf() -> None:
-    """When ``labeled-data`` is the last component there is no video tail, so the video name is empty."""
+    """Verifies that when ``labeled-data`` is the last component there is no video tail, so the video name is empty."""
     video, relative = _derive_relative_image_path("/a/labeled-data")
     assert video == ""
     assert relative == "labeled-data"
 
 
 def test_derive_relative_image_path_without_labeled_data() -> None:
-    """A path with no ``labeled-data`` component falls back to the parent directory and file name."""
+    """Verifies that a path with no ``labeled-data`` component falls back to the parent directory and file name."""
     video, relative = _derive_relative_image_path("/some/dir/frame.png")
     assert video == "dir"
     assert relative == "frame.png"
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _surviving_individual_indices
-# --------------------------------------------------------------------------------------------------------------------
 def test_surviving_individual_indices_drops_fully_occluded() -> None:
-    """Individuals with no visible keypoint are dropped; those with at least one visible keypoint survive in order."""
+    """Verifies that individuals with no visible keypoint are dropped and those with at least one survive in order."""
     ground_truth = np.array(
         [
             [[1.0, 1.0, 2.0], [2.0, 2.0, 2.0]],  # fully visible -> kept
@@ -134,9 +128,7 @@ def test_surviving_individual_indices_drops_fully_occluded() -> None:
     assert surviving.tolist() == [0, 2]
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _matched_individual
-# --------------------------------------------------------------------------------------------------------------------
 def _prepared_ground_truth() -> np.ndarray:
     return np.array(
         [[[10.0, 10.0, 2.0], [20.0, 20.0, 2.0]], [[30.0, 30.0, 2.0], [40.0, 40.0, 2.0]]],
@@ -145,7 +137,7 @@ def _prepared_ground_truth() -> np.ndarray:
 
 
 def test_matched_individual_names_the_matched_row() -> None:
-    """A matched prediction whose ground truth equals a prepared row is named by its original individual."""
+    """Verifies that a matched prediction whose ground truth equals a prepared row is named by its individual."""
     prepared = _prepared_ground_truth()
     name = _matched_individual(
         match=SimpleNamespace(gt=prepared[1]),
@@ -158,7 +150,7 @@ def test_matched_individual_names_the_matched_row() -> None:
 
 
 def test_matched_individual_unmatched_uses_order() -> None:
-    """A prediction with no ground truth is labeled by its per-image match order."""
+    """Verifies that a prediction with no ground truth is labeled by its per-image match order."""
     prepared = _prepared_ground_truth()
     name = _matched_individual(
         match=SimpleNamespace(gt=None),
@@ -171,7 +163,7 @@ def test_matched_individual_unmatched_uses_order() -> None:
 
 
 def test_matched_individual_no_surviving_uses_order() -> None:
-    """Without a surviving-index map the prediction cannot be named, so it falls back to match order."""
+    """Verifies that without a surviving-index map the prediction cannot be named, so it falls back to match order."""
     prepared = _prepared_ground_truth()
     name = _matched_individual(
         match=SimpleNamespace(gt=prepared[0]),
@@ -184,7 +176,7 @@ def test_matched_individual_no_surviving_uses_order() -> None:
 
 
 def test_matched_individual_out_of_range_index_uses_order() -> None:
-    """When the matched original index is out of the individuals range, the prediction falls back to match order."""
+    """Verifies that an out-of-range matched original index makes the prediction fall back to match order."""
     prepared = _prepared_ground_truth()
     name = _matched_individual(
         match=SimpleNamespace(gt=prepared[0]),
@@ -197,7 +189,7 @@ def test_matched_individual_out_of_range_index_uses_order() -> None:
 
 
 def test_matched_individual_no_matching_row_uses_order() -> None:
-    """When the matched ground truth equals no prepared row, the prediction falls back to match order."""
+    """Verifies that when the matched ground truth equals no prepared row, the prediction falls back to match order."""
     prepared = _prepared_ground_truth()
     name = _matched_individual(
         match=SimpleNamespace(gt=np.array([[99.0, 99.0, 2.0], [98.0, 98.0, 2.0]], dtype=np.float32)),
@@ -209,11 +201,9 @@ def test_matched_individual_no_matching_row_uses_order() -> None:
     assert name == "instance_7"
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _rank_worst_keypoints
-# --------------------------------------------------------------------------------------------------------------------
 def test_rank_worst_keypoints_sorts_and_truncates() -> None:
-    """Ranking skips missing and NaN entries, sorts worst-first, and truncates to the reported count of five."""
+    """Verifies that ranking skips missing and NaN entries, sorts worst-first, and truncates to the reported five."""
     metrics = {
         "rmse_keypoint_0": 1.0,
         "rmse_keypoint_1": 9.0,
@@ -232,31 +222,29 @@ def test_rank_worst_keypoints_sorts_and_truncates() -> None:
 
 
 def test_rank_worst_keypoints_empty_when_no_metrics() -> None:
-    """With no per-keypoint metrics the ranking is empty."""
+    """Verifies that with no per-keypoint metrics the ranking is empty."""
     assert _rank_worst_keypoints({}, ["only"]) == []
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _resolve_evaluation_batch_size
-# --------------------------------------------------------------------------------------------------------------------
 def _loader_with_images(images_by_split: dict[str, list[dict[str, int | None]]]) -> SimpleNamespace:
     return SimpleNamespace(load_data=lambda split: {"images": images_by_split[split]})
 
 
 def test_resolve_batch_size_one_is_kept() -> None:
-    """A requested size of one short-circuits without inspecting any frame."""
+    """Verifies that a requested size of one short-circuits without inspecting any frame."""
     loader = _loader_with_images({"train": [], "test": []})
     assert _resolve_evaluation_batch_size(loader, 1) == 1
 
 
 def test_resolve_batch_size_uniform_resolution_keeps_request() -> None:
-    """When every frame shares one native resolution the requested batch size is kept."""
+    """Verifies that when every frame shares one native resolution the requested batch size is kept."""
     uniform = {"train": [{"height": 100, "width": 200}], "test": [{"height": 100, "width": 200}]}
     assert _resolve_evaluation_batch_size(_loader_with_images(uniform), 8) == 8
 
 
 def test_resolve_batch_size_multiple_resolutions_falls_to_one(caplog: pytest.LogCaptureFixture) -> None:
-    """Frames spanning more than one resolution cannot be stacked, so the batch size drops to one with a log."""
+    """Verifies that frames spanning more than one resolution cannot be stacked, so the batch size drops to one."""
     multi = {"train": [{"height": 100, "width": 200}], "test": [{"height": 50, "width": 60}]}
     with caplog.at_level("INFO"):
         assert _resolve_evaluation_batch_size(_loader_with_images(multi), 8) == 1
@@ -264,16 +252,14 @@ def test_resolve_batch_size_multiple_resolutions_falls_to_one(caplog: pytest.Log
 
 
 def test_resolve_batch_size_missing_dimension_falls_to_one() -> None:
-    """A frame whose header lacks a dimension is treated as unbatchable, so the batch size drops to one."""
+    """Verifies that a frame whose header lacks a dimension is treated as unbatchable, so batch size drops to one."""
     missing = {"train": [{"height": None, "width": 200}], "test": []}
     assert _resolve_evaluation_batch_size(_loader_with_images(missing), 8) == 1
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _resolve_snapshot
-# --------------------------------------------------------------------------------------------------------------------
 def test_resolve_snapshot_returns_first(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The first snapshot returned by DeepLabCut is the resolved one."""
+    """Verifies that the first snapshot returned by DeepLabCut is the resolved one."""
     loader = SimpleNamespace(model_folder="/m")
     monkeypatch.setattr(
         ev,
@@ -285,7 +271,7 @@ def test_resolve_snapshot_returns_first(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_resolve_snapshot_best_falls_back_to_last(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A missing best snapshot falls back to the last snapshot."""
+    """Verifies that a missing best snapshot falls back to the last snapshot."""
     loader = SimpleNamespace(model_folder="/m")
 
     def fake(**kwargs):
@@ -299,7 +285,7 @@ def test_resolve_snapshot_best_falls_back_to_last(monkeypatch: pytest.MonkeyPatc
 
 
 def test_resolve_snapshot_best_all_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When both the best and the last lookups fail and a snapshot is required, a ValueError is raised."""
+    """Verifies that when both the best and last lookups fail and a snapshot is required, a ValueError is raised."""
     loader = SimpleNamespace(model_folder="/m")
     monkeypatch.setattr(ev, "get_model_snapshots", _raising_stub(IndexError("no snapshots")))
     with pytest.raises(ValueError, match="Unable to resolve"):
@@ -307,14 +293,14 @@ def test_resolve_snapshot_best_all_missing_raises(monkeypatch: pytest.MonkeyPatc
 
 
 def test_resolve_snapshot_best_all_missing_optional_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An absent optional best snapshot resolves to None rather than raising."""
+    """Verifies that an absent optional best snapshot resolves to None rather than raising."""
     loader = SimpleNamespace(model_folder="/m")
     monkeypatch.setattr(ev, "get_model_snapshots", _raising_stub(ValueError("none")))
     assert _resolve_snapshot(loader, index="best", task=Task.DETECT, required=False) is None
 
 
 def test_resolve_snapshot_int_index_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A missing integer-indexed snapshot raises without attempting the best-snapshot fallback."""
+    """Verifies that a missing integer-indexed snapshot raises without attempting the best-snapshot fallback."""
     loader = SimpleNamespace(model_folder="/m")
     monkeypatch.setattr(ev, "get_model_snapshots", _raising_stub(ValueError("bad index")))
     with pytest.raises(ValueError, match="Unable to resolve"):
@@ -322,15 +308,13 @@ def test_resolve_snapshot_int_index_missing_raises(monkeypatch: pytest.MonkeyPat
 
 
 def test_resolve_snapshot_int_index_missing_optional_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A missing optional integer-indexed snapshot resolves to None."""
+    """Verifies that a missing optional integer-indexed snapshot resolves to None."""
     loader = SimpleNamespace(model_folder="/m")
     monkeypatch.setattr(ev, "get_model_snapshots", _raising_stub(IndexError("none")))
     assert _resolve_snapshot(loader, index=3, task=Task.BOTTOM_UP, required=False) is None
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _realign_memory_replay_parameters
-# --------------------------------------------------------------------------------------------------------------------
 def _params(bodyparts: list[str], unique: list[str], individuals: list[str]) -> PoseDatasetParameters:
     return PoseDatasetParameters(bodyparts=bodyparts, unique_bpts=unique, individuals=individuals)
 
@@ -340,20 +324,20 @@ def _loader_with_weight_init(weight_init: dict | None, project_cfg: dict | None 
 
 
 def test_realign_no_weight_init_returns_unchanged() -> None:
-    """Without a weight-initialization config the parameters are returned unchanged."""
+    """Verifies that without a weight-initialization config the parameters are returned unchanged."""
     params = _params(["a", "b", "c"], ["u"], ["single"])
     assert _realign_memory_replay_parameters(_loader_with_weight_init(None), params) is params
 
 
 def test_realign_non_memory_replay_returns_unchanged() -> None:
-    """A weight-init config that is not memory replay leaves the parameters unchanged."""
+    """Verifies that a weight-init config that is not memory replay leaves the parameters unchanged."""
     params = _params(["a", "b", "c"], ["u"], ["single"])
     weight_init = {"snapshot_path": "x", "with_decoder": False, "memory_replay": False}
     assert _realign_memory_replay_parameters(_loader_with_weight_init(weight_init), params) is params
 
 
 def test_realign_memory_replay_uses_weight_init_bodyparts() -> None:
-    """A memory-replay config with explicit bodyparts rebuilds the parameters in that project bodypart space."""
+    """Verifies that a memory-replay config with explicit bodyparts rebuilds the parameters in that bodypart space."""
     params = _params(["full0", "full1", "full2"], ["u"], ["single"])
     weight_init = {
         "snapshot_path": "x",
@@ -369,7 +353,7 @@ def test_realign_memory_replay_uses_weight_init_bodyparts() -> None:
 
 
 def test_realign_memory_replay_without_bodyparts_reads_project(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A memory-replay config with no bodyparts falls back to the project configuration's bodyparts."""
+    """Verifies that a memory-replay config with no bodyparts falls back to the project configuration's bodyparts."""
     params = _params(["full0", "full1", "full2"], ["u"], ["single"])
     weight_init = {"snapshot_path": "x", "with_decoder": True, "memory_replay": True, "conversion_array": [0, 1, 2]}
     monkeypatch.setattr(ev.auxiliaryfunctions, "get_bodyparts", lambda _cfg: ["proj0", "proj1"])
@@ -377,15 +361,13 @@ def test_realign_memory_replay_without_bodyparts_reads_project(monkeypatch: pyte
     assert realigned.bodyparts == ["proj0", "proj1"]
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # _accumulate_split_rows
-# --------------------------------------------------------------------------------------------------------------------
 def _empty_columns() -> dict[str, list]:
     return {name: [] for name in ev._FEATHER_SCHEMA}
 
 
 def test_accumulate_single_animal_matched_and_skips_missing() -> None:
-    """Single-animal rows are matched with real DeepLabCut routines; images absent from the data are skipped."""
+    """Verifies that single-animal rows are matched with real DeepLabCut routines and absent images are skipped."""
     image = "/proj/labeled-data/vid/img0.png"
     ground_truth = {image: np.array([[[10.0, 10.0, 2.0], [20.0, 20.0, 2.0]]], dtype=np.float32)}
     predictions = {image: {"bodyparts": np.array([[[11.0, 10.0, 0.9], [19.0, 21.0, 0.8]]], dtype=np.float32)}}
@@ -414,7 +396,7 @@ def test_accumulate_single_animal_matched_and_skips_missing() -> None:
 
 
 def test_accumulate_single_animal_occluded_is_unmatched() -> None:
-    """A frame whose only individual is fully occluded yields no match and is counted as unmatched."""
+    """Verifies that a frame whose only individual is fully occluded yields no match and is counted as unmatched."""
     image = "/some/dir/frame.png"
     ground_truth = {image: np.array([[[10.0, 10.0, 0.0], [20.0, 20.0, 0.0]]], dtype=np.float32)}
     predictions = {image: {"bodyparts": np.array([[[11.0, 10.0, 0.9], [19.0, 21.0, 0.8]]], dtype=np.float32)}}
@@ -436,7 +418,7 @@ def test_accumulate_single_animal_occluded_is_unmatched() -> None:
 
 
 def test_accumulate_multi_animal_matched_and_unmatched(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Multi-animal rows name a matched individual and label an unmatched prediction by its match order."""
+    """Verifies that multi-animal rows name a matched individual and label an unmatched prediction by match order."""
     image = "/proj/labeled-data/vid/img0.png"
     ground_truth = np.array(
         [[[10.0, 10.0, 2.0], [20.0, 20.0, 2.0]], [[30.0, 30.0, 2.0], [40.0, 40.0, 2.0]]], dtype=np.float32
@@ -478,7 +460,7 @@ def test_accumulate_multi_animal_matched_and_unmatched(monkeypatch: pytest.Monke
 
 
 def test_accumulate_skips_image_missing_prediction_key() -> None:
-    """An image lacking the requested prediction head is skipped."""
+    """Verifies that an image lacking the requested prediction head is skipped."""
     image = "/proj/labeled-data/vid/img0.png"
     columns = _empty_columns()
     unmatched = _accumulate_split_rows(
@@ -498,9 +480,7 @@ def test_accumulate_skips_image_missing_prediction_key() -> None:
     assert columns["snapshot"] == []
 
 
-# --------------------------------------------------------------------------------------------------------------------
 # evaluate_trained_model orchestration
-# --------------------------------------------------------------------------------------------------------------------
 class _FakeLoader:
     """A minimal stand-in for DeepLabCut's DLCLoader exposing only the attributes the evaluator reads."""
 
@@ -546,11 +526,11 @@ class _FakeLoader:
         return self._data[split]
 
 
-def _install_common_stubs(monkeypatch: pytest.MonkeyPatch, loader: _FakeLoader, evaluate_fn) -> None:
+def _install_common_stubs(monkeypatch: pytest.MonkeyPatch, loader: _FakeLoader, evaluate_function) -> None:
     """Redirects every DeepLabCut handoff the evaluator makes to in-process fakes."""
     monkeypatch.setattr(ev, "DLCLoader", lambda **kwargs: loader)
     monkeypatch.setattr(ev, "get_inference_runners", lambda **kwargs: ("pose_runner", "detector_runner"))
-    monkeypatch.setattr(ev, "evaluate", evaluate_fn)
+    monkeypatch.setattr(ev, "evaluate", evaluate_function)
 
     def fake_snapshots(**kwargs):
         folder = Path(kwargs["model_folder"])
@@ -562,11 +542,11 @@ def _install_common_stubs(monkeypatch: pytest.MonkeyPatch, loader: _FakeLoader, 
 
 
 def test_evaluate_trained_model_bottom_up_single_animal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A bottom-up single-animal run writes the feather and the provenance sidecar and reports both split errors."""
+    """Verifies that a bottom-up single-animal run writes the feather and provenance sidecar and reports both errors."""
     image_train = "/proj/labeled-data/vid/train0.png"
     image_test = "/proj/labeled-data/vid/test0.png"
     gt = np.array([[[10.0, 10.0, 2.0], [20.0, 20.0, 2.0]]], dtype=np.float32)
-    pred = np.array([[[11.0, 10.0, 0.9], [19.0, 21.0, 0.8]]], dtype=np.float32)
+    prediction = np.array([[[11.0, 10.0, 0.9], [19.0, 21.0, 0.8]]], dtype=np.float32)
     params = _params(["nose", "tail"], [], ["single"])
     loader = _FakeLoader(
         project_cfg={"pcutoff": 0.55},
@@ -579,7 +559,7 @@ def test_evaluate_trained_model_bottom_up_single_animal(monkeypatch: pytest.Monk
         ground_truth={"train": {image_train: gt}, "test": {image_test: gt}},
     )
 
-    def evaluate_fn(**kwargs):
+    def evaluate_function(**kwargs):
         image = image_train if kwargs["mode"] == "train" else image_test
         rmse = 3.0 if kwargs["mode"] == "train" else 5.0
         metrics = {
@@ -590,9 +570,9 @@ def test_evaluate_trained_model_bottom_up_single_animal(monkeypatch: pytest.Monk
             "rmse_keypoint_0": 4.0,
             "rmse_keypoint_1": 6.0,
         }
-        return metrics, {image: {"bodyparts": pred}}
+        return metrics, {image: {"bodyparts": prediction}}
 
-    _install_common_stubs(monkeypatch, loader, evaluate_fn)
+    _install_common_stubs(monkeypatch, loader, evaluate_function)
 
     summary = evaluate_trained_model(tmp_path / "config.yaml")
 
@@ -643,13 +623,13 @@ def test_evaluate_trained_model_bottom_up_single_animal(monkeypatch: pytest.Monk
 
 
 def test_evaluate_trained_model_top_down_detector_and_unique(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A top-down run with a detector, unique bodyparts, and an explicit cutoff scores every head and names both."""
+    """Verifies that a top-down run with a detector, unique bodyparts, and an explicit cutoff scores every head."""
     image_train = "/proj/labeled-data/vid/train0.png"
     image_test = "/proj/labeled-data/vid/test0.png"
     gt = np.array([[[10.0, 10.0, 2.0], [20.0, 20.0, 2.0]]], dtype=np.float32)
-    pred = np.array([[[11.0, 10.0, 0.9], [19.0, 21.0, 0.8]]], dtype=np.float32)
+    prediction = np.array([[[11.0, 10.0, 0.9], [19.0, 21.0, 0.8]]], dtype=np.float32)
     unique_gt = np.array([[[5.0, 5.0, 2.0]]], dtype=np.float32)
-    unique_pred = np.array([[[6.0, 5.0, 0.7]]], dtype=np.float32)
+    unique_prediction = np.array([[[6.0, 5.0, 0.7]]], dtype=np.float32)
     params = _params(["nose", "tail"], ["led"], ["single"])
     loader = _FakeLoader(
         project_cfg={"pcutoff": 0.6},
@@ -663,13 +643,13 @@ def test_evaluate_trained_model_top_down_detector_and_unique(monkeypatch: pytest
         unique_ground_truth={"train": {image_train: unique_gt}, "test": {image_test: unique_gt}},
     )
 
-    def evaluate_fn(**kwargs):
+    def evaluate_function(**kwargs):
         image = image_train if kwargs["mode"] == "train" else image_test
         metrics = {"rmse": 3.0, "rmse_pcutoff": 2.5, "mAP": 80.0, "mAR": 70.0, "rmse_keypoint_0": 4.0}
-        predictions = {image: {"bodyparts": pred, "unique_bodyparts": unique_pred}}
+        predictions = {image: {"bodyparts": prediction, "unique_bodyparts": unique_prediction}}
         return metrics, predictions
 
-    _install_common_stubs(monkeypatch, loader, evaluate_fn)
+    _install_common_stubs(monkeypatch, loader, evaluate_function)
 
     summary = evaluate_trained_model(
         str(tmp_path / "config.yaml"),
@@ -700,11 +680,11 @@ def test_evaluate_trained_model_top_down_detector_and_unique(monkeypatch: pytest
 def test_evaluate_trained_model_provenance_failure_removes_feather(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """When the provenance sidecar cannot be written, the feather is removed and the OSError propagates."""
+    """Verifies that when the provenance sidecar cannot be written, the feather is removed and OSError propagates."""
     image_train = "/proj/labeled-data/vid/train0.png"
     image_test = "/proj/labeled-data/vid/test0.png"
     gt = np.array([[[10.0, 10.0, 2.0], [20.0, 20.0, 2.0]]], dtype=np.float32)
-    pred = np.array([[[11.0, 10.0, 0.9], [19.0, 21.0, 0.8]]], dtype=np.float32)
+    prediction = np.array([[[11.0, 10.0, 0.9], [19.0, 21.0, 0.8]]], dtype=np.float32)
     params = _params(["nose", "tail"], [], ["single"])
     loader = _FakeLoader(
         project_cfg={"pcutoff": 0.6},
@@ -717,12 +697,12 @@ def test_evaluate_trained_model_provenance_failure_removes_feather(
         ground_truth={"train": {image_train: gt}, "test": {image_test: gt}},
     )
 
-    def evaluate_fn(**kwargs):
+    def evaluate_function(**kwargs):
         image = image_train if kwargs["mode"] == "train" else image_test
         metrics = {"rmse": 3.0, "rmse_pcutoff": 2.5, "mAP": 80.0, "mAR": 70.0, "rmse_keypoint_0": 4.0}
-        return metrics, {image: {"bodyparts": pred}}
+        return metrics, {image: {"bodyparts": prediction}}
 
-    _install_common_stubs(monkeypatch, loader, evaluate_fn)
+    _install_common_stubs(monkeypatch, loader, evaluate_function)
 
     monkeypatch.setattr(ev, "_write_provenance", _raising_stub(OSError("disk full")))
 
@@ -735,11 +715,11 @@ def test_evaluate_trained_model_provenance_failure_removes_feather(
 def test_evaluate_trained_model_reduces_batch_for_multi_resolution(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A requested batch larger than one is reduced when the labeled frames span multiple native resolutions."""
+    """Verifies that a requested batch larger than one is reduced when labeled frames span multiple resolutions."""
     image_train = "/proj/labeled-data/vid/train0.png"
     image_test = "/proj/labeled-data/vid/test0.png"
     gt = np.array([[[10.0, 10.0, 2.0], [20.0, 20.0, 2.0]]], dtype=np.float32)
-    pred = np.array([[[11.0, 10.0, 0.9], [19.0, 21.0, 0.8]]], dtype=np.float32)
+    prediction = np.array([[[11.0, 10.0, 0.9], [19.0, 21.0, 0.8]]], dtype=np.float32)
     params = _params(["nose", "tail"], [], ["single"])
     loader = _FakeLoader(
         project_cfg={"pcutoff": 0.6},
@@ -758,16 +738,16 @@ def test_evaluate_trained_model_reduces_batch_for_multi_resolution(
 
     recorded_batch = {}
 
-    def evaluate_fn(**kwargs):
+    def evaluate_function(**kwargs):
         image = image_train if kwargs["mode"] == "train" else image_test
         metrics = {"rmse": 3.0, "rmse_pcutoff": 2.5, "mAP": 80.0, "mAR": 70.0, "rmse_keypoint_0": 4.0}
-        return metrics, {image: {"bodyparts": pred}}
+        return metrics, {image: {"bodyparts": prediction}}
 
     def capture_runners(**kwargs):
         recorded_batch["batch_size"] = kwargs["batch_size"]
         return ("pose_runner", "detector_runner")
 
-    _install_common_stubs(monkeypatch, loader, evaluate_fn)
+    _install_common_stubs(monkeypatch, loader, evaluate_function)
     monkeypatch.setattr(ev, "get_inference_runners", capture_runners)
 
     summary = evaluate_trained_model(tmp_path / "config.yaml", batch_size=8, write_provenance=False)
