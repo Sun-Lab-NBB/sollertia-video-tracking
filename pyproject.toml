@@ -67,7 +67,8 @@ dependencies = [
     # opencv-python alongside the headless build that transitive dependencies pull in would create a duplicate cv2)
     "opencv-python-headless>=4,<5",
 
-    # Cross-Platform CPU Affinity (pins each extraction worker to a disjoint core block on Linux and Windows)
+    # Cross-Platform CPU Affinity (pins each extraction and inference worker to a disjoint core block on Linux and
+    # Windows)
     "psutil>=7,<8",
 
     # Project Configuration Files
@@ -171,7 +172,7 @@ ignore-variadic-names = true
     "F401", # Imported but unused
     "F403", # Wildcard imports
 ]
-"tests/**" = [
+"tests/**/*.py" = [
     "S101",    # Allows the `assert` statements pytest is built around.
     "SLF001",  # Allows tests to reach into private members of the code under test.
     "PLR2004", # Allows literal expected values in assertions without extracting named constants.
@@ -206,10 +207,11 @@ exclude = [
     "tests/",                         # Ignores the test directory.
 ]
 
-# DeepLabCut does not ship type information and has no stub package on PyPI, so its imports remain exempt from the
-# missing-stub error. Types for pandas (pulled in transitively by DeepLabCut) and psutil are supplied by the
-# pandas-stubs and types-psutil dev dependencies, while OpenCV and ruamel.yaml now ship inline type information; all
-# four are therefore type-checked rather than ignored. The project's own code remains fully type-checked.
+# DeepLabCut, and the sklearn, skimage, and tqdm packages it pulls in, ship no type information and have no stub
+# packages on PyPI, so their imports remain exempt from the missing-stub error. Types for pandas (also pulled in
+# transitively by DeepLabCut) and psutil are supplied by the pandas-stubs and types-psutil dev dependencies, while
+# OpenCV and ruamel.yaml now ship inline type information; all four are therefore type-checked rather than ignored.
+# The project's own code remains fully type-checked.
 [[tool.mypy.overrides]]
 module = [
     "deeplabcut.*",

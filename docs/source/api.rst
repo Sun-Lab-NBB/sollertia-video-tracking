@@ -27,6 +27,13 @@ Video Inference
    :show-inheritance:
    :exclude-members: Toggle, AmpMode, DeviceType
 
+Command-Line Interface
+======================
+
+.. click:: sollertia_video_tracking.interfaces.entry_points:slvt_cli
+   :prog: slvt
+   :nested: full
+
 Hardware Detection
 ==================
 
@@ -42,10 +49,3 @@ Progress Reporting
    :members:
    :undoc-members:
    :show-inheritance:
-
-Command-Line Interface
-======================
-
-.. click:: sollertia_video_tracking.interfaces.entry_points:slvt_cli
-   :prog: slvt
-   :nested: full
