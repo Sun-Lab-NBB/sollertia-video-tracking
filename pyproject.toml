@@ -176,6 +176,11 @@ ignore-variadic-names = true
     "SLF001",  # Allows tests to reach into private members of the code under test.
     "PLR2004", # Allows literal expected values in assertions without extracting named constants.
     "INP001",  # Tests are collected by pytest, not imported as a package, so no __init__.py is required.
+    "ANN",     # Type annotations are not required on test functions and fixtures.
+    "D",       # Full docstring enforcement is relaxed for test helpers.
+    "PT006",   # The parametrize argument-name style is a per-test choice.
+    "T201",    # Diagnostic prints are permitted inside tests.
+    "SLF",     # Any private-member access rule applies to production code, not the tests exercising it.
 ]
 
 [tool.ruff.lint.isort]
@@ -240,3 +245,8 @@ exclude_lines = [
 [tool.coverage.run]
 parallel = true
 concurrency = ["multiprocessing", "thread"]
+
+# Excludes the user-facing command-line and GUI entry points from coverage measurement. Per the project's testing
+# policy, the interface layer (Click commands, the napari GUI launcher, and their argument wiring) is verified manually
+# rather than by the automated suite, so its modules are not held to the coverage target.
+omit = ["*/interfaces/*"]
