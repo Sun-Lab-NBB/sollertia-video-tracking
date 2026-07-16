@@ -13,13 +13,16 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 
 @click.command("gui", context_settings=_CONTEXT_SETTINGS)
 def gui_command() -> None:
-    """Launches the napari-based DeepLabCut GUI for labeling extracted frames and refining a project's data.
+    """Launches the standard DeepLabCut GUI, used to create a project and manually label its frames.
 
-    This opens the same DeepLabCut application reached elsewhere by running ``python -m deeplabcut``. From its
-    project-management window, a project's config.yaml is loaded to label the frames that ``slvt extract`` selects,
-    correct the outlier frames it flags, and inspect the labeled data the rest of the refinement loop is built around.
-    The GUI needs a graphical session, so it is run on a workstation rather than a headless training or inference
-    server, and the command blocks until the window is closed.
+    This opens the same fully functional DeepLabCut application reached elsewhere by running ``python -m deeplabcut``.
+    From its project-management window, a project's config.yaml is created or opened to label the frames that
+    ``slvt extract`` selects, correct the outlier frames it flags, and merge the refined data into the next iteration.
+    The frame labeler itself opens in napari, reached from that window. Manual labeling is the only part of the
+    refinement loop this library does not implement, so it is the reason to open the GUI: the extraction, training,
+    evaluation, and analysis tabs it also offers run stock DeepLabCut and are slower than the equivalent ``slvt``
+    commands. The GUI needs a graphical session, so it is run on a workstation rather than a headless training or
+    inference server, and the command blocks until the window is closed.
     """
     if sys.platform == "linux" and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         message = (
