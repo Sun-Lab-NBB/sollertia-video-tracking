@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 # Project metadata section. Provides the general ID information about the project.
 [project]
 name = "sollertia-video-tracking"
-version = "0.1.0"
+version = "1.0.0"
 description = "Provides assets for designing and deploying DeepLabCut video tracking pipelines within the Sollertia platform."
 readme = "README.md"
 license = "Apache-2.0"
@@ -28,7 +28,7 @@ keywords = ["sollertia", "deeplabcut", "pose-estimation", "video-tracking"]
 # Additional classifiers used by PIP to group repositories.
 classifiers = [
     # Development status
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     # Intended audience and project topic
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",

@@ -1,0 +1,41 @@
+from typing import Any, TextIO
+from threading import Thread
+
+from _typeshed import Incomplete
+
+_PROGRESS_BAR_WIDTH: int
+_SPINNER_FRAMES: str
+_STOP_SENTINEL: tuple[str]
+_TTY_RENDER_INTERVAL: float
+_NON_TTY_RENDER_INTERVAL: float
+_NON_TTY_POLL_INTERVAL: float
+
+def format_duration(seconds: float) -> str: ...
+
+class LiveBar(Thread):
+    _progress_queue: Incomplete
+    _preparing_label: Incomplete
+    _width: Incomplete
+    _stream: Incomplete
+    _is_tty: Incomplete
+    _start_time: Incomplete
+    _last_render_time: float
+    _spinner_index: int
+    def __init__(
+        self,
+        progress_queue: Any,
+        *,
+        preparing_label: str = "preparing...",
+        stream: TextIO | None = None,
+        width: int = ...,
+    ) -> None: ...
+    def __repr__(self) -> str: ...
+    def run(self) -> None: ...
+    def stop(self) -> None: ...
+    def _ingest(self, message: Any) -> bool: ...
+    def _is_preparing(self) -> bool: ...
+    def _compose_active(self, elapsed: float) -> str: ...
+    def _compose_preparing(self, elapsed: float) -> str: ...
+    def _bar(self, fraction: float) -> tuple[str, float]: ...
+    def _eta(self, done: float, total: float, elapsed: float) -> str: ...
+    def _render(self, *, force: bool = False) -> None: ...
