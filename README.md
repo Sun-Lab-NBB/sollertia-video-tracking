@@ -26,7 +26,7 @@ ___
 
 ## Features
 
-- Supports Linux.
+- Supports Windows, Linux, and macOS.
 - Provides a unified `slvt` command-line interface backed by a reusable, import-friendly logic core.
 - Extracts DeepLabCut training frames in parallel, decoding one video per worker process pinned to a disjoint block of
   CPU cores.

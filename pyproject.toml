@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 # Project metadata section. Provides the general ID information about the project.
 [project]
 name = "sollertia-video-tracking"
-version = "0.1.0"
+version = "1.0.0"
 description = "Provides assets for designing and deploying DeepLabCut video tracking pipelines within the Sollertia platform."
 readme = "README.md"
 license = "Apache-2.0"
@@ -28,7 +28,7 @@ keywords = ["sollertia", "deeplabcut", "pose-estimation", "video-tracking"]
 # Additional classifiers used by PIP to group repositories.
 classifiers = [
     # Development status
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     # Intended audience and project topic
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
@@ -67,7 +67,8 @@ dependencies = [
     # opencv-python alongside the headless build that transitive dependencies pull in would create a duplicate cv2)
     "opencv-python-headless>=4,<5",
 
-    # Cross-Platform CPU Affinity (pins each extraction worker to a disjoint core block on Linux and Windows)
+    # Cross-Platform CPU Affinity (pins each extraction and inference worker to a disjoint core block on Linux and
+    # Windows)
     "psutil>=7,<8",
 
     # Project Configuration Files
@@ -171,11 +172,16 @@ ignore-variadic-names = true
     "F401", # Imported but unused
     "F403", # Wildcard imports
 ]
-"tests/**" = [
+"tests/**/*.py" = [
     "S101",    # Allows the `assert` statements pytest is built around.
     "SLF001",  # Allows tests to reach into private members of the code under test.
     "PLR2004", # Allows literal expected values in assertions without extracting named constants.
     "INP001",  # Tests are collected by pytest, not imported as a package, so no __init__.py is required.
+    "ANN",     # Type annotations are not required on test functions and fixtures.
+    "D",       # Full docstring enforcement is relaxed for test helpers.
+    "PT006",   # The parametrize argument-name style is a per-test choice.
+    "T201",    # Diagnostic prints are permitted inside tests.
+    "SLF",     # Any private-member access rule applies to production code, not the tests exercising it.
 ]
 
 [tool.ruff.lint.isort]
@@ -201,10 +207,11 @@ exclude = [
     "tests/",                         # Ignores the test directory.
 ]
 
-# DeepLabCut does not ship type information and has no stub package on PyPI, so its imports remain exempt from the
-# missing-stub error. Types for pandas (pulled in transitively by DeepLabCut) and psutil are supplied by the
-# pandas-stubs and types-psutil dev dependencies, while OpenCV and ruamel.yaml now ship inline type information; all
-# four are therefore type-checked rather than ignored. The project's own code remains fully type-checked.
+# DeepLabCut, and the sklearn, skimage, and tqdm packages it pulls in, ship no type information and have no stub
+# packages on PyPI, so their imports remain exempt from the missing-stub error. Types for pandas (also pulled in
+# transitively by DeepLabCut) and psutil are supplied by the pandas-stubs and types-psutil dev dependencies, while
+# OpenCV and ruamel.yaml now ship inline type information; all four are therefore type-checked rather than ignored.
+# The project's own code remains fully type-checked.
 [[tool.mypy.overrides]]
 module = [
     "deeplabcut.*",
@@ -240,3 +247,8 @@ exclude_lines = [
 [tool.coverage.run]
 parallel = true
 concurrency = ["multiprocessing", "thread"]
+
+# Excludes the user-facing command-line and GUI entry points from coverage measurement. Per the project's testing
+# policy, the interface layer (Click commands, the napari GUI launcher, and their argument wiring) is verified manually
+# rather than by the automated suite, so its modules are not held to the coverage target.
+omit = ["*/interfaces/*"]

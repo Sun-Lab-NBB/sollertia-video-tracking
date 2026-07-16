@@ -1,0 +1,3 @@
+_CONTEXT_SETTINGS: dict[str, int]
+
+def gui_command() -> None: ...

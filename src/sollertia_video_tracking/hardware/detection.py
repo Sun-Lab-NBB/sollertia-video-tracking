@@ -11,6 +11,7 @@ DEFAULT_RESERVED_CPU_THREADS: int = 2
 _AMPERE_CAPABILITY: tuple[int, int] = (8, 0)
 """The minimum CUDA compute capability (Ampere) that provides TF32 and native bfloat16 tensor-core acceleration."""
 
+
 class Toggle(StrEnum):
     """The tri-state control for one optimization: the capability-detected default, forced on, or forced off."""
 
