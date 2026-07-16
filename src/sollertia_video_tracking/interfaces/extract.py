@@ -422,7 +422,7 @@ def frames_command(
     default=-1,
     show_default=True,
     help="How many SARIMAX keypoint-trajectory fits to run in parallel during 'fitting' detection, the most expensive "
-    "step. Set to -1 to use every available core.",
+    "step. Set to -1 to use every usable core, which leaves a small reserve free.",
 )
 @_pass_shared_parameters
 def outliers_command(

@@ -9,9 +9,7 @@ import contextlib
 from dataclasses import dataclass
 from collections.abc import Iterator
 
-import deeplabcut.compat as dlc_compat
 from deeplabcut.modelzoo import build_weight_init
-from deeplabcut.core.engine import Engine
 from deeplabcut.core.weight_init import WeightInitialization
 from deeplabcut.generate_training_dataset import (
     create_training_dataset as dlc_create_training_dataset,
@@ -70,8 +68,6 @@ class TrainingDatasetSummary:
     """The pose-model architecture the shuffle was created for, or None when the project default was used."""
     detector_type: str | None
     """The object detector the shuffle was created for, or None for bottom-up and conditional top-down models."""
-    augmenter_type: str | None
-    """The data-augmentation pipeline the shuffle was created with, or None when the engine default was used."""
     weight_init: str
     """A description of the weight initialization used (``imagenet`` or ``<super_animal> (transfer|fine-tune)``)."""
     from_shuffle: int | None
@@ -105,15 +101,6 @@ def get_available_object_detectors() -> tuple[str, ...]:
         Every ``detector_type`` value the installed DeepLabCut PyTorch engine can train, sorted alphabetically.
     """
     return tuple(sorted(available_detectors()))
-
-
-def get_available_augmenters() -> tuple[str, ...]:
-    """Returns the data-augmentation pipelines the PyTorch engine supports.
-
-    Returns:
-        Every ``augmenter_type`` value valid for the PyTorch engine (currently only ``albumentations``).
-    """
-    return tuple(dlc_compat.get_available_aug_methods(Engine.PYTORCH))
 
 
 def get_available_super_animals() -> tuple[str, ...]:
@@ -204,7 +191,6 @@ def create_training_dataset(
     shuffle: int = 1,
     network_type: str | None = None,
     detector_type: str | None = None,
-    augmenter_type: str | None = None,
     weight_initialization: WeightInitialization | None = None,
     conditional_top_down_conditions: Path | tuple[int, str] | None = None,
     from_shuffle: int | None = None,
@@ -224,7 +210,6 @@ def create_training_dataset(
         network_type: The pose-model architecture, one of ``get_available_pose_models``. None uses the project default.
             A ``top_down_`` prefix creates a top-down model that also trains a detector.
         detector_type: The object detector for top-down models, one of ``get_available_object_detectors``.
-        augmenter_type: The augmentation pipeline, one of ``get_available_augmenters``. None uses the engine default.
         weight_initialization: A SuperAnimal weight initialization from ``build_superanimal_weight_init``, or None for
             ImageNet transfer learning.
         conditional_top_down_conditions: The conditioning source for conditional top-down models, from
@@ -237,8 +222,7 @@ def create_training_dataset(
         A summary of the created shuffle.
 
     Raises:
-        ValueError: When ``network_type``, ``detector_type``, or ``augmenter_type`` is not in the installed engine's
-            catalog.
+        ValueError: When ``network_type`` or ``detector_type`` is not in the installed engine's catalog.
         ValueError: When DeepLabCut creates no shuffle (for example, no labeled frames exist, or every labeled frame
             was annotated by a scorer other than the one named in the project configuration).
     """
@@ -254,13 +238,6 @@ def create_training_dataset(
             f"one of {', '.join(get_available_object_detectors())}, but got '{detector_type}'."
         )
         raise ValueError(message)
-    if augmenter_type is not None and augmenter_type not in get_available_augmenters():
-        message = (
-            f"Unable to create the training dataset using the requested augmenter_type. The augmenter_type must be "
-            f"one of {', '.join(get_available_augmenters())}, but got '{augmenter_type}'."
-        )
-        raise ValueError(message)
-
     user_feedback = not overwrite
     with _suppress_unannotated_video_notices():
         if from_shuffle is not None:
@@ -271,7 +248,6 @@ def create_training_dataset(
                 shuffles=[shuffle],
                 net_type=network_type,
                 detector_type=detector_type,
-                augmenter_type=augmenter_type,
                 userfeedback=user_feedback,
                 weight_init=weight_initialization,
                 ctd_conditions=conditional_top_down_conditions,
@@ -282,7 +258,6 @@ def create_training_dataset(
                 Shuffles=[shuffle],
                 net_type=network_type,
                 detector_type=detector_type,
-                augmenter_type=augmenter_type,
                 userfeedback=user_feedback,
                 weight_init=weight_initialization,
                 ctd_conditions=conditional_top_down_conditions,
@@ -312,7 +287,6 @@ def create_training_dataset(
         shuffle=shuffle,
         net_type=network_type,
         detector_type=detector_type,
-        augmenter_type=augmenter_type,
         weight_init=weight_init_description,
         from_shuffle=from_shuffle,
     )

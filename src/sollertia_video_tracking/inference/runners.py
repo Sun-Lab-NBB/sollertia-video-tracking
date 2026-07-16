@@ -115,7 +115,6 @@ def _optimize_inference_runner(runner: InferenceRunner, profile: InferenceProfil
     device_type = "cuda" if str(runner.device).startswith("cuda") else str(runner.device)
     amp_dtype = profile.amp_dtype
     channels_last = profile.channels_last
-    non_blocking = profile.pin_memory
 
     def autocast_context() -> AbstractContextManager[None]:
         """Returns the autocast context for the forward pass, or a null context when mixed precision is off."""
@@ -125,7 +124,7 @@ def _optimize_inference_runner(runner: InferenceRunner, profile: InferenceProfil
 
     def move_inputs(inputs: torch.Tensor) -> torch.Tensor:
         """Moves a batch to the runner device, adopting the channels-last format when enabled."""
-        moved = inputs.to(runner.device, non_blocking=non_blocking)
+        moved = inputs.to(runner.device)
         if channels_last:
             moved = moved.contiguous(memory_format=torch.channels_last)
         return moved

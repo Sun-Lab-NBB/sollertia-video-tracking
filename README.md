@@ -19,10 +19,10 @@ This library packages the DeepLabCut-side tooling used to build, refine, and dep
 the recordings produced by the Sollertia data acquisition platform. It exposes a unified `slvt` command-line interface
 that covers the entire model lifecycle: selecting the initial training frames, preparing and training a shuffle,
 analyzing videos, extracting the trained model's likely-wrong frames, and tracking their refinement into the next
-iteration. Only the manual labeling steps fall outside the CLI, and they run in the DeepLabCut GUI. The same interface
-deploys a finished model over new recordings, on hardware ranging from multi-GPU servers to CPU-only machines.
-Throughout, it expands on the base DeepLabCut functionality to scale it to high-performance compute clusters and the
-unique constraints of working with large data projects.
+iteration. Project creation, manual labeling, and the dataset merge fall outside the CLI, and they run in the
+DeepLabCut GUI. The same interface deploys a finished model over new recordings, on hardware ranging from multi-GPU
+servers to CPU-only machines. Throughout, it expands on the base DeepLabCut functionality to scale it to
+high-performance compute clusters and the unique constraints of working with large data projects.
 
 Because DeepLabCut requires the numpy 1.x series and Python 3.12 or earlier, this library runs in its own environment
 and is driven by the rest of the Sollertia stack across the command-line boundary rather than by direct import. The
@@ -34,11 +34,12 @@ ___
 ## Features
 
 - Supports Windows, Linux, and macOS.
+- Targets DeepLabCut's PyTorch engine exclusively, tracking its deprecation of the legacy TensorFlow engine.
 - Covers the entire DeepLabCut refinement loop through a single `slvt` CLI: frame extraction, shuffle preparation,
-  training, inference, outlier extraction, and refinement tracking, deferring to the DeepLabCut GUI only for the manual
-  labeling this library does not implement.
+  training, inference, outlier extraction, and refinement tracking, deferring to the DeepLabCut GUI for project
+  creation, the manual labeling this library does not implement, and DeepLabCut's dataset merge.
 - Extracts training and outlier frames in parallel, decoding one video per worker process pinned to a disjoint block of
-  CPU cores.
+  CPU cores on Linux and Windows, where the operating system exposes a CPU affinity API.
 - Grows a project toward a project-wide frame budget, optionally balanced across groups of related videos.
 - Trains shuffles with mixed precision, TF32, cuDNN autotuning, and multi-GPU DistributedDataParallel, exposing every
   optimization as an explicit flag whose automatic default never runs slower than stock DeepLabCut.
@@ -79,9 +80,14 @@ ___
 
 This library depends on [DeepLabCut](https://github.com/DeepLabCut/DeepLabCut) 3.x and its
 [PyTorch](https://pytorch.org/) backend. Because DeepLabCut pins the numpy 1.x series and supports only Python
-3.10-3.12, the library must be installed into a dedicated environment, separate from the numpy-2 / Python-3.14
-environment used by the rest of the Sollertia stack. A CUDA-capable GPU is recommended for training and deploying
-pose-estimation networks, and the `gui` command additionally requires a graphical session.
+3.10-3.12, the library targets Python 3.12, the latest DeepLabCut-supported version, and must be installed into a
+dedicated Python 3.12 environment, separate from the numpy-2 / Python-3.14 environment used by the rest of the
+Sollertia stack. A CUDA-capable GPU is recommended for training and deploying pose-estimation networks, and the `gui`
+command additionally requires a graphical session.
+
+***Note,*** this library supports the PyTorch engine only. DeepLabCut still ships its legacy TensorFlow engine and is
+deprecating it, so every `slvt` command targets the PyTorch engine exclusively and options that only the TensorFlow
+engine would honor are not exposed. A project whose shuffles were created for the TensorFlow engine is not supported.
 
 ***Note,*** the DeepLabCut dependency is pinned to an exact version. The training subpackage overrides DeepLabCut 
 internals that carry no stability guarantee within the 3.x series, so bumping the pin is a deliberate, tested action 
@@ -131,15 +137,17 @@ This library provides the `slvt` CLI that exposes the following commands:
 | `train`            | Trains a shuffle with hardware optimizations and a clean progress monitor                       |
 | `infer`            | Analyzes videos with a trained model, distributing whole videos across GPU or CPU worker slots  |
 
-Every `slvt` input is an option: no command takes positional arguments. Options offer both a long form and a
-multi-letter short form (`--config-path` and `-cfg`), and every command that operates on a project takes that project's
-config.yaml through `--config-path`. Options that take one value per occurrence, such as `--videos`, are given once per
-value. `--gpus` instead takes all of its indices as a single comma-separated value (`--gpus 0,1`).
+Every `slvt` input is an option: no command takes positional arguments. Options offer both a long form and a short
+form, which may be multi-letter (`--config-path` and `-cfg`) or single-letter (`--videos` and `-v`), and every command
+that operates on a project takes that project's config.yaml through `--config-path`. Options that take one value per
+occurrence, such as `--videos`, are given once per value. `--gpus` instead takes all of its indices as a single
+comma-separated value (`--gpus 0,1`).
 
 The `extract` group is the one exception to the usual flat structure. It owns the config.yaml, the per-video frame
-ceiling `--frames-per-video`, the parallelism and clustering options, and the `--videos`, `--overwrite`, and `--reset`
-options that its subcommands share. ***Note,*** these shared options must be given ***before*** the subcommand name,
-which then carries its own parameters: `slvt extract --config-path PATH --workers 4 frames --total-frames 2000`.
+count `--frames-per-video` (a top-up ceiling for `frames`, the number of outlier frames to extract from each video for
+`outliers`), the parallelism and clustering options, and the `--videos`, `--overwrite`, and `--reset` options that its
+subcommands share. ***Note,*** these shared options must be given ***before*** the subcommand name, which then carries
+its own parameters: `slvt extract --config-path PATH --workers 4 frames --total-frames 2000`.
 
 Use `slvt --help`, `slvt extract --help`, or `slvt COMMAND --help` for detailed usage information. Every option's help
 text documents its own defaults and interactions, so the sections below cover the workflow and the choices that matter
@@ -168,24 +176,28 @@ Steps 3 through 8 repeat until the model's accuracy is sufficient. Once it is, d
 ### Extracting Initial Frames
 
 `slvt extract frames` bootstraps a project's training set by clustering raw video and keeping the frames that best
-cover the visual variation. Each video is clustered in its own worker process pinned to a disjoint block of CPU cores,
-so extraction scales across the machine rather than decoding one video at a time.
+cover the visual variation. Each video is clustered in its own worker process, pinned on Linux and Windows to a
+disjoint block of CPU cores, so extraction scales across the machine rather than decoding one video at a time. macOS
+exposes no CPU affinity API, so its workers run in parallel but unpinned.
 
 Frame selection is governed by two budgets. `--frames-per-video`, given before the subcommand, is a per-video ceiling,
 and `--total-frames` (default 200), given after it, is the project-wide budget: videos are selected until the budget is
 reached, preferring not-yet-extracted videos and falling back to below-ceiling ones. Videos named with `--videos` are
-always included first. Extraction is a top-up rather than a re-roll, so a fresh video gains a full set while a
-partly-extracted one gains only the frames that reach the ceiling. If topping every eligible video to the ceiling still
-cannot reach the total in one pass, the run reports the shortfall and stops rather than silently under-delivering.
+included first, except that a video already in outlier refinement is skipped with a warning: `extract frames` is the
+pre-refinement bootstrap step and never disturbs a video that has entered refinement. Extraction is a top-up rather
+than a re-roll, so a fresh video gains a full set while a partly-extracted one gains only the frames that reach the
+ceiling. If topping every eligible video to the ceiling still cannot reach the total in one pass, the run reports the
+shortfall and stops rather than silently under-delivering.
 
 `--balance-groups` spreads the sample evenly across groups of related videos so every group is represented, inferring
 the groups from the parts of the file names the videos share; `--group-regex` supplies an explicit pattern for naming
 schemes the automatic grouping does not recognize. `--exclusive` restricts the run to exactly the `--videos` files,
 ignoring the budget and group balancing entirely.
 
-`--clustering-stride` controls how far apart, in frames, the video is sampled before clustering. It defaults to 1,
-which uses every frame; raising it clusters fewer frames, trading coverage for processing speed. `--workers` and
-`--cores` tune the parallelism, and both default to deriving a saturating layout from the machine's core count.
+`--clustering-stride` controls how far apart, in frames, the run samples before clustering: for `frames` it strides the
+whole video, and for `outliers` it strides the flagged candidate frames. It defaults to 1, which uses every frame;
+raising it clusters fewer frames, trading coverage for processing speed. `--workers` and `--cores` tune the
+parallelism, and both default to deriving a saturating layout from the machine's core count.
 
 The following command grows the project toward a two-thousand-frame training set while ensuring every group of related
 videos is represented:
@@ -196,7 +208,9 @@ The following command instead restricts the run to two specific videos, topping 
 
 Passing `--overwrite` clears the selected videos' unlabeled frames so they are re-rolled from scratch, and `--reset`
 does the same across every not-yet-refined project video. Both preserve already-labeled and outlier frames, and both
-refuse to disturb videos that have already entered outlier refinement.
+refuse to disturb videos that have already entered outlier refinement. The two are mutually exclusive, and `--reset`
+also cannot be combined with `--exclusive`, since one re-rolls the whole project while the other restricts the run to
+the requested videos: use `--overwrite` to re-roll only those.
 
 ### Labeling Frames
 
@@ -204,15 +218,15 @@ refuse to disturb videos that have already entered outlier refinement.
 deeplabcut`. It takes no options. The project's config.yaml is created or opened from the application's own
 project-management window, and the frame labeler, which opens in napari, is reached from there.
 
-Manual labeling is the one step of the refinement loop this library does not implement, because it is inherently
+Manual labeling is the step of the refinement loop this library does not implement, because it is inherently
 interactive. The GUI is therefore used for exactly the steps that have no `slvt` equivalent: creating the project and
 registering its videos, labeling the extracted frames, correcting the machine pre-labels that `slvt extract outliers`
 produces, and merging the refined dataset to advance the project's iteration.
 
 ***Note,*** the GUI also offers tabs for frame extraction, training, evaluation, analysis, and outlier extraction, but
 those tabs run the stock DeepLabCut implementations, which decode one video at a time and apply none of the training
-and inference optimizations. Every step that has an `slvt` command is faster through that command, so
-the GUI is best reserved for the labeling work that only it can do.
+and inference optimizations. Every step that has an `slvt` command is faster through that command, so the GUI is best
+reserved for the work that only it can do.
 
 The GUI needs a graphical session, so it runs on a workstation rather than a headless training or inference server. On
 Linux it refuses to start with an explanatory error when neither `DISPLAY` nor `WAYLAND_DISPLAY` is set. The command
@@ -222,13 +236,15 @@ blocks until the window is closed.
 
 `slvt prepare` creates the training-dataset shuffle that `slvt train` fits, mirroring the DeepLabCut GUI's
 create-training-dataset tab for headless and scripted use. A shuffle bakes in the model architecture, the weight
-initialization, and a train/test split, all of which are fixed once it is created; `--shuffle` (default 1) is the index
-that identifies it everywhere downstream.
+initialization, the augmentation pipeline, and a train/test split, all of which are fixed once it is created;
+`--shuffle` (default 1) is the index that identifies it everywhere downstream.
 
 `--network` selects the pose-model architecture from DeepLabCut's full catalog, and omitting it uses the project
-default. A top-down architecture also trains an object detector, chosen with `--detector`, and a conditional top-down
-(`ctd_*`) architecture additionally requires `--conditional-top-down-conditions`: the predictions file (`.h5` or
-`.json`) or model snapshot (`.pt`) it conditions on. `--weight-initialization` controls the starting weights:
+default; the augmentation pipeline is not selected separately, since it follows from the architecture's top-down or
+bottom-up task. A top-down architecture also trains an object detector, chosen with `--detector`, and naming a
+conditional top-down (`ctd_*`) architecture with `--network` additionally requires
+`--conditional-top-down-conditions`: the predictions file (`.h5` or `.json`) or model snapshot (`.pt`) it conditions
+on. `--weight-initialization` controls the starting weights:
 `imagenet` (the default) needs nothing further, while `transfer` and `fine-tune` do SuperAnimal transfer learning or
 fine-tuning and both require a `--super-animal` dataset and an explicit `--network`.
 `--from-shuffle` reuses an existing shuffle's train/test split instead of drawing a fresh one, which isolates an
@@ -237,7 +253,8 @@ architecture comparison from split variance. `--overwrite` replaces an existing 
 The following command creates shuffle 3 with an HRNet-W32 architecture:
 `slvt prepare --config-path /path/to/project/config.yaml --shuffle 3 --network hrnet_w32`
 
-***Note,*** `--memory-replay` shuffles can be created but cannot be trained by `slvt train`.
+***Note,*** `--memory-replay` is only valid with `--weight-initialization fine-tune`, and such shuffles can be created
+but cannot be trained by `slvt train`.
 
 ### Training a Model
 
@@ -298,9 +315,12 @@ taking either one shared directory or one directory per `--videos` file.
 `--device` defaults to using every visible GPU, with `--gpus` narrowing the selection. `--gpu-processes` sets the
 worker processes per GPU, defaulting to one process (one video) per GPU. Most GPUs saturate with 1 or 2 workers:
 raising it oversubscribes a GPU so one worker's forward pass fills the gaps another leaves, and the useful factor is
-workload-dependent and best found by measurement. On CPU-only machines, `--cpu-workers` and
-`--cpu-threads-per-worker` divide the cores into disjoint per-worker blocks. The precision and memory-format flags
-mirror `slvt train` and add `--channels-last`, which speeds up convolutions on tensor-core GPUs.
+workload-dependent and best found by measurement. `--batch-size` sets the frames the pose model processes per forward
+pass, where larger batches use more GPU memory and can speed up analysis, and top-down models expose the detector's own
+`--detector-batch-size`; omitting each uses the model's default. On CPU-only machines, `--cpu-workers` and
+`--cpu-threads-per-worker` divide the cores into disjoint per-worker blocks. `--amp`, `--tf32`, `--cudnn-benchmark`,
+and `--compile-model` carry the same meaning they do for `slvt train`, and `--channels-last` additionally speeds up
+convolutions on tensor-core GPUs.
 
 The following command analyzes two de-novo videos at a chosen crop rectangle, writing each video's predictions beside
 it:
@@ -324,14 +344,16 @@ prediction is treated as unreliable. `--comparison-bodyparts` restricts the dete
 matters when only some are of interest. `--extraction-algorithm` then chooses which of the flagged candidates to keep.
 
 The flagged frames are clustered in parallel, one video per worker, and added to each video's labeled-data directory
-alongside the model's predictions as machine pre-labels. `--save-labeled` additionally saves a copy of each extracted
-frame with the predictions drawn on it, which is useful for eyeballing what the model is getting wrong.
+alongside the model's predictions as machine pre-labels. `--frames-per-video`, given before the subcommand, sets how
+many outlier frames each refined video contributes per pass; unlike the ceiling it imposes on `frames`, here it is a
+per-pass count. `--save-labeled` additionally saves a copy of each extracted frame with the predictions drawn on it,
+which is useful for eyeballing what the model is getting wrong.
 
 The following command extracts the current model's least-confident frames from two analyzed videos:
 `slvt extract --config-path /path/to/project/config.yaml --videos video1.mp4 --videos video2.mp4 outliers`
 
 ***Note,*** the `fitting` detector fits a SARIMAX trajectory per keypoint and is by far the most expensive option;
-`--fit-workers` parallelizes those fits and uses every available core by default.
+`--fit-workers` parallelizes those fits and by default uses every usable core, leaving a small reserve free.
 
 Outlier extraction is additive, so repeated passes grow the refinement set. `--overwrite` replaces the refined videos'
 outlier frames for the current iteration and `--reset` clears the whole iteration's outlier frames before
@@ -364,9 +386,10 @@ clear only unlabeled or single-iteration frames and always keep the human labels
 for the rare start-completely-over case, such as changing the project's crop, that the label-preserving options cannot
 serve.
 
-The command purges the videos given with `--videos`. ***Omitting `--videos` purges the whole project***, removing every
-video directory in the project's `labeled-data` tree, including directories left behind by videos no longer registered
-in config.yaml.
+The command purges the videos given with `--videos`, each of which must be registered in the project's config.yaml;
+requested paths that match no registered project video are skipped with a warning. ***Omitting `--videos` purges the
+whole project***, removing every video directory in the project's `labeled-data` tree, including directories left
+behind by videos no longer registered in config.yaml.
 
 ***Warning!*** Purging destroys human labeling work that cannot be recovered by re-running any other command. The
 command previews what it would delete and removes nothing until `--yes` is given, so the preview is the way to confirm
@@ -378,7 +401,7 @@ the scope before committing to it:
 Deploying a finished model needs only `slvt infer`. The command's inputs are the project's config.yaml, the videos, and
 optionally a `--crop`, so a deployment host needs no more than a DeepLabCut project whose shuffle holds a trained
 snapshot. Because the analyzed videos need not be registered in the project, deployment analyzes de-novo recordings
-without ever modifying the project.
+without adding videos or labels to the project.
 
 The full project directory copied from the training machine works as-is. Analysis reads only the project configuration
 and the trained shuffle, so a project truncated to those parts serves equally well and avoids copying the labeled data
@@ -404,7 +427,7 @@ The following command deploys such a project over a new recording, collecting th
 project. The `--shuffle` index given to `slvt infer` must match the copied shuffle's directory, and `config.yaml`
 should be copied verbatim rather than handwritten, since DeepLabCut rewrites an incomplete configuration through its
 own template. The configuration's internal `project_path` does not need to be corrected: DeepLabCut resolves the
-project from the config.yaml's own location and self-corrects the stale value.
+project from the config.yaml's own location and self-corrects the stale value, rewriting config.yaml in place.
 
 Within the Sollertia platform, this deployment step is driven by the acquisition stack rather than by hand: the
 experiment preprocessing pipeline launches `slvt infer` over each session's camera recordings and writes the

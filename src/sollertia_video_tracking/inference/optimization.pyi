@@ -31,7 +31,6 @@ class InferenceProfile:
     cudnn_benchmark: bool
     channels_last: bool
     torch_compile: bool
-    pin_memory: bool
     @property
     def use_amp(self) -> bool: ...
     @property
@@ -54,7 +53,6 @@ def resolve_inference_profile(
     gpu_processes: int = -1,
     cpu_workers: int = -1,
     cpu_threads_per_worker: int = -1,
-    pin_memory: Toggle = ...,
     fixed_input_size: bool = False,
 ) -> InferenceProfile: ...
 def apply_runtime_optimizations(profile: InferenceProfile) -> None: ...

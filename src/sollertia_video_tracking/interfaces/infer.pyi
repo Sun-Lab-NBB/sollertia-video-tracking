@@ -33,7 +33,6 @@ def infer_command(
     cudnn_benchmark: str,
     channels_last: str,
     compile_model: str,
-    pin_memory: str,
     *,
     progress: bool,
 ) -> None: ...

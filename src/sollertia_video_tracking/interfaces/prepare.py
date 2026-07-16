@@ -7,7 +7,6 @@ import click
 from ..training import (
     WeightInitializationMethod,
     create_training_dataset,
-    get_available_augmenters,
     get_available_pose_models,
     get_available_super_animals,
     build_superanimal_weight_init,
@@ -17,6 +16,13 @@ from ..training import (
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Widens displayed Click help messages to 120 columns so option descriptions wrap consistently."""
+
+_CONDITIONAL_TOP_DOWN_PREFIX: str = "ctd_"
+"""Marks the conditional top-down architectures, which are the only ones that consume a conditioning source.
+
+Every DeepLabCut architecture whose pose configuration declares the conditional top-down method is named with this
+prefix, so the prefix identifies them without loading each candidate's configuration file.
+"""
 
 
 @click.command("prepare", context_settings=_CONTEXT_SETTINGS)
@@ -42,13 +48,6 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     type=click.Choice(get_available_object_detectors()),
     default=None,
     help="The object detector for top-down models. Omit to use the default detector.",
-)
-@click.option(
-    "-a",
-    "--augmenter",
-    type=click.Choice(get_available_augmenters()),
-    default=None,
-    help="The data-augmentation pipeline. Omit to use the default.",
 )
 @click.option(
     "-wi",
@@ -81,7 +80,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     default=None,
     help="The conditioning file for conditional top-down models: a predictions file (.h5 or .json) or a model "
-    "snapshot (.pt).",
+    "snapshot (.pt). Required when --network is a conditional top-down ('ctd_*') architecture.",
 )
 @click.option(
     "-fs",
@@ -102,7 +101,6 @@ def prepare_command(
     shuffle: int,
     network: str | None,
     detector: str | None,
-    augmenter: str | None,
     weight_initialization: str,
     super_animal: str | None,
     conditional_top_down_conditions: Path | None,
@@ -111,7 +109,7 @@ def prepare_command(
     memory_replay: bool,
     overwrite: bool,
 ) -> None:
-    """Creates a training-dataset shuffle for a project, selecting the model, weights, augmentation, and split.
+    """Creates a training-dataset shuffle for a project, selecting the model, weights, and split.
 
     ``--config-path`` names the DeepLabCut project's config.yaml. The shuffle bakes in the model architecture, weight
     initialization, and a train/test split. Training is run afterward with ``slvt train``. Multi-animal projects are
@@ -144,6 +142,13 @@ def prepare_command(
             "'fine-tune'."
         )
         raise click.ClickException(message=message)
+    uses_conditional_top_down = network is not None and network.startswith(_CONDITIONAL_TOP_DOWN_PREFIX)
+    if uses_conditional_top_down and conditional_top_down_conditions is None:
+        message = (
+            "Unable to create the training dataset. Provide --conditional-top-down-conditions when --network is a "
+            "conditional top-down ('ctd_*') architecture."
+        )
+        raise click.ClickException(message=message)
 
     try:
         weights = None
@@ -164,7 +169,6 @@ def prepare_command(
             shuffle=shuffle,
             network_type=network,
             detector_type=detector,
-            augmenter_type=augmenter,
             weight_initialization=weights,
             conditional_top_down_conditions=conditions,
             from_shuffle=from_shuffle,

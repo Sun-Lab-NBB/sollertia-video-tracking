@@ -24,14 +24,12 @@ class TrainingDatasetSummary:
     shuffle: int
     net_type: str | None
     detector_type: str | None
-    augmenter_type: str | None
     weight_init: str
     from_shuffle: int | None
     def describe(self) -> str: ...
 
 def get_available_pose_models() -> tuple[str, ...]: ...
 def get_available_object_detectors() -> tuple[str, ...]: ...
-def get_available_augmenters() -> tuple[str, ...]: ...
 def get_available_super_animals() -> tuple[str, ...]: ...
 def build_superanimal_weight_init(
     config: str | Path,
@@ -51,7 +49,6 @@ def create_training_dataset(
     shuffle: int = 1,
     network_type: str | None = None,
     detector_type: str | None = None,
-    augmenter_type: str | None = None,
     weight_initialization: WeightInitialization | None = None,
     conditional_top_down_conditions: Path | tuple[int, str] | None = None,
     from_shuffle: int | None = None,

@@ -20,7 +20,6 @@ from sollertia_video_tracking.training.dataset import (
     WeightInitializationMethod,
     create_training_dataset,
     _UnannotatedNoticeFilter,
-    get_available_augmenters,
     get_available_pose_models,
     get_available_super_animals,
     build_superanimal_weight_init,
@@ -51,7 +50,6 @@ def test_summary_describe_full_detail() -> None:
         shuffle=3,
         net_type="resnet50",
         detector_type="ssdlite",
-        augmenter_type="albumentations",
         weight_init="superanimal_quadruped (transfer)",
         from_shuffle=2,
     )
@@ -71,7 +69,6 @@ def test_summary_describe_defaults() -> None:
         shuffle=1,
         net_type=None,
         detector_type=None,
-        augmenter_type=None,
         weight_init="imagenet",
         from_shuffle=None,
     )
@@ -88,7 +85,6 @@ def test_summary_describe_from_shuffle_zero_still_shows_split() -> None:
         shuffle=5,
         net_type="x",
         detector_type=None,
-        augmenter_type=None,
         weight_init="imagenet",
         from_shuffle=0,
     )
@@ -106,20 +102,6 @@ def test_get_available_object_detectors_sorted(monkeypatch: pytest.MonkeyPatch) 
     """Verifies that the detector catalog is returned sorted and as an immutable tuple."""
     monkeypatch.setattr(dataset, "available_detectors", lambda: ["ssd", "fasterrcnn"])
     assert get_available_object_detectors() == ("fasterrcnn", "ssd")
-
-
-def test_get_available_augmenters(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verifies that the augmenter catalog is read from DLC's compat layer for the PyTorch engine."""
-    seen_engine: list[object] = []
-
-    def fake_aug_methods(engine: object) -> list[str]:
-        seen_engine.append(engine)
-        return ["albumentations"]
-
-    monkeypatch.setattr(dataset, "dlc_compat", SimpleNamespace(get_available_aug_methods=fake_aug_methods))
-    assert get_available_augmenters() == ("albumentations",)
-    # The PyTorch engine is the one queried.
-    assert seen_engine == [dataset.Engine.PYTORCH]
 
 
 def test_get_available_super_animals() -> None:
@@ -238,17 +220,11 @@ def _patch_dlc(
     *,
     models: tuple[str, ...] = ("resnet50",),
     detectors: tuple[str, ...] = ("ssdlite",),
-    augmenters: tuple[str, ...] = ("albumentations",),
     existing: tuple[int, ...] = (1,),
 ) -> dict[str, list[dict[str, object]]]:
     """Patches every DLC boundary create_training_dataset touches and records the two create calls."""
     monkeypatch.setattr(dataset, "available_models", lambda: list(models))
     monkeypatch.setattr(dataset, "available_detectors", lambda: list(detectors))
-    monkeypatch.setattr(
-        dataset,
-        "dlc_compat",
-        SimpleNamespace(get_available_aug_methods=lambda _engine: list(augmenters)),
-    )
     calls: dict[str, list[dict[str, object]]] = {"fresh": [], "existing_split": []}
     monkeypatch.setattr(dataset, "dlc_create_training_dataset", lambda **kwargs: calls["fresh"].append(kwargs))
     monkeypatch.setattr(
@@ -268,14 +244,12 @@ def test_create_training_dataset_fresh_split_imagenet(monkeypatch: pytest.Monkey
         shuffle=1,
         network_type="resnet50",
         detector_type="ssdlite",
-        augmenter_type="albumentations",
     )
     assert isinstance(summary, TrainingDatasetSummary)
     assert summary.config == Path("/p/config.yaml")
     assert summary.shuffle == 1
     assert summary.net_type == "resnet50"
     assert summary.detector_type == "ssdlite"
-    assert summary.augmenter_type == "albumentations"
     assert summary.weight_init == "imagenet"
     assert summary.from_shuffle is None
     # The fresh-split entry point ran, the existing-split one did not.
@@ -286,7 +260,6 @@ def test_create_training_dataset_fresh_split_imagenet(monkeypatch: pytest.Monkey
     assert fresh["Shuffles"] == [1]
     assert fresh["net_type"] == "resnet50"
     assert fresh["detector_type"] == "ssdlite"
-    assert fresh["augmenter_type"] == "albumentations"
     assert fresh["userfeedback"] is True  # overwrite False -> user feedback enabled
     assert fresh["weight_init"] is None
     assert fresh["ctd_conditions"] is None
@@ -304,7 +277,6 @@ def test_create_training_dataset_from_shuffle_reuses_split(monkeypatch: pytest.M
         shuffle=2,
         network_type="resnet50",
         detector_type="ssdlite",
-        augmenter_type="albumentations",
         weight_initialization=weight_init,
         conditional_top_down_conditions=ctd,
         from_shuffle=1,
@@ -318,10 +290,9 @@ def test_create_training_dataset_from_shuffle_reuses_split(monkeypatch: pytest.M
     assert reuse["from_shuffle"] == 1
     assert reuse["from_trainsetindex"] == 1
     assert reuse["shuffles"] == [2]
-    # Every model/augmentation/weight/condition argument must reach the existing-split entry point unchanged.
+    # Every model/weight/condition argument must reach the existing-split entry point unchanged.
     assert reuse["net_type"] == "resnet50"
     assert reuse["detector_type"] == "ssdlite"
-    assert reuse["augmenter_type"] == "albumentations"
     assert reuse["weight_init"] is weight_init
     assert reuse["ctd_conditions"] is ctd
     assert reuse["userfeedback"] is False  # overwrite True -> user feedback disabled
@@ -384,13 +355,6 @@ def test_create_training_dataset_invalid_detector_type_raises(monkeypatch: pytes
     _patch_dlc(monkeypatch, detectors=("ssdlite",))
     with pytest.raises(ValueError, match="detector_type must be"):
         create_training_dataset("/p/config.yaml", network_type="resnet50", detector_type="bogus")
-
-
-def test_create_training_dataset_invalid_augmenter_type_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verifies that an unknown augmenter_type is rejected before any DLC call."""
-    _patch_dlc(monkeypatch, augmenters=("albumentations",))
-    with pytest.raises(ValueError, match="augmenter_type must be"):
-        create_training_dataset("/p/config.yaml", augmenter_type="bogus")
 
 
 def test_create_training_dataset_missing_shuffle_raises(monkeypatch: pytest.MonkeyPatch) -> None:
