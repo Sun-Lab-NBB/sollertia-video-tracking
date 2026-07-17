@@ -27,7 +27,9 @@ high-performance compute clusters and the unique constraints of working with lar
 Because DeepLabCut requires the numpy 1.x series and Python 3.12 or earlier, this library runs in its own environment
 and is driven by the rest of the Sollertia stack across the command-line boundary rather than by direct import. The
 `slvt` CLI is therefore the library's only supported interface: the Python API exists to serve that CLI and is not
-intended to be imported by end users.
+intended to be imported by end users. This library is part of the
+[Sollertia](https://github.com/Sun-Lab-NBB/sollertia) AI-assisted scientific data acquisition and processing platform,
+built on the [Ataraxis](https://github.com/Sun-Lab-NBB/ataraxis) framework.
 
 ___
 
