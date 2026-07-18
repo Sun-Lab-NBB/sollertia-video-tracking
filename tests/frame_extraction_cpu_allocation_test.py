@@ -1,5 +1,6 @@
 """Contains tests for the CPU-core allocation planner used to pin parallel frame-extraction workers."""
 
+import sys
 import queue
 
 import pytest
@@ -108,7 +109,10 @@ def test_oversubscription_raises_value_error() -> None:
 
 
 def test_pin_worker_binds_to_claimed_core_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verifies that the worker pins its CPU affinity to the core set it claims from the shared queue."""
+    """Verifies that the worker claims a core set from the shared queue and pins its CPU affinity to it.
+
+    macOS exposes no CPU-affinity API, so its workers still claim their core set but run unpinned.
+    """
     core_queue: queue.Queue[set[int]] = queue.Queue()
     core_queue.put({1, 2, 3})
 
@@ -121,7 +125,9 @@ def test_pin_worker_binds_to_claimed_core_set(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr("sollertia_video_tracking.frame_extraction.cpu_allocation.psutil.Process", _FakeProcess)
     pin_worker_to_cores(core_queue)
 
-    assert recorded == [[1, 2, 3]]
+    # The core set is claimed on every platform, so the queue is drained even where no pinning happens.
+    assert core_queue.empty()
+    assert recorded == ([] if sys.platform == "darwin" else [[1, 2, 3]])
 
 
 def test_pin_worker_empty_queue_is_silent() -> None:

@@ -1,5 +1,6 @@
 """Provides the CPU-core allocation logic that distributes parallel frame-extraction workers across the machine."""
 
+import sys
 from typing import Any
 import contextlib
 
@@ -119,4 +120,5 @@ def pin_worker_to_cores(core_set_queue: Any) -> None:
     """
     with contextlib.suppress(Exception):
         core_set = core_set_queue.get_nowait()
-        psutil.Process().cpu_affinity(list(core_set))
+        if sys.platform != "darwin":
+            psutil.Process().cpu_affinity(list(core_set))

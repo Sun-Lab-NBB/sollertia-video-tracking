@@ -6,6 +6,7 @@ lightweight in-process fakes, and the worker/collector helpers are exercised dir
 headless CPU box.
 """
 
+import sys
 import queue
 from pathlib import Path
 import contextlib
@@ -534,7 +535,10 @@ def test_resolve_output_none(tmp_path):
 
 # _run_inference_worker
 def test_run_inference_worker_drains_queue_and_pins_cores(monkeypatch):
-    """Verifies that _run_inference_worker pins its cores and drains every work item from the queue."""
+    """Verifies that _run_inference_worker pins its cores and drains every work item from the queue.
+
+    macOS exposes no CPU-affinity API, so its workers drain the queue but run unpinned.
+    """
     affinity_calls = []
 
     class _FakePsutilProcess:
@@ -557,7 +561,7 @@ def test_run_inference_worker_drains_queue_and_pins_cores(monkeypatch):
 
     pipeline._run_inference_worker(slot, launch)
 
-    assert affinity_calls == [[0, 1]]
+    assert affinity_calls == ([] if sys.platform == "darwin" else [[0, 1]])
     assert len(applied) == 1
     assert analyzed == [(0, "/v0.mp4", 10, None, None), (1, "/v1.mp4", 10, None, None)]
 

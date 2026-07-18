@@ -1,6 +1,7 @@
 """Provides the multi-device inference pipeline that runs DeepLabCut over many videos across worker slots."""
 
 import os
+import sys
 from typing import Any
 from pathlib import Path
 import contextlib
@@ -564,7 +565,7 @@ def _run_inference_worker(slot: _Slot, launch: _InferenceLaunch) -> None:
         slot: The device and optional CPU-core placement for this worker.
         launch: The bundle of picklable per-run parameters shared by every worker process.
     """
-    if slot.cores is not None:
+    if slot.cores is not None and sys.platform != "darwin":
         with contextlib.suppress(Exception):
             psutil.Process().cpu_affinity(list(slot.cores))
     apply_runtime_optimizations(launch.profile)
