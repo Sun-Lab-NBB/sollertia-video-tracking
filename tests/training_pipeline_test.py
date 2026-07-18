@@ -126,7 +126,7 @@ def test_training_summary_describe_cuda_with_evaluation():
         evaluation=_FakeEval(),
     )
     text = summary.describe()
-    assert "trained detector+pose (200 epochs) on cuda:ddpx2 in bfloat16 -> /models/run" in text
+    assert f"trained detector+pose (200 epochs) on cuda:ddpx2 in bfloat16 -> {Path('/models/run')}" in text
     assert text.endswith("\neval-line")
 
 
@@ -145,7 +145,7 @@ def test_training_summary_describe_cpu_no_tasks_no_evaluation():
         evaluation=None,
     )
     text = summary.describe()
-    assert text == "trained nothing (0 epochs) on cpu in fp32 -> /models/run"
+    assert text == f"trained nothing (0 epochs) on cpu in fp32 -> {Path('/models/run')}"
     assert "\n" not in text
 
 
@@ -1193,4 +1193,4 @@ def test_report_training_log_writes_notice(capsys):
     _report_training_log(Path("/models/run/train.txt"))
     err = capsys.readouterr().err
     assert "Training did not complete" in err
-    assert "/models/run/train.txt" in err
+    assert str(Path("/models/run/train.txt")) in err

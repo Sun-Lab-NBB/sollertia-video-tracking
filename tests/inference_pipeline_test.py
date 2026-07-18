@@ -197,7 +197,7 @@ def test_summary_describe_single_destination_with_failures():
         failures=(("v2.mp4", "boom"),),
     )
     text = summary.describe()
-    assert "/out" in text
+    assert str(Path("/out")) in text
     assert "1 failed" in text
     assert "cuda x4" in text
 

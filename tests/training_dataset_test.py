@@ -339,7 +339,7 @@ def test_create_training_dataset_fresh_forwards_ctd_conditions_and_coerces_confi
         conditional_top_down_conditions=ctd,
     )
     fresh = calls["fresh"][0]
-    assert fresh["config"] == "/p/config.yaml"  # Path coerced to str at the DLC boundary
+    assert fresh["config"] == str(Path("/p/config.yaml"))  # Path coerced to str at the DLC boundary
     assert fresh["ctd_conditions"] is ctd  # the conditioning source is forwarded unchanged, not dropped to None
 
 
