@@ -307,7 +307,7 @@ in a context where OpenCV's `cv2.dnn.DictValue` bootstrap fails.
 
 **Touching a DeepLabCut override:**
 
-1. Read the installed DeepLabCut 3.0.0 source for the symbol being subclassed, patched, or mirrored.
+1. Read the installed DeepLabCut 3.x source for the symbol being subclassed, patched, or mirrored.
 2. Confirm the override still matches its MRO, signature, and config-dict shape. These are private APIs with no
    stability guarantee within the 3.x series.
 3. Keep monkeypatches scoped to the worker process and restored in a `finally` block.
