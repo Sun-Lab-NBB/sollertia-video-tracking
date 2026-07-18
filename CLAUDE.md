@@ -83,9 +83,11 @@ ataraxis **automation** plugin and are the only ones that apply here.
 
 ## Driving the slvt CLI
 
-This library ships no MCP server and no project-specific plugin. The `slvt` CLI is the **only** agent-facing surface,
-and the Python API under `src/sollertia_video_tracking/` exists solely to back that CLI. You MUST NOT satisfy a user
-request by importing this library or writing a driver script against it; the answer is always a `slvt` invocation.
+This library ships no MCP server and no project-specific plugin, so the `slvt` CLI is the only agent-facing surface it
+provides, and the Python API under `src/sollertia_video_tracking/` exists solely to back that CLI. Unless the user
+explicitly directs otherwise, you should resolve every request through a `slvt` invocation and MUST NOT reach for an
+import or a handwritten driver script on your own initiative. An explicit user request overrides this default: when
+the user directly asks for a driver script or to use the Python API, provide it.
 
 The CLI is defined in `src/sollertia_video_tracking/interfaces/`: `entry_points.py` registers the root group, and
 `extract.py`, `gui.py`, `prepare.py`, `train.py`, and `infer.py` own one command each. Read the relevant module, or
