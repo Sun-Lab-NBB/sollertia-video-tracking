@@ -36,7 +36,6 @@ def _profile(**overrides) -> InferenceProfile:
         "cudnn_benchmark": True,
         "channels_last": True,
         "torch_compile": True,
-        "pin_memory": True,
     }
     defaults.update(overrides)
     return InferenceProfile(**defaults)
@@ -99,10 +98,9 @@ def test_describe_cuda_with_all_extras() -> None:
         cudnn_benchmark=True,
         channels_last=True,
         torch_compile=True,
-        pin_memory=True,
     )
     assert profile.describe() == (
-        "CUDA [0, 1] x2/gpu | bfloat16 | workers=4, tf32+cudnn.benchmark+channels_last+compile+pin"
+        "CUDA [0, 1] x2/gpu | bfloat16 | workers=4, tf32+cudnn.benchmark+channels_last+compile"
     )
 
 
@@ -118,7 +116,6 @@ def test_describe_cpu_without_extras() -> None:
         cudnn_benchmark=False,
         channels_last=False,
         torch_compile=False,
-        pin_memory=False,
     )
     assert profile.describe() == "CPU 3x8t | fp32 | workers=3"
 
@@ -134,7 +131,6 @@ def test_describe_mps_uppercases_device() -> None:
         cudnn_benchmark=False,
         channels_last=False,
         torch_compile=False,
-        pin_memory=False,
     )
     assert profile.describe() == "MPS | fp32 | workers=1"
 
@@ -156,7 +152,6 @@ def test_resolve_profile_cuda_auto_defaults(monkeypatch) -> None:
     assert profile.cudnn_benchmark is True  # auto follows fixed_input_size=True
     assert profile.channels_last is True
     assert profile.torch_compile is False  # auto default is off (warm-up cost)
-    assert profile.pin_memory is True
 
 
 def test_resolve_profile_cuda_pre_ampere_disables_tf32_and_amp(monkeypatch) -> None:
@@ -190,7 +185,6 @@ def test_resolve_profile_cpu_forces_cuda_flags_off_and_sizes_workers(monkeypatch
     assert profile.tf32 is False
     assert profile.cudnn_benchmark is False
     assert profile.channels_last is False
-    assert profile.pin_memory is False
     assert profile.amp_dtype is None
 
 
@@ -228,7 +222,6 @@ def test_apply_runtime_optimizations_cpu_restores_thread_count(monkeypatch) -> N
         cudnn_benchmark=False,
         channels_last=False,
         torch_compile=False,
-        pin_memory=False,
     )
     apply_runtime_optimizations(profile)
     assert backend_calls == {"device": "cpu", "tf32": False, "cudnn_benchmark": False}

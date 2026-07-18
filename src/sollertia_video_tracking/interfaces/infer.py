@@ -191,15 +191,6 @@ _CROP_FIELD_COUNT: int = 4
     "because its one-time warm-up cost may not amortize. 'on' and 'off' force it.",
 )
 @click.option(
-    "-pm",
-    "--pin-memory",
-    type=click.Choice([toggle.value for toggle in Toggle]),
-    default=Toggle.AUTO.value,
-    show_default=True,
-    help="Determines whether host memory is pinned to speed up host-to-device transfers on CUDA. 'auto' enables it on "
-    "CUDA. 'on' and 'off' force it. It has no effect off CUDA.",
-)
-@click.option(
     "-p",
     "--progress/--no-progress",
     default=True,
@@ -226,7 +217,6 @@ def infer_command(
     cudnn_benchmark: str,
     channels_last: str,
     compile_model: str,
-    pin_memory: str,
     *,
     progress: bool,
 ) -> None:
@@ -289,7 +279,6 @@ def infer_command(
             gpu_processes=gpu_processes,
             cpu_workers=cpu_workers,
             cpu_threads_per_worker=cpu_threads_per_worker,
-            pin_memory=Toggle(pin_memory),
             fixed_input_size=fixed_input_size,
         )
         summary = run_inference(

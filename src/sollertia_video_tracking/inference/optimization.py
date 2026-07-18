@@ -72,9 +72,6 @@ class InferenceProfile:
     convolutions on tensor-core GPUs and oneDNN CPU backends."""
     torch_compile: bool
     """Determines whether the model is wrapped with ``torch.compile`` before inference."""
-    pin_memory: bool
-    """Determines whether host frames are staged in pinned memory for non-blocking host-to-device transfer
-    (CUDA only)."""
 
     @property
     def use_amp(self) -> bool:
@@ -120,7 +117,6 @@ class InferenceProfile:
                 ("cudnn.benchmark", self.cudnn_benchmark),
                 ("channels_last", self.channels_last),
                 ("compile", self.torch_compile),
-                ("pin", self.pin_memory),
             )
             if enabled
         ]
@@ -140,15 +136,14 @@ def resolve_inference_profile(
     gpu_processes: int = -1,
     cpu_workers: int = -1,
     cpu_threads_per_worker: int = -1,
-    pin_memory: Toggle = Toggle.AUTO,
     fixed_input_size: bool = False,
 ) -> InferenceProfile:
     """Reconciles the requested inference optimization flags with the available hardware into a concrete profile.
 
     Every optimization is exposed as an explicit request so an operator who knows their silicon can override the
     automatic defaults. ``"auto"`` selects a capability-detected default suited to the chosen device. An explicit
-    ``"on"``/``"off"`` toggle is honored wherever it applies, though the CUDA-only tf32, cuDNN-benchmark, and
-    pin-memory toggles are forced off on non-CUDA devices. A forced AMP dtype is honored wherever the device can run
+    ``"on"``/``"off"`` toggle is honored wherever it applies, though the CUDA-only tf32 and cuDNN-benchmark
+    toggles are forced off on non-CUDA devices. A forced AMP dtype is honored wherever the device can run
     it and is otherwise disabled with a warning rather than a silent refusal (bfloat16 on MPS and float16 on any
     non-CUDA device fall back to float32). The device selection cascades ``cuda`` -> ``cpu`` when no CUDA device is
     visible so the same call works unchanged on a GPU server or a CPU-only server.
@@ -167,7 +162,6 @@ def resolve_inference_profile(
         gpu_processes: The number of worker processes per CUDA device, or -1 to use the default of one video per GPU.
         cpu_workers: The number of CPU worker processes, or -1 to choose automatically from the physical core count.
         cpu_threads_per_worker: The intra-op thread count per CPU worker, or -1 to choose automatically.
-        pin_memory: The requested host-memory pinning setting (meaningful for CUDA only).
         fixed_input_size: Determines whether every video feeds the network one fixed input resolution, normally
             supplied by ``detect_fixed_input_size`` rather than the operator. The cuDNN autotuner's ``"auto"`` default
             enables it only when this holds, since a varying input size makes the autotuner harmful rather than
@@ -194,8 +188,6 @@ def resolve_inference_profile(
     # CUDA, where the benefit is largest and most reliable; CPU users can still opt in explicitly.
     resolved_channels_last = resolve_toggle(value=channels_last, auto=on_cuda)
 
-    resolved_pin_memory = resolve_toggle(value=pin_memory, auto=on_cuda) if on_cuda else False
-
     resolved_gpu_processes = _resolve_gpu_processes(gpu_processes=gpu_processes) if on_cuda else 0
     resolved_cpu_workers, resolved_cpu_threads = (
         _resolve_cpu_parallelism(cpu_workers=cpu_workers, cpu_threads_per_worker=cpu_threads_per_worker)
@@ -214,7 +206,6 @@ def resolve_inference_profile(
         cudnn_benchmark=resolved_benchmark,
         channels_last=resolved_channels_last,
         torch_compile=resolve_toggle(value=torch_compile, auto=False),
-        pin_memory=resolved_pin_memory,
     )
 
 

@@ -32,7 +32,6 @@ def make_profile(**overrides):
         "cudnn_benchmark": False,
         "channels_last": False,
         "torch_compile": False,
-        "pin_memory": False,
     }
     defaults.update(overrides)
     return InferenceProfile(**defaults)

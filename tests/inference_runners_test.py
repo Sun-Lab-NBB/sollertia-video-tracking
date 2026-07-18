@@ -28,7 +28,6 @@ def make_profile(
     amp_dtype=None,
     channels_last=False,
     torch_compile=False,
-    pin_memory=False,
 ):
     """Builds a fully specified InferenceProfile; only the fields the runners module reads matter here."""
     return InferenceProfile(
@@ -42,7 +41,6 @@ def make_profile(
         cudnn_benchmark=False,
         channels_last=channels_last,
         torch_compile=torch_compile,
-        pin_memory=pin_memory,
     )
 
 
@@ -334,7 +332,7 @@ def test_pose_predict_with_dynamic_channels_last_and_amp():
     """Verifies that a dynamic cropper, channels_last, and amp run crop/update under a real CPU autocast context."""
     dynamic = FakeDynamic()
     runner = new_pose_runner(batch_size=2, dynamic=dynamic)
-    profile = make_profile(amp_dtype=torch.bfloat16, channels_last=True, pin_memory=True)
+    profile = make_profile(amp_dtype=torch.bfloat16, channels_last=True)
     runners._optimize_inference_runner(runner=runner, profile=profile)
 
     inputs = torch.zeros(2, 3, 4, 4)  # NCHW so the channels-last contiguous conversion is valid
@@ -374,7 +372,7 @@ def test_detector_predict_no_amp():
 def test_detector_predict_channels_last_and_amp():
     """Verifies that with channels_last and bfloat16 autocast the detector move path runs contiguous under autocast."""
     runner = new_detector_runner(items=detector_items())
-    profile = make_profile(amp_dtype=torch.bfloat16, channels_last=True, pin_memory=True)
+    profile = make_profile(amp_dtype=torch.bfloat16, channels_last=True)
     runners._optimize_inference_runner(runner=runner, profile=profile)
     inputs = torch.zeros(2, 3, 4, 4)
     output = runner.predict(inputs)
