@@ -56,6 +56,11 @@ class InferenceProfile:
     """The CUDA device indices in use, empty for CPU or MPS runs."""
     gpu_processes: int
     """The number of inference worker processes to run per CUDA device, or 0 when not running on CUDA."""
+    chunks: int
+    """The number of contiguous frame-range pieces each concurrently analyzed video is split into, every piece run in
+    parallel by its own worker. One analyzes each video as a single unbroken range, matching the whole-video path. A
+    value above one multiplies per-device concurrency, so the run spawns ``gpu_processes * chunks`` workers per CUDA
+    device."""
     cpu_workers: int
     """The number of CPU inference worker processes, or 0 when not running on CPU."""
     cpu_threads_per_worker: int | None
@@ -92,10 +97,10 @@ class InferenceProfile:
     def total_workers(self) -> int:
         """Returns the configured maximum number of worker processes; the run spawns fewer when videos are scarce."""
         if self.on_cuda:
-            return len(self.gpus) * self.gpu_processes
+            return len(self.gpus) * self.gpu_processes * self.chunks
         if self.device == "cpu":
-            return self.cpu_workers
-        return 1
+            return self.cpu_workers * self.chunks
+        return self.chunks
 
     def describe(self) -> str:
         """Builds a one-line human-readable summary of the active optimizations for logging.
@@ -104,7 +109,8 @@ class InferenceProfile:
             A compact description of the device, parallelism, precision, and enabled accelerators.
         """
         if self.on_cuda:
-            where = f"CUDA {list(self.gpus)} x{self.gpu_processes}/gpu"
+            chunking = f" x{self.chunks} chunks/video" if self.chunks > 1 else ""
+            where = f"CUDA {list(self.gpus)} x{self.gpu_processes}/gpu{chunking}"
         elif self.device == "cpu":
             where = f"CPU {self.cpu_workers}x{self.cpu_threads_per_worker}t"
         else:
@@ -134,6 +140,7 @@ def resolve_inference_profile(
     channels_last: Toggle = Toggle.AUTO,
     torch_compile: Toggle = Toggle.AUTO,
     gpu_processes: int = -1,
+    chunks: int = 1,
     cpu_workers: int = -1,
     cpu_threads_per_worker: int = -1,
     fixed_input_size: bool = False,
@@ -160,6 +167,9 @@ def resolve_inference_profile(
         torch_compile: The requested ``torch.compile`` setting; disabled by default because of its warm-up cost, which
             may not amortize over short videos.
         gpu_processes: The number of worker processes per CUDA device, or -1 to use the default of one video per GPU.
+        chunks: The number of contiguous frame-range pieces to split each concurrently analyzed video into, each run in
+            parallel by its own worker. One disables intra-video chunking, and values above one raise per-video
+            concurrency to ``gpu_processes * chunks`` workers per CUDA device.
         cpu_workers: The number of CPU worker processes, or -1 to choose automatically from the physical core count.
         cpu_threads_per_worker: The intra-op thread count per CPU worker, or -1 to choose automatically.
         fixed_input_size: Determines whether every video feeds the network one fixed input resolution, normally
@@ -199,6 +209,7 @@ def resolve_inference_profile(
         device=base_device,
         gpus=resolved_gpus,
         gpu_processes=resolved_gpu_processes,
+        chunks=max(1, chunks),
         cpu_workers=resolved_cpu_workers,
         cpu_threads_per_worker=resolved_cpu_threads,
         amp_dtype=amp_dtype,

@@ -34,6 +34,7 @@ def make_profile(
         device=device,
         gpus=(),
         gpu_processes=0,
+        chunks=1,
         cpu_workers=1,
         cpu_threads_per_worker=8,
         amp_dtype=amp_dtype,

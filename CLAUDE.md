@@ -188,21 +188,23 @@ which GPUs before starting one.
 
 Measured on the eye-tracking project's ~252k-frame (70-minute, 60 fps) videos:
 
-| Command                 | Cost                           | The lever that actually helps                     |
-|-------------------------|--------------------------------|---------------------------------------------------|
-| `slvt infer`            | ~30 min per video, GPU-bound   | `--batch-size 32` with `--gpu-processes 2`        |
-| `slvt extract outliers` | ~7 min per video, decode-bound | `--workers` close to the video count              |
-| `slvt train`            | Tens of minutes to hours       | `--gpus 0,1` with `--multi-gpu ddp`, as an opt-in |
+| Command                 | Cost                            | The lever that actually helps                     |
+|-------------------------|---------------------------------|---------------------------------------------------|
+| `slvt infer`            | ~30 min per video, decode-bound | `--chunks 4` on a long video, `-gp 2` for many    |
+| `slvt extract outliers` | ~7 min per video, decode-bound  | `--workers` close to the video count              |
+| `slvt train`            | Tens of minutes to hours        | `--gpus 0,1` with `--multi-gpu ddp`, as an opt-in |
 
-Those levers are measured, and the obvious alternatives do not work. More than 2 `--gpu-processes` per GPU is
-*slower*: the GPU is already compute-bound, so extra processes only time-slice. A larger `--clustering-stride` does
-not cut `extract outliers` wall-clock, because the optimized path streams the whole video regardless. Training
-defaults to one GPU because multi-GPU is often slower for DeepLabCut workloads, and `dp` cannot combine with `--amp`.
+Those levers are measured, and the obvious alternatives do not work. On a single long video the GPU sits idle waiting
+on decode, so `--chunks` splits that one video into concurrent frame ranges to fill the gap and roughly triples
+throughput. `--gpu-processes` only helps when several videos run at once, and stops helping past 2 per GPU once the
+device is compute-bound. A larger `--clustering-stride` does not cut `extract outliers` wall-clock, because the
+optimized path streams the whole video regardless. Training defaults to one GPU because multi-GPU is often slower for
+DeepLabCut workloads, and `dp` cannot combine with `--amp`.
 
 Run these in the background with output redirected to a log, then poll the log. Never block a session on one:
 
 ```bash
-slvt infer --config-path CFG --videos a.mp4 --gpus 0 --batch-size 32 --gpu-processes 2 > /tmp/infer.log 2>&1 &
+slvt infer --config-path CFG --videos a.mp4 --gpus 0 --batch-size 32 --chunks 4 > /tmp/infer.log 2>&1 &
 ```
 
 Redirecting is not merely tidy. `LiveBar` detects a non-TTY stream and **appends a whole greppable progress line every

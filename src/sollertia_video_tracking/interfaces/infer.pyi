@@ -26,6 +26,7 @@ def infer_command(
     device: str,
     gpus: str | None,
     gpu_processes: int,
+    chunks: int,
     cpu_workers: int,
     cpu_threads_per_worker: int,
     amp: str,
