@@ -29,6 +29,7 @@ def _profile(**overrides) -> InferenceProfile:
         "device": "cuda",
         "gpus": (0, 1),
         "gpu_processes": 2,
+        "chunks": 1,
         "cpu_workers": 0,
         "cpu_threads_per_worker": None,
         "amp_dtype": torch.bfloat16,

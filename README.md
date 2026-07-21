@@ -301,9 +301,8 @@ The following command trains shuffle 1 across two GPUs for 200 epochs:
 
 ### Analyzing Videos
 
-`slvt infer` analyzes videos with a shuffle's trained model. Each worker pulls whole videos from a shared queue, so the
-work is balanced without ever splitting a video, and the same command runs on multiple GPUs, one GPU, or a CPU-only
-machine.
+`slvt infer` analyzes videos with a shuffle's trained model. Each worker pulls work from a shared queue, so the load is
+balanced across the run's slots, and the same command runs on multiple GPUs, one GPU, or a CPU-only machine.
 
 Providing `--videos` once per file analyzes those videos; omitting it analyzes every video registered in the project's
 config.yaml. The videos need not be registered in the project at all, which is what allows de-novo recordings to be
@@ -317,7 +316,11 @@ taking either one shared directory or one directory per `--videos` file.
 `--device` defaults to using every visible GPU, with `--gpus` narrowing the selection. `--gpu-processes` sets the
 worker processes per GPU, defaulting to one process (one video) per GPU. Most GPUs saturate with 1 or 2 workers:
 raising it oversubscribes a GPU so one worker's forward pass fills the gaps another leaves, and the useful factor is
-workload-dependent and best found by measurement. `--batch-size` sets the frames the pose model processes per forward
+workload-dependent and best found by measurement. `--chunks` splits each running video into that many contiguous frame
+ranges analyzed at once, making total per-GPU concurrency `--gpu-processes` times `--chunks`. Unlike raising
+`--gpu-processes`, it fills the decode and preprocessing gaps within a single long video, and the parent stitches each
+video's ranges back into the one `.h5` a whole-video run produces, so it defaults to one. `--batch-size` sets the
+frames the pose model processes per forward
 pass, where larger batches use more GPU memory and can speed up analysis, and top-down models expose the detector's own
 `--detector-batch-size`; omitting each uses the model's default. On CPU-only machines, `--cpu-workers` and
 `--cpu-threads-per-worker` divide the cores into disjoint per-worker blocks. `--amp`, `--tf32`, `--cudnn-benchmark`,
@@ -329,6 +332,9 @@ it:
 `slvt infer --config-path /path/to/project/config.yaml --videos video1.mp4 --videos video2.mp4 --crop 0,550,0,550`
 
 ***Note,*** conditional-top-down models run at stock precision, as the acceleration path does not apply to them.
+
+***Note,*** `--chunks` above one applies to single-animal projects, as stitching per-frame predictions does not
+reproduce multi-animal tracking.
 
 ### Extracting Outlier Frames
 

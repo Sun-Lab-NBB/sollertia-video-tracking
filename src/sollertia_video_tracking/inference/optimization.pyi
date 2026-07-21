@@ -24,6 +24,7 @@ class InferenceProfile:
     device: str
     gpus: tuple[int, ...]
     gpu_processes: int
+    chunks: int
     cpu_workers: int
     cpu_threads_per_worker: int | None
     amp_dtype: torch.dtype | None
@@ -51,6 +52,7 @@ def resolve_inference_profile(
     channels_last: Toggle = ...,
     torch_compile: Toggle = ...,
     gpu_processes: int = -1,
+    chunks: int = 1,
     cpu_workers: int = -1,
     cpu_threads_per_worker: int = -1,
     fixed_input_size: bool = False,

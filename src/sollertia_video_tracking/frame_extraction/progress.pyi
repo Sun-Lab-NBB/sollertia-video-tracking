@@ -21,6 +21,8 @@ class AggregateBar(LiveBar):
     _frame_totals: Incomplete
     _grand_frame_total: Incomplete
     _frames: dict[int, int]
+    _key_video: dict[int, int]
+    _video_remaining: dict[int, int]
     _videos_done: int
     def __init__(
         self,
@@ -29,6 +31,8 @@ class AggregateBar(LiveBar):
         frame_totals: dict[int, int],
         preparing_label: str = "preparing...",
         stream: TextIO | None = None,
+        *,
+        key_video: dict[int, int] | None = None,
     ) -> None: ...
     def __repr__(self) -> str: ...
     def _ingest(self, message: Any) -> bool: ...

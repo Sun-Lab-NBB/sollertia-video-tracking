@@ -2,17 +2,31 @@
 
 import os
 import sys
+import pickle
 from typing import Any
 from pathlib import Path
 import contextlib
+from collections import defaultdict
 from dataclasses import dataclass
 from collections.abc import Iterator, Sequence
 
 import cv2
+import numpy as np
 import psutil
+from numpy.typing import NDArray
 import torch.multiprocessing as mp
-from deeplabcut.utils.auxiliaryfunctions import read_config
+from deeplabcut.utils.auxiliaryfunctions import read_config, read_plainconfig
 from deeplabcut.pose_estimation_pytorch.apis import videos as dlc_videos
+from deeplabcut.pose_estimation_pytorch.data import DLCLoader
+from deeplabcut.pose_estimation_pytorch.task import Task
+import deeplabcut.pose_estimation_pytorch.apis.utils as dlc_apis_utils
+from deeplabcut.pose_estimation_pytorch.apis.videos import (
+    VideoIterator,
+    video_inference,
+    _generate_metadata,
+    _generate_output_data,
+    create_df_from_prediction,
+)
 
 from .runners import patch_dlc_runner_builders
 from .optimization import InferenceProfile, apply_runtime_optimizations
@@ -117,6 +131,50 @@ class _InferenceLaunch:
     """The shared queue workers publish per-video progress updates to."""
     results_queue: Any
     """The shared queue workers report per-video results to."""
+
+
+@dataclass(frozen=True, slots=True)
+class _ChunkItem:
+    """Describes one contiguous frame range of a video analyzed as an independent chunk-worker task."""
+
+    task_id: int
+    """The globally unique identifier of this chunk, used to key its progress and gather its result."""
+    video_index: int
+    """The index of the video this chunk belongs to, used to group chunks back into one prediction file."""
+    chunk_index: int
+    """The position of this chunk within its video, used to order chunk predictions by ascending frame."""
+    video: str
+    """The path of the video this chunk reads its frame range from."""
+    frame_start: int
+    """The inclusive index of the first frame this chunk analyzes."""
+    frame_end: int
+    """The exclusive index one past the last frame this chunk analyzes."""
+    crop: list[int] | None
+    """The ``[x1, x2, y1, y2]`` region every chunk of this video analyzes, or None to analyze the full frame."""
+    destination: str | None
+    """The directory this video's stitched prediction file is written to, or None to write beside the video."""
+
+
+@dataclass(frozen=True, slots=True)
+class _AnalysisPlan:
+    """Holds the project configuration a chunked run resolves once, in the parent, to stitch prediction files."""
+
+    scorer: str
+    """The DeepLabCut scorer string that names each video's output files."""
+    project_cfg: dict[str, Any]
+    """The DeepLabCut project configuration read from the project's config.yaml."""
+    model_cfg: dict[str, Any]
+    """The trained model's pytorch configuration."""
+    pose_cfg: dict[str, Any]
+    """The pose configuration read from the shuffle's test directory, used to assemble the full-pickle output."""
+    train_fraction: float
+    """The training-set fraction the analyzed shuffle was trained with, recorded in the prediction metadata."""
+    batch_size: int
+    """The pose-model batch size recorded in the prediction metadata."""
+    multi_animal: bool
+    """Determines whether the project is multi-animal, which the single-file chunk-stitch path does not support."""
+    pose_task: Any
+    """The DeepLabCut pose task the shuffle uses, which the chunk-stitch path supports only when it is bottom-up."""
 
 
 def resolve_project_videos(config: str | Path) -> list[Path]:
@@ -225,7 +283,8 @@ def run_inference(
         ValueError: Raised when no videos are provided, or when ``crop_override`` or ``destination_override`` is
             provided but its length does not match the number of videos. Raised when the profile selects CUDA but
             resolves no GPU indices to build worker slots from. Raised when an explicit CPU worker/thread configuration
-            cannot be pinned to disjoint core blocks.
+            cannot be pinned to disjoint core blocks. Raised when ``profile.chunks`` exceeds one and the project is
+            multi-animal or the model is not bottom-up.
     """
     config = Path(config)
     video_paths = [Path(video) for video in videos]
@@ -252,6 +311,24 @@ def run_inference(
     if destinations is not None:
         for directory in destinations:
             directory.mkdir(parents=True, exist_ok=True)
+
+    # A chunked run splits every video into parallel frame ranges and stitches the predictions in the parent. The
+    # default single-chunk run keeps the whole-video DeepLabCut path below unchanged.
+    if profile.chunks > 1:
+        return _run_inference_chunked(
+            config=config,
+            video_paths=video_paths,
+            profile=profile,
+            destinations=destinations,
+            crop_override=crop_override,
+            destination_override=destination_override,
+            shuffle=shuffle,
+            snapshot_index=snapshot_index,
+            detector_snapshot_index=detector_snapshot_index,
+            batch_size=batch_size,
+            detector_batch_size=detector_batch_size,
+            display_progress=display_progress,
+        )
 
     totals = {index: _probe_frame_count(video) for index, video in enumerate(video_paths)}
     slots = _build_slots(profile=profile, video_count=len(video_paths))
@@ -436,35 +513,42 @@ def _describe_precision(profile: InferenceProfile) -> str:
     return str(profile.amp_dtype).removeprefix("torch.") if profile.amp_dtype is not None else "fp32"
 
 
-def _build_slots(profile: InferenceProfile, video_count: int) -> list[_Slot]:
-    """Builds the worker slots for the run from the profile and the number of videos.
+def _build_slots(profile: InferenceProfile, video_count: int, *, chunks: int = 1) -> list[_Slot]:
+    """Builds the worker slots for the run from the profile and the number of work units.
 
     Args:
         profile: The resolved optimization profile.
-        video_count: The number of videos to process, used to avoid spawning more workers than videos.
+        video_count: The number of work units to process, used to avoid spawning more workers than there is work.
+        chunks: The per-video frame-range piece count, which multiplies the per-device worker concurrency. One leaves
+            the concurrency unchanged, so the whole-video path builds one slot per configured process.
 
     Returns:
         The list of worker slots to spawn.
     """
     if profile.on_cuda:
         # Round-robins the device order (cuda:0, cuda:1, cuda:0, ...) rather than grouping by device
-        # (cuda:0, cuda:0, cuda:1, ...). When there are fewer videos than slots, the list is truncated below, so this
-        # ordering spreads the surviving workers across every GPU before oversubscribing any single one.
+        # (cuda:0, cuda:0, cuda:1, ...). When there are fewer work units than slots, the list is truncated below, so
+        # this ordering spreads the surviving workers across every GPU before oversubscribing any single one.
         slots = [
-            _Slot(device=f"cuda:{index}", cores=None) for _ in range(profile.gpu_processes) for index in profile.gpus
+            _Slot(device=f"cuda:{index}", cores=None)
+            for _ in range(profile.gpu_processes * chunks)
+            for index in profile.gpus
         ]
     elif profile.device == "cpu":
         core_count = psutil.cpu_count(logical=True) or os.cpu_count() or 1
+        # An explicit CPU worker count is multiplied by the chunk factor so chunking raises CPU concurrency too, while
+        # the automatic -1 request is left untouched for the allocator to size from the core budget.
+        worker_count = profile.cpu_workers * chunks if profile.cpu_workers >= 1 else profile.cpu_workers
         _workers, core_sets = plan_core_allocation(
             video_count=video_count,
             total_core_count=core_count,
-            worker_count=profile.cpu_workers,
+            worker_count=worker_count,
             cores_per_worker=profile.cpu_threads_per_worker or -1,
             reserved_core_count=core_count - _usable_cpu_cores(profile),
         )
         slots = [_Slot(device="cpu", cores=tuple(sorted(cores))) for cores in core_sets]
     else:
-        slots = [_Slot(device=profile.device, cores=None)]
+        slots = [_Slot(device=profile.device, cores=None) for _ in range(chunks)]
 
     if not slots:
         message = (
@@ -475,6 +559,31 @@ def _build_slots(profile: InferenceProfile, video_count: int) -> list[_Slot]:
 
     limit = max(1, min(len(slots), video_count))
     return slots[:limit]
+
+
+def _partition_frame_ranges(total_frames: int, chunks: int) -> list[tuple[int, int]]:
+    """Splits ``[0, total_frames)`` into up to ``chunks`` contiguous, balanced half-open frame ranges.
+
+    The frames are divided as evenly as possible, with the earliest ranges taking the one-frame remainder so every
+    frame is covered exactly once. The range count is clamped to the frame count, so a video split into more chunks
+    than it has frames yields one single-frame range per frame rather than any empty range.
+
+    Args:
+        total_frames: The number of frames in the video, at least one.
+        chunks: The requested number of frame-range pieces.
+
+    Returns:
+        The list of contiguous ``(start, end)`` ranges covering ``[0, total_frames)`` in ascending frame order.
+    """
+    pieces = max(1, min(chunks, total_frames))
+    base, remainder = divmod(total_frames, pieces)
+    ranges: list[tuple[int, int]] = []
+    start = 0
+    for piece in range(pieces):
+        length = base + (1 if piece < remainder else 0)
+        ranges.append((start, start + length))
+        start += length
+    return ranges
 
 
 def _usable_cpu_cores(profile: InferenceProfile) -> int:
@@ -646,3 +755,487 @@ def _resolve_output(video: str, scorer: str, destination: Path) -> Path | None:
     # Multi-animal auto-tracking writes a tracker-suffixed file instead of the plain per-frame table.
     matches = sorted(destination.glob(f"{stem}{scorer}*.h5"))
     return matches[-1] if matches else None
+
+
+def _run_inference_chunked(
+    config: Path,
+    video_paths: list[Path],
+    profile: InferenceProfile,
+    *,
+    destinations: tuple[Path, ...] | None,
+    crop_override: Sequence[tuple[int, int, int, int]] | None,
+    destination_override: Sequence[str | Path] | None,
+    shuffle: int,
+    snapshot_index: int | None,
+    detector_snapshot_index: int | None,
+    batch_size: int | None,
+    detector_batch_size: int | None,
+    display_progress: bool,
+) -> InferenceSummary:
+    """Runs inference by splitting each video into parallel frame-range chunks and stitching predictions in the parent.
+
+    Every video is divided into ``profile.chunks`` contiguous frame ranges, each analyzed by its own worker so several
+    ranges of one video run concurrently on a device. Each worker returns its raw per-frame predictions rather than
+    writing a file. Once every chunk of a video reports, the parent concatenates the chunks in frame order and writes
+    the single prediction file the whole-video path would have written, preserving the beside-the-video or ``--output``
+    destination.
+
+    Args:
+        config: The path of the DeepLabCut project configuration file.
+        video_paths: The videos to analyze.
+        profile: The resolved optimization profile, whose ``chunks`` field sets the per-video split count.
+        destinations: The deduplicated output directories, recorded on the returned summary.
+        crop_override: The per-video crop rectangles, or None to resolve each crop from the project configuration.
+        destination_override: The per-video output directories, or None to write beside each video.
+        shuffle: The shuffle index whose trained model is used.
+        snapshot_index: The pose snapshot index to use, or None for the configured default.
+        detector_snapshot_index: The detector snapshot index to use, or None for the configured default.
+        batch_size: The pose-model batch size, or None to use the configured value.
+        detector_batch_size: The detector batch size, or None to use the configured value.
+        display_progress: Determines whether to render the live aggregate progress bar.
+
+    Returns:
+        A summary of what was analyzed and the hardware configuration used.
+
+    Raises:
+        ValueError: When the project is multi-animal or the model is not bottom-up, which the single-file chunk-stitch
+            path does not support.
+    """
+    plan = _build_analysis_plan(
+        config=config,
+        shuffle=shuffle,
+        snapshot_index=snapshot_index,
+        detector_snapshot_index=detector_snapshot_index,
+        batch_size=batch_size,
+    )
+    if plan.multi_animal or plan.pose_task != Task.BOTTOM_UP:
+        message = (
+            "Unable to run chunked inference on this project. Chunking splits a video into frame ranges and stitches "
+            "per-frame predictions, which supports only single-animal bottom-up models, not multi-animal or top-down "
+            "models. Rerun with --chunks 1."
+        )
+        raise ValueError(message)
+
+    project_config = read_config(str(config))
+    totals = {index: _probe_frame_count(video) for index, video in enumerate(video_paths)}
+
+    work_items: list[_ChunkItem] = []
+    chunk_frame_totals: dict[int, int] = {}
+    key_video: dict[int, int] = {}
+    task_id = 0
+    for index, video in enumerate(video_paths):
+        if crop_override is not None:
+            crop: list[int] | None = list(crop_override[index])
+        else:
+            crop = _resolve_video_cropping(project_config=project_config, video=str(video))
+        destination = str(destination_override[index]) if destination_override is not None else None
+        ranges = _partition_frame_ranges(total_frames=totals[index], chunks=profile.chunks)
+        for chunk_index, (start, end) in enumerate(ranges):
+            work_items.append(
+                _ChunkItem(
+                    task_id=task_id,
+                    video_index=index,
+                    chunk_index=chunk_index,
+                    video=str(video),
+                    frame_start=start,
+                    frame_end=end,
+                    crop=crop,
+                    destination=destination,
+                )
+            )
+            chunk_frame_totals[task_id] = end - start
+            key_video[task_id] = index
+            task_id += 1
+
+    slots = _build_slots(profile=profile, video_count=len(work_items), chunks=profile.chunks)
+
+    manager = mp.Manager()
+    video_queue = manager.Queue()
+    progress_queue = manager.Queue()
+    results_queue = manager.Queue()
+    for item in work_items:
+        video_queue.put(item)
+    for _ in slots:
+        video_queue.put(None)
+
+    bar = None
+    if display_progress:
+        bar = AggregateBar(
+            progress_queue=progress_queue,
+            total_video_count=len(video_paths),
+            frame_totals=chunk_frame_totals,
+            preparing_label="compiling model...",
+            key_video=key_video,
+        )
+        bar.start()
+
+    launch = _InferenceLaunch(
+        config=config,
+        shuffle=shuffle,
+        snapshot_index=snapshot_index,
+        detector_snapshot_index=detector_snapshot_index,
+        profile=profile,
+        batch_size=batch_size,
+        detector_batch_size=detector_batch_size,
+        display_progress=display_progress,
+        video_queue=video_queue,
+        progress_queue=progress_queue,
+        results_queue=results_queue,
+    )
+
+    context = mp.get_context("spawn")
+    processes = [context.Process(target=_run_chunk_worker, args=(slot, launch)) for slot in slots]
+    outputs: dict[int, Path] = {}
+    failures: list[tuple[str, str]] = []
+    try:
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join()
+        outputs, failures = _collect_chunk_results(
+            results_queue=results_queue, video_paths=video_paths, work_items=work_items, plan=plan
+        )
+    finally:
+        if bar is not None:
+            bar.stop()
+            bar.join(timeout=_BAR_JOIN_TIMEOUT_SECONDS)
+        manager.shutdown()
+
+    return InferenceSummary(
+        config=config,
+        video_count=len(video_paths),
+        destinations=destinations,
+        device=profile.device,
+        workers=len(slots),
+        precision=_describe_precision(profile),
+        outputs=tuple(outputs[index] for index in sorted(outputs)),
+        failures=tuple(failures),
+    )
+
+
+def _build_analysis_plan(
+    config: Path,
+    shuffle: int,
+    snapshot_index: int | None,
+    detector_snapshot_index: int | None,
+    batch_size: int | None,
+) -> _AnalysisPlan:
+    """Resolves, in the parent process, the project and model configuration a chunked run needs to stitch outputs.
+
+    This mirrors the setup ``analyze_videos`` performs before its per-video loop, resolving the scorer string that
+    names the output files and the configurations that assemble the prediction pickle and metadata. It touches no GPU,
+    so it also fails fast on a missing snapshot or malformed project before any worker is spawned.
+
+    Args:
+        config: The path of the DeepLabCut project configuration file.
+        shuffle: The shuffle index whose trained model is analyzed.
+        snapshot_index: The requested pose snapshot index, or None for the project default.
+        detector_snapshot_index: The requested detector snapshot index, or None for the project default.
+        batch_size: The requested pose-model batch size, or None to use the project default.
+
+    Returns:
+        The resolved plan carrying the scorer string, configurations, and metadata inputs.
+    """
+    loader = DLCLoader(str(config), shuffle=shuffle)
+    train_fraction = loader.project_cfg["TrainingFraction"][0]
+    pose_cfg = read_plainconfig(loader.model_folder.parent / "test" / "pose_cfg.yaml")
+    resolved_snapshot_index, _detector_index = dlc_apis_utils.parse_snapshot_index_for_analysis(
+        cfg=loader.project_cfg,
+        model_cfg=loader.model_cfg,
+        snapshot_index=snapshot_index,
+        detector_snapshot_index=detector_snapshot_index,
+    )
+    snapshot = dlc_apis_utils.get_model_snapshots(
+        index=resolved_snapshot_index, model_folder=loader.model_folder, task=loader.pose_task
+    )[0]
+    resolved_batch_size = batch_size if batch_size is not None else loader.project_cfg.get("batch_size", 1)
+    return _AnalysisPlan(
+        scorer=loader.scorer(snapshot=snapshot, detector_snapshot=None),
+        project_cfg=loader.project_cfg,
+        model_cfg=loader.model_cfg,
+        pose_cfg=pose_cfg,
+        train_fraction=train_fraction,
+        batch_size=resolved_batch_size,
+        multi_animal=loader.project_cfg["multianimalproject"],
+        pose_task=loader.pose_task,
+    )
+
+
+def _run_chunk_worker(slot: _Slot, launch: _InferenceLaunch) -> None:
+    """Runs one worker slot for a chunked run, analyzing frame-range chunks pulled from the queue until it is drained.
+
+    The worker builds its pose runner once, inside the runner-builder patch so it inherits the profile's precision and
+    memory-format optimizations, then reuses it for every chunk it pulls. A chunk carries a frame range rather than a
+    whole video, and the worker returns the chunk's raw predictions for the parent to stitch.
+
+    Args:
+        slot: The device and optional CPU-core placement for this worker.
+        launch: The bundle of picklable per-run parameters shared by every worker process.
+    """
+    if slot.cores is not None and sys.platform != "darwin":
+        with contextlib.suppress(Exception):
+            psutil.Process().cpu_affinity(list(slot.cores))
+    apply_runtime_optimizations(launch.profile)
+
+    with patch_dlc_runner_builders(launch.profile):
+        runner = _build_pose_runner(slot=slot, launch=launch)
+        while True:
+            item = launch.video_queue.get()
+            if item is None:
+                break
+            _analyze_one_chunk(runner=runner, launch=launch, item=item)
+
+
+def _build_pose_runner(slot: _Slot, launch: _InferenceLaunch) -> Any:
+    """Builds the DeepLabCut pose-inference runner one chunk worker reuses for every chunk it analyzes.
+
+    It resolves the model configuration and snapshot the same way ``analyze_videos`` does, then builds the runner
+    through the patched ``get_pose_inference_runner`` so the runner-builder patch applies the profile's optimizations.
+    The runner is crop-independent, so one instance serves every chunk of every video the worker handles.
+
+    Args:
+        slot: The device placement for this worker, whose device the runner is built on.
+        launch: The bundle of picklable per-run parameters carrying the config, shuffle, snapshot, and batch size.
+
+    Returns:
+        The DeepLabCut pose-inference runner to analyze this worker's chunks with.
+    """
+    loader = DLCLoader(str(launch.config), shuffle=launch.shuffle)
+    model_cfg = loader.model_cfg
+    resolved_snapshot_index, _detector_index = dlc_apis_utils.parse_snapshot_index_for_analysis(
+        cfg=loader.project_cfg,
+        model_cfg=model_cfg,
+        snapshot_index=launch.snapshot_index,
+        detector_snapshot_index=launch.detector_snapshot_index,
+    )
+    snapshot = dlc_apis_utils.get_model_snapshots(
+        index=resolved_snapshot_index, model_folder=loader.model_folder, task=loader.pose_task
+    )[0]
+    batch_size = launch.batch_size if launch.batch_size is not None else loader.project_cfg.get("batch_size", 1)
+    individuals = model_cfg["metadata"]["individuals"]
+    # Calls the builder through the apis-utils module so the active runner-builder patch, which replaces the module
+    # attribute, wraps the runner with the profile's precision and memory-format optimizations.
+    return dlc_apis_utils.get_pose_inference_runner(
+        model_config=model_cfg,
+        snapshot_path=snapshot.path,
+        device=slot.device,
+        max_individuals=len(individuals),
+        batch_size=batch_size,
+        inference_cfg=_STOCK_ACCELERATION_DISABLED,
+    )
+
+
+class _BoundedVideoIterator(VideoIterator):
+    """Iterates exactly the frames ``[frame_start, frame_end)`` of a video for a single chunk worker.
+
+    It seeks to the chunk's first frame on each pass and stops after emitting the chunk's frame count, so a worker
+    decodes only its own range instead of the whole video. Seeking relies on frame-accurate ``CAP_PROP_POS_FRAMES``
+    positioning, which the acquisition videos support.
+    """
+
+    def __init__(self, video_path: str, *, frame_start: int, frame_end: int, cropping: list[int] | None = None) -> None:
+        """Opens the video and records the half-open frame range this iterator emits.
+
+        Args:
+            video_path: The path of the video to read frames from.
+            frame_start: The inclusive index of the first frame to emit.
+            frame_end: The exclusive index one past the last frame to emit.
+            cropping: The ``[x1, x2, y1, y2]`` region to crop each frame to, or None to emit the full frame.
+        """
+        super().__init__(video_path, cropping=cropping)
+        self._frame_start = frame_start
+        self._frame_end = frame_end
+        self._emitted = 0
+
+    def __iter__(self) -> "_BoundedVideoIterator":
+        """Seeks to the chunk's first frame and resets the emitted-frame counter for a fresh pass."""
+        self.set_to_frame(self._frame_start)
+        self._index = 0
+        self._emitted = 0
+        return self
+
+    def __next__(self) -> NDArray[np.uint8]:
+        """Returns the next frame in the chunk range, stopping once the range is exhausted or the video ends."""
+        if self._emitted >= self._frame_end - self._frame_start:
+            raise StopIteration
+        frame = self.read_frame(crop=self._crop)
+        if frame is None:
+            raise StopIteration
+        self._emitted += 1
+        self._index += 1
+        return frame.copy()
+
+    def get_n_frames(self, *, robust: bool = False) -> int:  # noqa: ARG002 - a chunk's count is its range length.
+        """Returns the chunk's frame count, keeping the whole-video frame-count mismatch warning silent.
+
+        Args:
+            robust: Ignored, since a chunk's frame count is exactly its range length regardless of a robust recount.
+
+        Returns:
+            The number of frames in this chunk's range.
+        """
+        return self._frame_end - self._frame_start
+
+
+def _analyze_one_chunk(runner: Any, launch: _InferenceLaunch, item: _ChunkItem) -> None:
+    """Analyzes one frame-range chunk and reports its raw predictions and progress to the parent.
+
+    Args:
+        runner: The pose-inference runner this worker reuses across chunks.
+        launch: The bundle of picklable per-run parameters.
+        item: The chunk work item describing the video, its frame range, and its crop.
+    """
+    original_tqdm = dlc_videos.tqdm
+    if launch.display_progress:
+        dlc_videos.tqdm = make_progress_reporter(
+            progress_queue=launch.progress_queue,
+            video_index=item.task_id,
+            frame_total=item.frame_end - item.frame_start,
+        )
+    try:
+        with _suppress_stdout(active=launch.display_progress):
+            iterator = _BoundedVideoIterator(
+                item.video, frame_start=item.frame_start, frame_end=item.frame_end, cropping=item.crop
+            )
+            predictions = video_inference(video=iterator, pose_runner=runner)
+        expected_frames = item.frame_end - item.frame_start
+        if len(predictions) != expected_frames:
+            # A short read leaves a non-final chunk's predictions misaligned once concatenated, so this reports the
+            # chunk as failed rather than silently shifting every later frame of the video into the wrong row.
+            error_message = (
+                f"chunk {item.chunk_index} covers {expected_frames} frames but decoded {len(predictions)}, so its "
+                f"predictions cannot be stitched in frame order"
+            )
+            launch.results_queue.put((item.task_id, item.video_index, item.chunk_index, None, error_message))
+        else:
+            launch.results_queue.put((item.task_id, item.video_index, item.chunk_index, predictions, None))
+    except Exception as error:  # noqa: BLE001 - report the per-chunk failure and keep draining the queue.
+        launch.results_queue.put(
+            (item.task_id, item.video_index, item.chunk_index, None, f"{type(error).__name__}: {error}")
+        )
+    finally:
+        dlc_videos.tqdm = original_tqdm
+        if launch.display_progress:
+            with contextlib.suppress(Exception):
+                launch.progress_queue.put(("done", item.task_id))
+
+
+def _collect_chunk_results(
+    results_queue: Any,
+    video_paths: list[Path],
+    work_items: list[_ChunkItem],
+    plan: _AnalysisPlan,
+) -> tuple[dict[int, Path], list[tuple[str, str]]]:
+    """Gathers per-chunk predictions, then stitches each video's chunks into one prediction file in the parent.
+
+    A video succeeds only when every one of its chunks reports without error. Its chunk predictions are concatenated in
+    ascending frame order and written as the single prediction file the whole-video path would have produced.
+
+    Args:
+        results_queue: The shared queue workers report per-chunk predictions to.
+        video_paths: The submitted videos, used to name failures and locate each video's output.
+        work_items: The dispatched chunk work items, used to group results by video and order them by frame.
+        plan: The resolved project configuration used to assemble each video's output files.
+
+    Returns:
+        A tuple of the written outputs keyed by video index and the list of failures as (video-name, error) pairs.
+    """
+    gathered: dict[int, tuple[Any, str | None]] = {}
+    for _ in work_items:
+        try:
+            task_id, _video_index, _chunk_index, predictions, error = results_queue.get(
+                timeout=_RESULT_POLL_TIMEOUT_SECONDS
+            )
+        except Exception:  # noqa: BLE001 - a missing result means a worker died. Report the affected videos below.
+            break
+        gathered[task_id] = (predictions, error)
+
+    items_by_video: dict[int, list[_ChunkItem]] = defaultdict(list)
+    for item in work_items:
+        items_by_video[item.video_index].append(item)
+
+    outputs: dict[int, Path] = {}
+    failures: list[tuple[str, str]] = []
+    for video_index, items in items_by_video.items():
+        name = video_paths[video_index].name
+        present = [gathered.get(item.task_id) for item in items]
+        reported = [result for result in present if result is not None]
+        if len(reported) != len(items):
+            failures.append((name, "a chunk worker exited before reporting a result"))
+            continue
+        error = next((chunk_error for _predictions, chunk_error in reported if chunk_error is not None), None)
+        if error is not None:
+            failures.append((name, error))
+            continue
+        predictions = []
+        for chunk_item in sorted(items, key=lambda queued: queued.chunk_index):
+            chunk_predictions, _chunk_error = gathered[chunk_item.task_id]
+            predictions.extend(chunk_predictions)
+        try:
+            outputs[video_index] = _stitch_and_write(
+                plan=plan,
+                video=str(video_paths[video_index]),
+                destination=items[0].destination,
+                crop=items[0].crop,
+                predictions=predictions,
+            )
+        except Exception as stitch_error:  # noqa: BLE001 - a stitch or write failure fails just this video.
+            failures.append((name, f"{type(stitch_error).__name__}: {stitch_error}"))
+    return outputs, failures
+
+
+def _stitch_and_write(
+    plan: _AnalysisPlan,
+    video: str,
+    destination: str | None,
+    crop: list[int] | None,
+    predictions: list[Any],
+) -> Path:
+    """Writes one video's stitched predictions as the prediction files the whole-video path would have produced.
+
+    It reproduces the single-animal output of ``analyze_videos``, writing the ``_meta.pickle``, the ``_full.pickle``,
+    and the native ``.h5`` prediction table from the concatenated per-chunk predictions, into the video's directory or
+    the configured output directory.
+
+    Args:
+        plan: The resolved project configuration carrying the scorer string and model configurations.
+        video: The path of the analyzed video, whose stem names the output files.
+        destination: The directory to write the prediction files to, or None to write beside the video.
+        crop: The ``[x1, x2, y1, y2]`` region the video was analyzed at, or None for the full frame.
+        predictions: The video's per-frame predictions concatenated in frame order.
+
+    Returns:
+        The path of the written ``.h5`` prediction file.
+    """
+    output_directory = Path(destination) if destination is not None else Path(video).parent
+    output_directory.mkdir(parents=True, exist_ok=True)
+    output_prefix = Path(video).stem + plan.scorer
+
+    metadata_video = VideoIterator(video, cropping=crop)
+    metadata = _generate_metadata(
+        cfg=plan.project_cfg,
+        pytorch_config=plan.model_cfg,
+        dlc_scorer=plan.scorer,
+        train_fraction=plan.train_fraction,
+        batch_size=plan.batch_size,
+        cropping=crop,
+        runtime=(0.0, 0.0),
+        video=metadata_video,
+    )
+    with (output_directory / f"{output_prefix}_meta.pickle").open("wb") as handle:
+        pickle.dump(metadata, handle, pickle.HIGHEST_PROTOCOL)
+
+    output_data = _generate_output_data(pose_config=plan.pose_cfg, predictions=predictions)
+    with (output_directory / f"{output_prefix}_full.pickle").open("wb") as handle:
+        pickle.dump(output_data, handle, pickle.HIGHEST_PROTOCOL)
+
+    create_df_from_prediction(
+        predictions=predictions,
+        dlc_scorer=plan.scorer,
+        multi_animal=plan.multi_animal,
+        model_cfg=plan.model_cfg,
+        output_path=output_directory,
+        output_prefix=output_prefix,
+        save_as_csv=False,
+    )
+    return output_directory / f"{output_prefix}.h5"

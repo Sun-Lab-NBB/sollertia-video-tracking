@@ -126,6 +126,17 @@ _CROP_FIELD_COUNT: int = 4
     "default of one process (one video) per GPU.",
 )
 @click.option(
+    "-ch",
+    "--chunks",
+    type=int,
+    default=1,
+    show_default=True,
+    help="The number of contiguous frame-range pieces each running video is split into, all analyzed concurrently. "
+    "Raise it to run several frame ranges of one video at once, filling decode gaps within a single video, so total "
+    "per-GPU concurrency becomes gpu-processes x chunks. Set to 1 to analyze each video as a single unbroken frame "
+    "range.",
+)
+@click.option(
     "-cw",
     "--cpu-workers",
     type=int,
@@ -210,6 +221,7 @@ def infer_command(
     device: str,
     gpus: str | None,
     gpu_processes: int,
+    chunks: int,
     cpu_workers: int,
     cpu_threads_per_worker: int,
     amp: str,
@@ -224,9 +236,11 @@ def infer_command(
 
     ``--config-path`` names the DeepLabCut project's config.yaml whose trained model runs. Provide the videos to analyze
     with ``--videos`` (given several times for several files), or omit ``--videos`` to analyze every existing video
-    registered in the project configuration. Each worker analyzes whole videos pulled from a shared queue, so the work
-    is balanced without splitting any video. Each forward pass runs with the mixed precision and memory format chosen
-    for the detected hardware, except conditional-top-down models, which run at stock precision. Each video's
+    registered in the project configuration. Each worker pulls work from a shared queue, so the work is balanced across
+    slots. By default a worker analyzes a whole video, and ``--chunks`` instead splits each running video into that many
+    contiguous frame ranges analyzed concurrently, with the parent stitching each video's ranges back into one
+    prediction file. Each forward pass runs with the mixed precision and memory format chosen for the detected
+    hardware, except conditional-top-down models, which run at stock precision. Each video's
     predictions are written as DeepLabCut's native ``.h5`` prediction file, beside the video or into an ``--output``
     directory (one shared directory, or one per video). Pass ``--crop`` to analyze a chosen region rather than the
     project's configured crop, which lets de-novo videos that are not registered in the project be analyzed. The same
@@ -239,6 +253,12 @@ def infer_command(
             f"Unable to parse the --gpus value. Expected comma-separated GPU indices such as '0,1', but got '{gpus}'."
         )
         raise click.ClickException(message=message) from error
+
+    if chunks < 1:
+        message = (
+            f"Unable to use the --chunks value '{chunks}'. Expected a positive whole number of frame-range pieces."
+        )
+        raise click.UsageError(message=message)
 
     whole_project = not videos
     resolved_videos: list[Path] = list(resolve_project_videos(config_path)) if whole_project else list(videos)
@@ -277,6 +297,7 @@ def infer_command(
             channels_last=Toggle(channels_last),
             torch_compile=Toggle(compile_model),
             gpu_processes=gpu_processes,
+            chunks=chunks,
             cpu_workers=cpu_workers,
             cpu_threads_per_worker=cpu_threads_per_worker,
             fixed_input_size=fixed_input_size,

@@ -68,9 +68,11 @@ class AggregateBar(LiveBar):
 
     Attributes:
         _total_video_count: The total number of videos in the run.
-        _frame_totals: The mapping of video index to the number of frames that video contributes to the bar.
-        _grand_frame_total: The sum of all per-video frame totals, clamped to at least one.
-        _frames: The mapping of video index to the most recent frame count reported for that video.
+        _frame_totals: The mapping of work-unit key to the number of frames that unit contributes to the bar.
+        _grand_frame_total: The sum of all per-unit frame totals, clamped to at least one.
+        _frames: The mapping of work-unit key to the most recent frame count reported for that unit.
+        _key_video: The mapping of work-unit key to the video index it belongs to, so chunk completions roll up.
+        _video_remaining: The mapping of video index to the number of its work units that have not yet finished.
         _videos_done: The number of videos that have finished.
     """
 
@@ -81,15 +83,20 @@ class AggregateBar(LiveBar):
         frame_totals: dict[int, int],
         preparing_label: str = "preparing...",
         stream: TextIO | None = None,
+        *,
+        key_video: dict[int, int] | None = None,
     ) -> None:
-        """Initializes the renderer thread over the given per-video frame totals.
+        """Initializes the renderer thread over the given per-work-unit frame totals.
 
         Args:
             progress_queue: The shared queue the workers stream progress and completion messages to.
             total_video_count: The total number of videos in the run.
-            frame_totals: The mapping of video index to the number of frames that video contributes to the bar.
+            frame_totals: The mapping of work-unit key to the number of frames that unit contributes to the bar.
             preparing_label: The warm-up text shown before the first worker begins decoding.
             stream: The output stream to render to, defaulting to the standard error stream.
+            key_video: The mapping of work-unit key to the video index it belongs to, or None when each key is its own
+                video. Chunked inference passes one entry per frame-range chunk so a video is marked done only once all
+                its chunks finish.
         """
         super().__init__(
             progress_queue=progress_queue,
@@ -100,6 +107,13 @@ class AggregateBar(LiveBar):
         self._frame_totals = frame_totals
         self._grand_frame_total = max(1, sum(frame_totals.values()))
         self._frames: dict[int, int] = {}
+        # Each frame-total key is one unit of work: a whole video, or one contiguous chunk of a video when inference
+        # splits videos into parallel frame ranges. The identity fallback makes every key its own video, preserving the
+        # one-producer-per-video behavior used by frame extraction and unchunked inference.
+        self._key_video: dict[int, int] = key_video if key_video is not None else {key: key for key in frame_totals}
+        self._video_remaining: dict[int, int] = {}
+        for video in self._key_video.values():
+            self._video_remaining[video] = self._video_remaining.get(video, 0) + 1
         self._videos_done = 0
 
     def __repr__(self) -> str:
@@ -110,23 +124,27 @@ class AggregateBar(LiveBar):
         )
 
     def _ingest(self, message: Any) -> bool:
-        """Merges one ``progress`` or ``done`` message into the retained per-video frame counts.
+        """Merges one ``progress`` or ``done`` message into the retained per-work-unit frame counts.
 
         Args:
-            message: A ``("progress", video_index, count)`` or ``("done", video_index)`` message.
+            message: A ``("progress", key, count)`` or ``("done", key)`` message, where ``key`` identifies a work unit
+                (a whole video, or one frame-range chunk of a video).
 
         Returns:
             True for a ``done`` message so the completion is drawn immediately, False otherwise.
         """
         kind = message[0]
         if kind == "progress":
-            _, video_index, count = message
-            self._frames[video_index] = count
+            _, key, count = message
+            self._frames[key] = count
             return False
         if kind == "done":
-            _, video_index = message
-            self._frames[video_index] = self._frame_totals.get(video_index, 0)
-            self._videos_done += 1
+            _, key = message
+            self._frames[key] = self._frame_totals.get(key, 0)
+            video = self._key_video.get(key, key)
+            self._video_remaining[video] = self._video_remaining.get(video, 1) - 1
+            if self._video_remaining[video] == 0:
+                self._videos_done += 1
             return True
         return False
 
@@ -159,9 +177,10 @@ class AggregateBar(LiveBar):
         """
         frames_read = min(sum(self._frames.values()), self._grand_frame_total)
         bar, percent = self._bar(fraction=frames_read / self._grand_frame_total)
-        # Videos that have announced their decode but are not yet done are actively working; surfacing the count tells
-        # the operator work is in flight even while the aggregate frame count holds steady.
-        active = max(0, len(self._frames) - self._videos_done)
+        # Videos that have announced their decode but are not yet done are actively working, so surfacing the count
+        # tells the operator work is in flight even while the aggregate frame count holds steady. Distinct videos are
+        # counted rather than chunk keys, so a chunked video reports as one decoding video, not several.
+        active = max(0, len({self._key_video.get(key, key) for key in self._frames}) - self._videos_done)
         eta = self._eta(done=frames_read, total=self._grand_frame_total, elapsed=elapsed)
         return (
             f"[{bar}] {percent:5.1f}% | {self._videos_done}/{self._total_video_count} videos "

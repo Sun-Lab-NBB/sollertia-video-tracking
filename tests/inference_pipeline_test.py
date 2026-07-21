@@ -13,6 +13,7 @@ import contextlib
 from collections import deque
 
 import cv2
+import numpy as np
 import torch
 import pytest
 
@@ -26,6 +27,7 @@ def make_profile(**overrides):
         "device": "cpu",
         "gpus": (),
         "gpu_processes": 0,
+        "chunks": 1,
         "cpu_workers": 1,
         "cpu_threads_per_worker": 8,
         "amp_dtype": None,
@@ -845,3 +847,180 @@ def test_run_inference_partial_failure_no_overrides(monkeypatch, tmp_path):
     assert len(summary.failures) == 1
     assert summary.failures[0][0] == "b.mp4"
     assert manager.shutdown_called is True
+
+
+# _partition_frame_ranges
+def test_partition_single_chunk_covers_whole_video():
+    """Verifies that a single chunk yields one range spanning the whole video."""
+    assert pipeline._partition_frame_ranges(total_frames=100, chunks=1) == [(0, 100)]
+
+
+def test_partition_chunks_below_one_collapse_to_whole():
+    """Verifies that a zero chunk count collapses to one whole-video range rather than producing no ranges."""
+    assert pipeline._partition_frame_ranges(total_frames=100, chunks=0) == [(0, 100)]
+
+
+def test_partition_even_split_is_exact():
+    """Verifies that an evenly divisible total splits into equal contiguous ranges."""
+    assert pipeline._partition_frame_ranges(total_frames=100, chunks=4) == [(0, 25), (25, 50), (50, 75), (75, 100)]
+
+
+def test_partition_remainder_goes_to_earliest_chunks():
+    """Verifies that an uneven split gives the extra frames to the earliest chunks."""
+    ranges = pipeline._partition_frame_ranges(total_frames=10, chunks=4)
+    assert ranges == [(0, 3), (3, 6), (6, 8), (8, 10)]
+    assert [end - start for start, end in ranges] == [3, 3, 2, 2]
+
+
+def test_partition_is_contiguous_gapless_and_exact():
+    """Verifies that the ranges are contiguous, gapless, non-empty, balanced, and exactly cover the whole video."""
+    total, chunks = 253, 7
+    ranges = pipeline._partition_frame_ranges(total_frames=total, chunks=chunks)
+    assert ranges[0][0] == 0
+    assert ranges[-1][1] == total
+    assert all(start < end for start, end in ranges)
+    assert all(ranges[index][1] == ranges[index + 1][0] for index in range(len(ranges) - 1))
+    assert sum(end - start for start, end in ranges) == total
+    assert max(end - start for start, end in ranges) - min(end - start for start, end in ranges) <= 1
+
+
+def test_partition_more_chunks_than_frames_caps_at_frame_count():
+    """Verifies that requesting more chunks than frames yields one single-frame range per frame, never an empty one."""
+    assert pipeline._partition_frame_ranges(total_frames=3, chunks=5) == [(0, 1), (1, 2), (2, 3)]
+
+
+def test_partition_single_frame_video():
+    """Verifies that a one-frame video yields a single unit range regardless of the requested chunk count."""
+    assert pipeline._partition_frame_ranges(total_frames=1, chunks=4) == [(0, 1)]
+
+
+# _BoundedVideoIterator
+def _write_identifiable_clip(path, *, frames, width=64, height=48):
+    """Writes a short clip whose every frame is a distinct solid gray level, for seek-accuracy checks.
+
+    Each frame is a solid level derived from its index, so a frame read by seeking can be matched against the same
+    frame read sequentially. The all-intra Motion JPEG codec is used so every frame is independently seekable, and the
+    test skips when the environment ships no usable encoder for it.
+
+    Args:
+        path: The path to write the clip to, using an AVI container the Motion JPEG codec supports.
+        frames: The number of frames to write, kept small so the per-frame level stays within one byte.
+        width: The frame width in pixels.
+        height: The frame height in pixels.
+    """
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), 30.0, (width, height))
+    if not writer.isOpened():
+        writer.release()
+        pytest.skip("no Motion JPEG encoder is available to build the seek-accuracy fixture")
+    for index in range(frames):
+        writer.write(np.full((height, width, 3), index * 5 % 256, dtype=np.uint8))
+    writer.release()
+
+
+def _sequential_frame_levels(clip) -> list[int]:
+    """Reads every frame of a clip sequentially, returning each frame's sampled level as the seek ground truth."""
+    capture = cv2.VideoCapture(str(clip))
+    levels: list[int] = []
+    while True:
+        read, frame = capture.read()
+        if not read:
+            break
+        levels.append(int(frame[0, 0, 0]))
+    capture.release()
+    return levels
+
+
+def test_bounded_iterator_reads_only_its_range(tmp_path):
+    """Verifies that a bounded iterator seeks to its start and emits exactly the frames a sequential read gives."""
+    clip = tmp_path / "clip.avi"
+    _write_identifiable_clip(clip, frames=50)
+    reference = _sequential_frame_levels(clip)
+    iterator = pipeline._BoundedVideoIterator(str(clip), frame_start=20, frame_end=35)
+    levels = [int(frame[0, 0, 0]) for frame in iterator]
+    assert levels == reference[20:35]
+    assert iterator.get_n_frames() == 15
+
+
+def test_bounded_iterator_partition_reassembles_whole_video(tmp_path):
+    """Verifies that reading every partition range by seek reproduces the whole-video frame sequence exactly."""
+    clip = tmp_path / "clip.avi"
+    total = 50
+    _write_identifiable_clip(clip, frames=total)
+    reference = _sequential_frame_levels(clip)
+    ranges = pipeline._partition_frame_ranges(total_frames=total, chunks=5)
+    stitched = [
+        int(frame[0, 0, 0])
+        for start, end in ranges
+        for frame in pipeline._BoundedVideoIterator(str(clip), frame_start=start, frame_end=end)
+    ]
+    assert stitched == reference[:total]
+
+
+# _collect_chunk_results
+def _chunk_item(task_id, video_index, chunk_index, video, frame_start, frame_end):
+    """Builds a _ChunkItem for the collector tests with the crop and destination left unset."""
+    return pipeline._ChunkItem(
+        task_id=task_id,
+        video_index=video_index,
+        chunk_index=chunk_index,
+        video=video,
+        frame_start=frame_start,
+        frame_end=frame_end,
+        crop=None,
+        destination=None,
+    )
+
+
+def test_collect_chunk_results_stitches_chunks_in_frame_order(monkeypatch):
+    """Verifies that per-chunk predictions are concatenated in ascending chunk order and written once per video."""
+    work_items = [
+        _chunk_item(0, 0, 0, "a.mp4", 0, 2),
+        _chunk_item(1, 0, 1, "a.mp4", 2, 4),
+        _chunk_item(2, 1, 0, "b.mp4", 0, 3),
+    ]
+    results_queue = _FakeQueue()
+    # Report out of arrival order to prove the collector orders by chunk index, not by which worker finished first.
+    results_queue.put((1, 0, 1, ["a2", "a3"], None))
+    results_queue.put((2, 1, 0, ["b0", "b1", "b2"], None))
+    results_queue.put((0, 0, 0, ["a0", "a1"], None))
+
+    stitched: dict[str, list] = {}
+
+    def fake_stitch(*, video, predictions, **_kwargs):
+        stitched[video] = list(predictions)
+        return Path(video).with_suffix(".h5")
+
+    monkeypatch.setattr(pipeline, "_stitch_and_write", fake_stitch)
+    outputs, failures = pipeline._collect_chunk_results(
+        results_queue=results_queue,
+        video_paths=[Path("a.mp4"), Path("b.mp4")],
+        work_items=work_items,
+        plan=None,
+    )
+    assert failures == []
+    assert stitched["a.mp4"] == ["a0", "a1", "a2", "a3"]
+    assert stitched["b.mp4"] == ["b0", "b1", "b2"]
+    assert outputs == {0: Path("a.h5"), 1: Path("b.h5")}
+
+
+def test_collect_chunk_results_reports_failed_chunk(monkeypatch):
+    """Verifies that a video with any errored chunk is failed and never stitched, while other videos still write."""
+    work_items = [
+        _chunk_item(0, 0, 0, "a.mp4", 0, 2),
+        _chunk_item(1, 0, 1, "a.mp4", 2, 4),
+        _chunk_item(2, 1, 0, "b.mp4", 0, 2),
+    ]
+    results_queue = _FakeQueue()
+    results_queue.put((0, 0, 0, ["a0", "a1"], None))
+    results_queue.put((1, 0, 1, None, "RuntimeError: boom"))
+    results_queue.put((2, 1, 0, ["b0", "b1"], None))
+
+    monkeypatch.setattr(pipeline, "_stitch_and_write", lambda **kwargs: Path(kwargs["video"]).with_suffix(".h5"))
+    outputs, failures = pipeline._collect_chunk_results(
+        results_queue=results_queue,
+        video_paths=[Path("a.mp4"), Path("b.mp4")],
+        work_items=work_items,
+        plan=None,
+    )
+    assert outputs == {1: Path("b.h5")}
+    assert failures == [("a.mp4", "RuntimeError: boom")]
