@@ -635,6 +635,34 @@ def test_clear_video_iteration_outliers_keeps_labeled_and_drops_refinement(tmp_p
     assert not (directory / "MachineLabelsRefine.h5").exists()
 
 
+def test_clear_video_iteration_outliers_clears_placeholder_rows_and_keeps_annotated(tmp_path: Path) -> None:
+    """Verifies that an opened-but-unannotated outlier frame is cleared with its placeholder row, while an annotated
+    frame survives."""
+    directory = tmp_path / "labeled-data" / "video"
+    directory.mkdir(parents=True)
+    _write_labels(path=directory / "machinelabels-iter0.h5", names=["img0001.png", "img0002.png"])
+    # The labeling GUI reindexes CollectedData over every image in the directory on each save, so both outlier frames
+    # gained a row even though only img0002 was actually annotated.
+    _write_labels(
+        path=directory / "CollectedData_human.h5",
+        names=["img0001.png", "img0002.png"],
+        finite_names={"img0002.png"},
+    )
+    (directory / "img0001.png").write_bytes(b"")
+    (directory / "img0002.png").write_bytes(b"")
+
+    removed, had_refined = outlier_pipeline._clear_video_iteration_outliers(
+        directory=directory, iteration=0, scorer="human"
+    )
+
+    assert (removed, had_refined) == (1, False)
+    assert not (directory / "img0001.png").exists()  # A placeholder row is not an annotation.
+    assert (directory / "img0002.png").exists()
+    # The placeholder row for the cleared frame is dropped, so no label references a deleted image.
+    remaining = pd.read_hdf(path_or_buf=directory / "CollectedData_human.h5", key="df_with_missing")
+    assert [entry[-1] for entry in remaining.index] == ["img0002.png"]
+
+
 def test_clear_video_iteration_outliers_without_collected_data_removes_all(tmp_path: Path) -> None:
     """Verifies that with no human CollectedData table, every outlier frame is removed and no refinement is reported."""
     directory = tmp_path / "labeled-data" / "video"
@@ -964,10 +992,17 @@ def _write_config(tmp_path: Path) -> Path:
     return config_path
 
 
-def _write_labels(path: Path, names: list[str]) -> None:
-    """Writes a DeepLabCut-style label HDF table indexed by ``(labeled-data, video, image)`` rows."""
+def _write_labels(path: Path, names: list[str], *, finite_names: set[str] | None = None) -> None:
+    """Writes a DeepLabCut-style label HDF table indexed by ``(labeled-data, video, image)`` rows.
+
+    Frames listed in ``finite_names`` receive a finite coordinate, and every other frame receives an all-NaN
+    placeholder row, mirroring what the labeling GUI writes for opened-but-untouched frames.
+    """
+    if finite_names is None:
+        finite_names = set(names)
     index = pd.MultiIndex.from_tuples([("labeled-data", "video", name) for name in names])
-    pd.DataFrame({"x": [0.0] * len(names)}, index=index).to_hdf(path, key="df_with_missing")
+    coordinates = [0.0 if name in finite_names else np.nan for name in names]
+    pd.DataFrame({"x": coordinates}, index=index).to_hdf(path, key="df_with_missing")
 
 
 class _FakePool:

@@ -335,6 +335,35 @@ def machine_label_frame_names(directory: Path) -> set[str]:
     return names
 
 
+def drop_collected_data_rows(*, collected_data_path: Path, removed_frame_names: set[str]) -> None:
+    """Drops the label rows naming removed frames from a video's ``CollectedData`` tables so no label dangles.
+
+    The labeling GUI reindexes ``CollectedData`` to every image in the directory, so a removed frame may leave behind
+    an all-NaN row referencing an image that is no longer there. The bootstrap and outlier clearing paths both call
+    this after deleting frames, and both pass only frames carrying no finite coordinate, so no human annotation is
+    dropped. When the removal empties the table, its ``.h5`` and ``.csv`` files are deleted outright.
+
+    Args:
+        collected_data_path: The ``CollectedData_<scorer>.h5`` file to prune, alongside its ``.csv`` sibling.
+        removed_frame_names: The frame image names that were removed and must not remain in the label tables.
+    """
+    if not collected_data_path.is_file():
+        return
+    labels = pd.read_hdf(collected_data_path, key="df_with_missing")
+    row_frame_names = [entry[-1] if isinstance(entry, tuple) else Path(str(entry)).name for entry in labels.index]
+    keep_row_mask = [frame_name not in removed_frame_names for frame_name in row_frame_names]
+    if all(keep_row_mask):
+        return
+    remaining_labels = labels[keep_row_mask]
+    collected_data_csv_path = collected_data_path.with_suffix(".csv")
+    if remaining_labels.empty:
+        collected_data_path.unlink(missing_ok=True)
+        collected_data_csv_path.unlink(missing_ok=True)
+        return
+    remaining_labels.to_hdf(collected_data_path, key="df_with_missing", mode="w")
+    remaining_labels.to_csv(collected_data_csv_path)
+
+
 def has_outlier_refinement_data(directory: Path) -> bool:
     """Reports whether a video directory already holds outlier-refinement data from a prior ``extract outliers`` pass.
 

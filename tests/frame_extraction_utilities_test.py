@@ -18,6 +18,7 @@ from sollertia_video_tracking.frame_extraction.utilities import (
     extracted_frame_paths,
     frame_names_from_index,
     iter_pinned_extraction,
+    drop_collected_data_rows,
     normalize_project_config,
     select_registered_videos,
     ensure_unique_video_stems,
@@ -355,6 +356,47 @@ def test_machine_label_frame_names_empty_directory(tmp_path):
     directory = tmp_path / "empty"
     directory.mkdir()
     assert machine_label_frame_names(directory=directory) == set()
+
+
+# drop_collected_data_rows
+def test_drop_collected_data_rows_missing_file_is_noop(tmp_path):
+    """Verifies that dropping rows from an absent label table does nothing."""
+    drop_collected_data_rows(collected_data_path=tmp_path / "absent.h5", removed_frame_names={"img0000.png"})
+    assert not (tmp_path / "absent.h5").exists()
+
+
+def test_drop_collected_data_rows_keeps_all_when_none_removed(tmp_path):
+    """Verifies that when no row references a removed frame the table is left untouched."""
+    path = tmp_path / "CollectedData_tester.h5"
+    _write_label_table(path=path, frame_names=["img0000.png", "img0001.png"])
+    drop_collected_data_rows(collected_data_path=path, removed_frame_names={"img9999.png"})
+    assert len(pd.read_hdf(path_or_buf=path, key="df_with_missing")) == 2
+
+
+def test_drop_collected_data_rows_deletes_emptied_table(tmp_path):
+    """Verifies that dropping every remaining row deletes both the h5 and its csv sibling."""
+    path = tmp_path / "CollectedData_tester.h5"
+    csv_path = path.with_suffix(".csv")
+    _write_label_table(path=path, frame_names=["img0000.png", "img0001.png"], finite_names={"img0000.png"})
+    csv_path.write_text("placeholder csv\n")
+    drop_collected_data_rows(collected_data_path=path, removed_frame_names={"img0000.png", "img0001.png"})
+    assert not path.exists()
+    assert not csv_path.exists()
+
+
+def test_drop_collected_data_rows_flat_index_partial_removal(tmp_path):
+    """Verifies that a flat-string index row is parsed by file name, and the surviving rows are rewritten to h5 and
+    csv."""
+    path = tmp_path / "CollectedData_tester.h5"
+    frame = pd.DataFrame(
+        data={"x": [1.0, 2.0]},
+        index=pd.Index(["labeled-data/vid/img0000.png", "labeled-data/vid/img0001.png"]),
+    )
+    frame.to_hdf(path_or_buf=path, key="df_with_missing", mode="w")
+    drop_collected_data_rows(collected_data_path=path, removed_frame_names={"img0000.png"})
+    remaining = pd.read_hdf(path_or_buf=path, key="df_with_missing")
+    assert [Path(str(entry)).name for entry in remaining.index] == ["img0001.png"]
+    assert path.with_suffix(".csv").is_file()
 
 
 # has_outlier_refinement_data

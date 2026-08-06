@@ -27,7 +27,7 @@ from deeplabcut.pose_estimation_pytorch.apis.videos import (
     create_df_from_prediction,
 )
 
-from .runners import patch_dlc_runner_builders
+from .runners import patch_dlc_runner_builders, reset_inference_runner_queue
 from .optimization import InferenceProfile, apply_runtime_optimizations
 from ..frame_extraction import AggregateBar, plan_core_allocation, make_progress_reporter
 
@@ -339,7 +339,9 @@ def run_inference(
             display_progress=display_progress,
         )
 
-    totals = {index: _probe_frame_count(video) for index, video in enumerate(video_paths)}
+    # The whole-video path uses the header count for the progress bar alone, so an unreadable header falls back to a
+    # positive placeholder and the video's own failure is reported by the worker that tries to analyze it.
+    totals = {index: _probe_frame_count(video) or 1 for index, video in enumerate(video_paths)}
     slots = _build_slots(profile=profile, video_count=len(video_paths))
 
     # Resolves each video's crop once, in the parent, so every worker analyzes the same region the frames were extracted
@@ -609,21 +611,26 @@ def _usable_cpu_cores(profile: InferenceProfile) -> int:
     return min(physical, max(1, profile.cpu_workers) * threads)
 
 
-def _probe_frame_count(video: Path) -> int:
-    """Reads a video's frame count from its container header for the aggregate progress bar.
+def _probe_frame_count(video: Path) -> int | None:
+    """Reads a video's frame count from its container header.
+
+    A failure is reported as None rather than folded into a small count, because the two consumers need it differently.
+    The aggregate progress bar only needs a positive total and substitutes one, while a chunked run partitions this
+    count into the frame ranges its workers analyze, so accepting an unreadable header there would silently analyze one
+    frame and write a one-row prediction file that every later check accepts as complete.
 
     Args:
         video: The path of the video whose frame count is read.
 
     Returns:
-        The reported frame count, clamped to at least one so the progress bar always has a positive total.
+        The reported frame count, or None when the video cannot be opened or reports no frames.
     """
     capture = cv2.VideoCapture(str(video))
     try:
         frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT)) if capture.isOpened() else 0
     finally:
         capture.release()
-    return max(1, frames)
+    return frames if frames > 0 else None
 
 
 def _collect_results(
@@ -787,7 +794,8 @@ def _run_inference_chunked(
     ranges of one video run concurrently on a device. Each worker returns its raw per-frame predictions rather than
     writing a file. Once every chunk of a video reports, the parent concatenates the chunks in frame order and writes
     the single prediction file the whole-video path would have written, preserving the beside-the-video or ``--output``
-    destination.
+    destination. A video whose container header yields no usable frame count is failed rather than split, because the
+    range partition that count drives would otherwise reduce the whole video to one frame.
 
     Args:
         config: The path of the DeepLabCut project configuration file.
@@ -826,13 +834,25 @@ def _run_inference_chunked(
         raise ValueError(message)
 
     project_config = read_config(str(config))
-    totals = {index: _probe_frame_count(video) for index, video in enumerate(video_paths)}
+    # A chunked run partitions the header's frame count into the ranges its workers analyze, so a video whose header
+    # cannot be read is failed here rather than split. Splitting it would yield one single-frame range whose prediction
+    # count matches its range exactly, so every later check would accept a one-row prediction file as a complete run.
+    totals: dict[int, int] = {}
+    unreadable_videos: list[tuple[str, str]] = []
+    for index, video in enumerate(video_paths):
+        frame_count = _probe_frame_count(video)
+        if frame_count is None:
+            unreadable_videos.append((video.name, "the frame count could not be read from the container header"))
+        else:
+            totals[index] = frame_count
 
     work_items: list[_ChunkItem] = []
     chunk_frame_totals: dict[int, int] = {}
     key_video: dict[int, int] = {}
     task_id = 0
     for index, video in enumerate(video_paths):
+        if index not in totals:
+            continue
         if crop_override is not None:
             crop: list[int] | None = list(crop_override[index])
         else:
@@ -895,15 +915,16 @@ def _run_inference_chunked(
     context = mp.get_context("spawn")
     processes = [context.Process(target=_run_chunk_worker, args=(slot, launch)) for slot in slots]
     outputs: dict[int, Path] = {}
-    failures: list[tuple[str, str]] = []
+    failures: list[tuple[str, str]] = list(unreadable_videos)
     try:
         for process in processes:
             process.start()
         for process in processes:
             process.join()
-        outputs, failures = _collect_chunk_results(
+        outputs, chunk_failures = _collect_chunk_results(
             results_queue=results_queue, video_paths=video_paths, work_items=work_items, plan=plan
         )
+        failures.extend(chunk_failures)
     finally:
         if bar is not None:
             bar.stop()
@@ -1124,6 +1145,9 @@ def _analyze_one_chunk(runner: Any, launch: _InferenceLaunch, item: _ChunkItem) 
         else:
             launch.results_queue.put((item.task_id, item.video_index, item.chunk_index, predictions, None))
     except Exception as error:
+        # A chunk that raised inside the forward pass can leave already-preprocessed batches in the runner's queue,
+        # which the next chunk this worker takes would consume as its own and report with a matching frame count.
+        reset_inference_runner_queue(runner=runner)
         launch.results_queue.put(
             (item.task_id, item.video_index, item.chunk_index, None, f"{type(error).__name__}: {error}")
         )

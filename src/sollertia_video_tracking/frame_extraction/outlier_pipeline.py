@@ -23,9 +23,11 @@ from .utilities import (
     extracted_frame_paths,
     frame_names_from_index,
     iter_pinned_extraction,
+    drop_collected_data_rows,
     normalize_project_config,
     select_registered_videos,
     ensure_unique_video_stems,
+    finite_labeled_frame_names,
     prune_empty_labeled_data_directories,
 )
 from .frame_reading import make_fast_kmeans_selector
@@ -182,7 +184,9 @@ def extract_outlier_frames_parallel(
         refinement iteration's already-extracted outlier frames for the selected videos so they are replaced instead of
         added to, and ``reset`` discards the iteration's outlier frames across every project video for a clean slate.
         Both clear only this iteration's freshly extracted outlier frames (those recorded in the iteration's machine
-        labels) and preserve every frame already carried in the human ``CollectedData`` labels.
+        labels) and preserve every frame the human has annotated with a finite ``CollectedData`` coordinate. A frame the
+        labeling GUI only reindexed, leaving an all-NaN placeholder row, holds no annotation and is cleared with the
+        rest, matching how ``summarize_refinement_status`` decides whether a machine frame has been refined.
 
         Empty ``labeled-data`` directories left by videos that were registered but never extracted are removed after
         every run, so the labeling GUI shows only the videos that have frames.
@@ -226,12 +230,12 @@ def extract_outlier_frames_parallel(
         overwrite: Determines whether to re-extract the videos this run refines, first discarding this refinement
             iteration's already-extracted outlier frames for those videos, along with their machine labels and any
             manual refinement of them, so the frames are replaced rather than added to. Other videos' outlier frames are
-            left intact, and every frame already carried in the human ``CollectedData`` labels is preserved. Mutually
-            exclusive with ``reset``.
+            left intact, and every frame the human has annotated with a finite ``CollectedData`` coordinate is
+            preserved. Mutually exclusive with ``reset``.
         reset: Determines whether to discard this refinement iteration's extracted outlier frames across every project
             video, along with their machine labels and any manual refinement, before re-extracting the selected videos,
-            giving the whole iteration a clean slate. Every frame already carried in the human ``CollectedData`` labels
-            is preserved. Mutually exclusive with ``overwrite``.
+            giving the whole iteration a clean slate. Every frame the human has annotated with a finite
+            ``CollectedData`` coordinate is preserved. Mutually exclusive with ``overwrite``.
         display_progress: Determines whether to render the run header and the aggregate progress bar.
 
     Returns:
@@ -946,9 +950,9 @@ def _clear_iteration_outliers(
 
     Outlier frames are written into the same ``labeled-data/<stem>`` directories as the human-labeled training frames,
     so clearing cannot simply delete the images. Only the frames this iteration extracted as outliers, recorded in the
-    iteration's ``machinelabels-iter<N>`` bookkeeping, are removed, and any of those that already appear in the human
-    ``CollectedData`` labels are kept. ``reset`` wipes every project video's outlier set for the iteration, whereas
-    ``overwrite`` (``reset`` False) wipes only the videos this run re-extracts, leaving the rest intact.
+    iteration's ``machinelabels-iter<N>`` bookkeeping, are removed, and any of those the human has annotated with a
+    finite ``CollectedData`` coordinate are kept. ``reset`` wipes every project video's outlier set for the iteration,
+    whereas ``overwrite`` (``reset`` False) wipes only the videos this run re-extracts, leaving the rest intact.
 
     Args:
         config_path: The resolved project config.yaml path, whose parent holds the ``labeled-data`` tree.
@@ -1003,17 +1007,20 @@ def _clear_iteration_outliers(
 
 
 def _clear_video_iteration_outliers(*, directory: Path, iteration: int, scorer: str) -> tuple[int, bool]:
-    """Removes one video directory's outlier frames for a refinement iteration, keeping any already-labeled frames.
+    """Removes one video directory's outlier frames for a refinement iteration, keeping the human-annotated ones.
 
     The iteration's ``machinelabels-iter<N>.h5`` records exactly the frames extracted as outliers this iteration, keyed
-    by their ``imgNNNN.png`` names. Those frames are deleted, except any that also appear in the human
-    ``CollectedData`` labels, along with the iteration's machine-label bookkeeping and any manual refinement of it, so
-    re-extraction rebuilds the set from scratch without orphaning either images or labels.
+    by their ``imgNNNN.png`` names. Those frames are deleted, except any the human has annotated with a finite
+    ``CollectedData`` coordinate, along with the iteration's machine-label bookkeeping and any manual refinement of it,
+    so re-extraction rebuilds the set from scratch without orphaning either images or labels. A frame the labeling GUI
+    merely reindexed, leaving an all-NaN placeholder row, carries no annotation, so it is removed and its placeholder
+    row is dropped with it. This matches the finite-coordinate rule the bootstrap clearing and the refinement-status
+    scan already apply, so all three agree on which frames count as human work.
 
     Args:
         directory: The ``labeled-data/<stem>`` directory whose iteration outlier frames are cleared.
         iteration: The refinement iteration whose machine-label record names the frames to remove.
-        scorer: The human scorer naming the ``CollectedData`` labels whose frames are preserved.
+        scorer: The human scorer naming the ``CollectedData`` labels whose annotated frames are preserved.
 
     Returns:
         A tuple of the number of frames removed and whether a manual ``MachineLabelsRefine`` file was discarded.
@@ -1023,19 +1030,21 @@ def _clear_video_iteration_outliers(*, directory: Path, iteration: int, scorer: 
         return 0, False
 
     outlier_frame_names = frame_names_from_index(pd.read_hdf(machine_labels_path, key="df_with_missing").index)
-    labeled_frame_names: set[str] = set()
     collected_data_path = directory / f"CollectedData_{scorer}.h5"
-    if scorer and collected_data_path.is_file():
-        labeled_frame_names = frame_names_from_index(pd.read_hdf(collected_data_path, key="df_with_missing").index)
+    labeled_frame_names: set[str] = finite_labeled_frame_names(collected_data_path) if scorer else set()
 
+    removed_frame_names = outlier_frame_names - labeled_frame_names
     removed_count = 0
-    for frame_name in outlier_frame_names - labeled_frame_names:
+    for frame_name in removed_frame_names:
         frame_path = directory / frame_name
         if frame_path.is_file():
             frame_path.unlink()
             removed_count += 1
         # Drops the prediction overlay saved beside the frame when --save-labeled was used, so it never orphans.
         (directory / f"{Path(frame_name).stem}labeled.png").unlink(missing_ok=True)
+    # A removed frame the GUI had reindexed still holds an all-NaN row, which would otherwise reference an image that
+    # is no longer on disk.
+    drop_collected_data_rows(collected_data_path=collected_data_path, removed_frame_names=removed_frame_names)
 
     machine_labels_path.unlink(missing_ok=True)
     (directory / "machinelabels.csv").unlink(missing_ok=True)

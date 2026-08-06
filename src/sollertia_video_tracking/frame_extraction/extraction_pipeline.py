@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
 
 import cv2
-import pandas as pd
 import deeplabcut
 import deeplabcut.utils.frameselectiontools as frame_selection_tools
 
@@ -19,6 +18,7 @@ from .progress import make_progress_reporter
 from .utilities import (
     extracted_frame_paths,
     iter_pinned_extraction,
+    drop_collected_data_rows,
     normalize_project_config,
     select_registered_videos,
     ensure_unique_video_stems,
@@ -668,37 +668,8 @@ def _clear_bare_frames_in_directory(*, directory: Path, scorer: str) -> int:
         # A bare frame never has an overlay, but --save-labeled overlays from any earlier run are dropped defensively.
         (directory / f"{Path(frame_name).stem}labeled.png").unlink(missing_ok=True)
     if bare_frame_names:
-        _drop_collected_data_rows(collected_data_path=collected_data_path, removed_frame_names=bare_frame_names)
+        drop_collected_data_rows(collected_data_path=collected_data_path, removed_frame_names=bare_frame_names)
     return len(bare_frame_names)
-
-
-def _drop_collected_data_rows(*, collected_data_path: Path, removed_frame_names: set[str]) -> None:
-    """Drops any placeholder label rows for cleared bare frames from a video's ``CollectedData`` tables.
-
-    The labeling GUI reindexes ``CollectedData`` to every image in the directory, so a cleared bare frame may leave
-    behind an all-NaN row referencing the deleted image. Those rows are removed here so no label dangles. When that
-    empties the table, its ``.h5`` and ``.csv`` files are deleted outright. Only bare (unlabeled) frames are ever passed
-    in, so no finite human label is dropped.
-
-    Args:
-        collected_data_path: The ``CollectedData_<scorer>.h5`` file to prune, alongside its ``.csv`` sibling.
-        removed_frame_names: The frame image names that were cleared and must not remain in the label tables.
-    """
-    if not collected_data_path.is_file():
-        return
-    labels = pd.read_hdf(collected_data_path, key="df_with_missing")
-    row_frame_names = [entry[-1] if isinstance(entry, tuple) else Path(str(entry)).name for entry in labels.index]
-    keep_row_mask = [frame_name not in removed_frame_names for frame_name in row_frame_names]
-    if all(keep_row_mask):
-        return
-    remaining_labels = labels[keep_row_mask]
-    collected_data_csv_path = collected_data_path.with_suffix(".csv")
-    if remaining_labels.empty:
-        collected_data_path.unlink(missing_ok=True)
-        collected_data_csv_path.unlink(missing_ok=True)
-        return
-    remaining_labels.to_hdf(collected_data_path, key="df_with_missing", mode="w")
-    remaining_labels.to_csv(collected_data_csv_path)
 
 
 def _count_clustering_frames(

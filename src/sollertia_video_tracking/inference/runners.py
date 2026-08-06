@@ -1,5 +1,6 @@
 """Provides wrappers optimizing DeepLabCut inference runners with mixed precision, channels-last, and torch.compile."""
 
+from queue import Queue
 from typing import Any
 import warnings
 from contextlib import AbstractContextManager, nullcontext, contextmanager
@@ -71,6 +72,29 @@ def patch_dlc_runner_builders(profile: InferenceProfile) -> Iterator[None]:
     finally:
         dlc_apis_utils.get_pose_inference_runner = original_pose
         dlc_apis_utils.get_detector_inference_runner = original_detector
+
+
+def reset_inference_runner_queue(runner: InferenceRunner) -> None:
+    """Replaces a runner's preprocessing queue so a failed unit of work cannot leak batches into the next one.
+
+    DeepLabCut builds ``_input_queue`` once per runner, and its asynchronous inference loop clears every other piece of
+    per-call state without draining that queue. A call that raises inside the forward pass therefore leaves up to
+    ``queue_length`` already-preprocessed batches behind. A worker reusing the runner consumes those first and returns
+    the right number of predictions for the wrong frames, which a per-call frame-count check cannot detect. Swapping in
+    an empty queue discards them, and it also strands a producer thread that outlived its join on a queue nobody reads.
+    A runner whose multithreading is disabled owns no such queue, so it is left untouched.
+
+    Notes:
+        This reaches into a private DeepLabCut attribute, so it must be re-verified against any new pinned release
+        alongside the runner-builder patch above.
+
+    Args:
+        runner: The inference runner to give a fresh preprocessing queue.
+    """
+    multithreading = runner.inference_cfg.multithreading
+    if not multithreading.enabled:
+        return
+    runner._input_queue = Queue(maxsize=multithreading.queue_length)  # noqa: SLF001 - documented private override.
 
 
 def _optimize_inference_runner(runner: InferenceRunner, profile: InferenceProfile) -> InferenceRunner:

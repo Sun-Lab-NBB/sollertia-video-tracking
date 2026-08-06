@@ -6,6 +6,7 @@ functions and ``torch.compile`` are monkeypatched. Every optimization path runs 
 tensors, so no GPU, network, or real model is required.
 """
 
+from queue import Queue
 from types import SimpleNamespace
 from contextlib import nullcontext
 
@@ -179,6 +180,34 @@ def _detector_items():
             "scores": torch.tensor([0.8, 0.7]),
         },
     ]
+
+
+# reset_inference_runner_queue
+def test_reset_runner_queue_replaces_a_populated_queue():
+    """Verifies that the runner receives a fresh empty queue, so batches left by a failed call cannot be consumed."""
+    runner = SimpleNamespace(
+        inference_cfg=SimpleNamespace(multithreading=SimpleNamespace(enabled=True, queue_length=4))
+    )
+    runner._input_queue = Queue(maxsize=4)
+    runner._input_queue.put("a batch preprocessed for the failed call")
+    stale_queue = runner._input_queue
+
+    runners.reset_inference_runner_queue(runner)
+
+    assert runner._input_queue is not stale_queue
+    assert runner._input_queue.empty()
+    assert runner._input_queue.maxsize == 4
+    # The abandoned queue keeps its contents, which is what strands a producer thread that outlived its join.
+    assert stale_queue.qsize() == 1
+
+
+def test_reset_runner_queue_leaves_a_single_threaded_runner_untouched():
+    """Verifies that a runner with multithreading disabled owns no preprocessing queue and is not given one."""
+    runner = SimpleNamespace(inference_cfg=SimpleNamespace(multithreading=SimpleNamespace(enabled=False)))
+
+    runners.reset_inference_runner_queue(runner)
+
+    assert not hasattr(runner, "_input_queue")
 
 
 # _optimize_inference_runner: dispatch and in-place enhancement

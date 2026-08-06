@@ -9,6 +9,7 @@ JPEG clip through real OpenCV, and skip when the environment ships no encoder fo
 
 import sys
 import queue
+from types import SimpleNamespace
 from pathlib import Path
 import contextlib
 from collections import deque
@@ -215,11 +216,18 @@ def test_probe_frame_count_ok(monkeypatch, tmp_path):
     assert pipeline._probe_frame_count(tmp_path / "v.mp4") == 7
 
 
-def test_probe_frame_count_not_opened_clamped(monkeypatch, tmp_path):
-    """Verifies that _probe_frame_count clamps a closed capture's frame count to at least one."""
+def test_probe_frame_count_not_opened_returns_none(monkeypatch, tmp_path):
+    """Verifies that _probe_frame_count reports an unreadable header as None rather than as a small frame count."""
     _install_capture(monkeypatch, lambda _p: _FakeCapture(opened=False, frames=99))
-    # A closed capture reports zero frames, clamped to at least one for the progress bar.
-    assert pipeline._probe_frame_count(tmp_path / "v.mp4") == 1
+    # None keeps the failure distinguishable from a genuine one-frame video, which a chunked run would otherwise split
+    # into a single range whose prediction count matches, hiding the failure behind a one-row prediction file.
+    assert pipeline._probe_frame_count(tmp_path / "v.mp4") is None
+
+
+def test_probe_frame_count_zero_frames_returns_none(monkeypatch, tmp_path):
+    """Verifies that an opened capture reporting no frames is also treated as unreadable."""
+    _install_capture(monkeypatch, lambda _p: _FakeCapture(frames=0))
+    assert pipeline._probe_frame_count(tmp_path / "v.mp4") is None
 
 
 # _parse_crop / _resolve_video_cropping
@@ -797,6 +805,48 @@ def test_bounded_iterator_partition_reassembles_whole_video(tmp_path):
         for frame in pipeline._BoundedVideoIterator(str(clip), frame_start=start, frame_end=end)
     ]
     assert stitched == reference[:total]
+
+
+# _analyze_one_chunk
+def test_analyze_one_chunk_resets_runner_queue_on_failure(monkeypatch):
+    """Verifies that a chunk failing inside inference discards the runner's already-preprocessed batches.
+
+    A worker reuses one runner across chunks, and DeepLabCut's asynchronous inference loop never drains the queue those
+    batches sit in, so leaving them would let the next chunk consume them as its own and report a matching frame count.
+    """
+    runner = SimpleNamespace(
+        inference_cfg=SimpleNamespace(multithreading=SimpleNamespace(enabled=True, queue_length=4))
+    )
+    runner._input_queue = queue.Queue(maxsize=4)
+    runner._input_queue.put("a batch preprocessed for this chunk")
+    poisoned_queue = runner._input_queue
+
+    monkeypatch.setattr(pipeline, "_BoundedVideoIterator", lambda *_args, **_kwargs: object())
+
+    def _fail(**_kwargs):
+        message = "CUDA out of memory"
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(pipeline, "video_inference", _fail)
+    launch = _make_launch()
+    item = pipeline._ChunkItem(
+        task_id=3,
+        video_index=0,
+        chunk_index=1,
+        video="v.mp4",
+        frame_start=0,
+        frame_end=8,
+        crop=None,
+        destination=None,
+    )
+
+    pipeline._analyze_one_chunk(runner=runner, launch=launch, item=item)
+
+    assert runner._input_queue is not poisoned_queue
+    assert runner._input_queue.empty()
+    task_id, video_index, chunk_index, predictions, error = launch.results_queue.get()
+    assert (task_id, video_index, chunk_index, predictions) == (3, 0, 1, None)
+    assert "CUDA out of memory" in error
 
 
 # _collect_chunk_results

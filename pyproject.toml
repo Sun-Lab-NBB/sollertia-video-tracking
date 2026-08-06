@@ -51,11 +51,12 @@ dependencies = [
     # This is pinned to an exact version rather than the usual major-version range because three subpackages override
     # DeepLabCut internals. The training subpackage reimplements the PyTorch train()/fit() orchestration and subclasses
     # the training runners to add mixed precision and DistributedDataParallel, the inference subpackage patches the
-    # get_pose_inference_runner and get_detector_inference_runner builders, and the frame-extraction workers replace
-    # KmeansbasedFrameselectioncv2 and attempt_to_add_video. The frame-extraction patches are plain assignments, so a
-    # renamed upstream symbol silently no-ops. Those internals are private APIs with no stability guarantee within the
-    # 3.x series, so an exact pin is required to keep the overrides valid. Bumping this version is a deliberate, tested
-    # action: re-verify the overridden internals against the new release first.
+    # get_pose_inference_runner and get_detector_inference_runner builders and replaces an inference runner's private
+    # _input_queue after a failed chunk, and the frame-extraction workers replace KmeansbasedFrameselectioncv2 and
+    # attempt_to_add_video. The frame-extraction patches are plain assignments, so a renamed upstream symbol silently
+    # no-ops. Those internals are private APIs with no stability guarantee within the 3.x series, so an exact pin is
+    # required to keep the overrides valid. Bumping this version is a deliberate, tested action: re-verify the
+    # overridden internals against the new release first.
     #
     # The [gui] extra is included because the refinement loop's manual labeling and label-refinement steps run in
     # DeepLabCut's napari-based GUI, which lives in this same isolated environment. It pulls in napari-deeplabcut and

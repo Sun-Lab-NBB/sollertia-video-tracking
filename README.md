@@ -365,7 +365,8 @@ The following command extracts the current model's least-confident frames from t
 
 Outlier extraction is additive, so repeated passes grow the refinement set. `--overwrite` replaces the refined videos'
 outlier frames for the current iteration and `--reset` clears the whole iteration's outlier frames before
-re-extracting. Both preserve every already-labeled training frame.
+re-extracting. Both preserve every frame carrying a finite human coordinate, and both clear a frame that was opened in
+the labeler but never annotated.
 
 ### Refining Machine Labels
 

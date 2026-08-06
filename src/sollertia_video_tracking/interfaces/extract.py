@@ -455,7 +455,8 @@ def outliers_command(
     each video's labeled-data directory alongside the model's predictions as machine pre-labels. Outlier extraction is
     additive by default, so repeated passes grow the refinement set. Pass ``--overwrite`` to replace the refined
     videos' outlier frames for the current iteration, or ``--reset`` to clear the whole iteration's outlier frames
-    before re-extracting. Both preserve every already-labeled training frame.
+    before re-extracting. Both preserve every frame you have labeled with a finite coordinate, and both clear a frame
+    you opened in the labeler but never annotated.
     """
     try:
         summary = extract_outlier_frames_parallel(

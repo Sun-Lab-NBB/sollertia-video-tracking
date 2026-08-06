@@ -491,7 +491,7 @@ def test_count_clustering_frames_clamps_to_one(monkeypatch: pytest.MonkeyPatch) 
     assert totals == {0: 1}
 
 
-# _clear_bare_frames / _clear_bare_frames_in_directory / _drop_collected_data_rows
+# _clear_bare_frames / _clear_bare_frames_in_directory
 def test_clear_bare_frames_in_directory_preserves_labeled_and_machine_frames(tmp_path: Path) -> None:
     """Verifies that clearing removes only unlabeled bootstrap frames, keeping human-labeled and
     machine-labeled ones."""
@@ -543,51 +543,6 @@ def test_clear_bare_frames_reports_and_survives_unreadable(tmp_path: Path, capsy
     captured = capsys.readouterr()
     assert "could not clear the unlabeled frames" in captured.err
     assert "--reset cleared 2 unlabeled bootstrap frame(s)" in captured.err
-
-
-def test_drop_collected_data_rows_missing_file_is_noop(tmp_path: Path) -> None:
-    """Verifies that dropping rows from an absent label table does nothing."""
-    extraction_pipeline._drop_collected_data_rows(
-        collected_data_path=tmp_path / "absent.h5", removed_frame_names={"img0000.png"}
-    )
-    assert not (tmp_path / "absent.h5").exists()
-
-
-def test_drop_collected_data_rows_keeps_all_when_none_removed(tmp_path: Path) -> None:
-    """Verifies that when no row references a removed frame the table is left untouched."""
-    path = tmp_path / "CollectedData_tester.h5"
-    _write_collected_data(path=path, rows=[("img0000.png", True), ("img0001.png", True)])
-    extraction_pipeline._drop_collected_data_rows(collected_data_path=path, removed_frame_names={"img9999.png"})
-    remaining = pd.read_hdf(path_or_buf=path, key="df_with_missing")
-    assert len(remaining) == 2
-
-
-def test_drop_collected_data_rows_deletes_emptied_table(tmp_path: Path) -> None:
-    """Verifies that dropping every remaining row deletes both the h5 and its csv sibling."""
-    path = tmp_path / "CollectedData_tester.h5"
-    csv_path = path.with_suffix(".csv")
-    _write_collected_data(path=path, rows=[("img0000.png", True), ("img0001.png", False)])
-    csv_path.write_text("placeholder csv\n")
-    extraction_pipeline._drop_collected_data_rows(
-        collected_data_path=path, removed_frame_names={"img0000.png", "img0001.png"}
-    )
-    assert not path.exists()
-    assert not csv_path.exists()
-
-
-def test_drop_collected_data_rows_flat_index_partial_removal(tmp_path: Path) -> None:
-    """Verifies that a flat-string index row is parsed by file name, and the surviving rows are rewritten
-    to h5 and csv."""
-    path = tmp_path / "CollectedData_tester.h5"
-    frame = pd.DataFrame(
-        data={"x": [1.0, 2.0]},
-        index=pd.Index(["labeled-data/vid/img0000.png", "labeled-data/vid/img0001.png"]),
-    )
-    frame.to_hdf(path_or_buf=path, key="df_with_missing", mode="w")
-    extraction_pipeline._drop_collected_data_rows(collected_data_path=path, removed_frame_names={"img0000.png"})
-    remaining = pd.read_hdf(path_or_buf=path, key="df_with_missing")
-    assert [Path(str(entry)).name for entry in remaining.index] == ["img0001.png"]
-    assert path.with_suffix(".csv").is_file()
 
 
 # _extract_one_video (the per-video worker)
