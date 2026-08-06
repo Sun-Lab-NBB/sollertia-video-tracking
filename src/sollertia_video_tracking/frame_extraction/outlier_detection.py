@@ -163,7 +163,7 @@ def fit_keypoint_distance(
                 ARdegree=autoregressive_degree,
                 MAdegree=moving_average_degree,
             )
-        except Exception:  # noqa: BLE001 -- a keypoint whose fit raises yields NaN, like one with too few points.
+        except Exception:
             return np.full(horizontal_positions.shape, fill_value=np.nan, dtype=np.float64)
     return np.sqrt((horizontal_positions - mean_horizontal) ** 2 + (vertical_positions - mean_vertical) ** 2)
 

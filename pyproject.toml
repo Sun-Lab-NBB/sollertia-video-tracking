@@ -103,7 +103,7 @@ dev = [
     "tox-uv>=1,<2",
 
     # Development Automation
-    "ataraxis-automation>=8,<9",
+    "ataraxis-automation>=9,<10",
 
     # Type Stubs (checked at development time only for dependencies that do not ship inline type information; pandas
     # is pulled in transitively by DeepLabCut)
@@ -134,21 +134,25 @@ lint.select = ["ALL"]
 
 # General ignore directives
 lint.ignore = [
+    # Universal lint.ignore corpus. Present in every Ataraxis framework and Sollertia platform project.
     "W291",    # Conflicts with docstring formatting
+    "ANN401",  # While suboptimal, ANY is a helpful type when used with caution
+    "BLE001",  # Broad exception handling is necessary at library boundaries
     "C901",    # Sometimes complex functions are necessary
-    "PLR0913", # Sometimes complex functions are necessary
-    "PLR0912", # Sometimes complex functions are necessary
-    "PLR0915", # Sometimes complex type definitions are necessary
     "PLR0911", # Sometimes complex return graphs are necessary
-    "TID252",  # Relative imports are required by the project's import management strategy
+    "PLR0912", # Sometimes complex functions are necessary
+    "PLR0913", # Sometimes complex functions are necessary
+    "PLR0915", # Sometimes functions with many statements are necessary
+    "PLR0917", # PLR0913 already covers argument counts, and call sites pass keyword arguments
     "COM812",  # Conflicts with the formatter
     "ISC001",  # Conflicts with the formatter
-    "PT001",   # https://github.com/astral-sh/ruff/issues/8796#issuecomment-182590771
+    "PT001",   # https://github.com/astral-sh/ruff/issues/8796#issuecomment-1825907715
     "PT023",   # https://github.com/astral-sh/ruff/issues/8796#issuecomment-1825907715
     "D107",    # __init__ is documented inside the main class docstring where applicable
     "D205",    # Bugs out for file descriptions
     "PLW0603", # While global statement usage is not ideal, it streamlines certain development patterns
-    "ANN401",  # The 'Any' type is required for multiprocessing proxy objects and the DeepLabCut tqdm shim signature
+    "TID252",  # Conflicts with the library import management strategy, which requires parent-relative imports
+    "CPY001",  # The license is declared in the LICENSE file and the license and license-files metadata fields
 ]
 
 # Additional formatting configurations
@@ -166,10 +170,6 @@ max-doc-length = 120  # Maximum documentation line length, the same as code
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
-# Ignores unused variadic arguments, which are required by the DeepLabCut tqdm shim signature.
-[tool.ruff.lint.flake8-unused-arguments]
-ignore-variadic-names = true
-
 # Additional, file-specific 'ignore' directives
 [tool.ruff.lint.per-file-ignores]
 "**/__init__.py" = [
@@ -177,23 +177,33 @@ ignore-variadic-names = true
     "F403", # Wildcard imports
 ]
 "tests/**/*.py" = [
-    "S101",    # Allows the `assert` statements pytest is built around.
-    "SLF001",  # Allows tests to reach into private members of the code under test.
-    "PLR2004", # Allows literal expected values in assertions without extracting named constants.
-    "INP001",  # Tests are collected by pytest, not imported as a package, so no __init__.py is required.
-    "ANN",     # Type annotations are not required on test functions and fixtures.
-    "D",       # Full docstring enforcement is relaxed for test helpers.
-    "PT006",   # The parametrize argument-name style is a per-test choice.
-    "T201",    # Diagnostic prints are permitted inside tests.
-    "SLF",     # Any private-member access rule applies to production code, not the tests exercising it.
+    # Shared test corpus. These entries are present in every Ataraxis framework and Sollertia platform project.
+    "S101",    # Tests assert by design
+    "PLR2004", # Expected values are clearer inline than as named constants
+    "INP001",  # The test directory is not an importable package
+    "SLF001",  # Tests exercise private module members directly
+    "PT006",   # Parametrize argument names are declared as a single comma-separated string
+    "ARG001",  # Pytest injects fixtures that individual tests may not reference
+    "T201",    # Diagnostic prints are how a test reports intermediate state
+    "D",       # Test names and inline comments carry the intent that docstrings carry in library code
+    "ANN",     # Test functions and mock helpers do not need annotations
+
+    # Project-specific
+    "PT012",   # Expected-failure blocks wrap the context manager that the raising call runs inside
+    "SIM117",  # Nesting the raises block inside the tested context manager keeps the two roles distinct
 ]
 
+# Import sorting configurations
 [tool.ruff.lint.isort]
 case-sensitive = true              # Takes case into account when sorting imports
 combine-as-imports = true          # Combines multiple "as" imports for the same package
 force-wrap-aliases = true          # Wraps "as" imports so that each uses a separate line
 force-sort-within-sections = true  # Forces "as" and "from" imports for the same package to be close
 length-sort = true                 # Places shorter imports first
+
+# Ignores unused variadic arguments, which are required by the DeepLabCut tqdm shim signature.
+[tool.ruff.lint.flake8-unused-arguments]
+ignore-variadic-names = true
 
 # MyPy configuration section.
 [tool.mypy]
@@ -225,18 +235,42 @@ module = [
 ]
 ignore_missing_imports = true
 
+# Pytest configuration. The import mode is declared here so that a bare 'pytest' invocation resolves test modules the
+# same way the '{py312}-test' tox task does.
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib"
+
+# Enables parallel coverage collection across the frame-extraction worker processes and the renderer thread, and lists
+# the source files excluded from coverage measurement in full.
+[tool.coverage.run]
+parallel = true
+concurrency = ["multiprocessing", "thread"]
+
+# Excludes the user-facing command-line and GUI entry points from coverage measurement. Per the project's testing
+# policy, the interface layer (Click commands, the napari GUI launcher, and their argument wiring) is verified manually
+# rather than by the automated suite, so its modules are not held to the coverage target.
+omit = ["*/interfaces/*"]
+
 # This is used by the 'test' tox tasks to aggregate coverage data produced during pytest runtimes.
 [tool.coverage.paths]
 
-# Maps coverage measured in site-packages to source files in src
-source = ["src/", ".tox/*/lib/python*/site-packages/"]
+# Maps coverage measured in site-packages to source files in src. The second pattern matches the POSIX virtual
+# environment layout and the third matches the Windows layout, which omits the 'python*' path component. Both are
+# required for the 'coverage' task to merge the data measured on either host into a single record per source file.
+source = [
+    "src/",
+    ".tox/*/lib/python*/site-packages/",
+    ".tox/*/Lib/site-packages/",
+]
 
 # Same as above, specifies the output directory for the coverage .html report
 [tool.coverage.html]
 directory = "reports/coverage_html"
 
-# Specifies additional ignore directives
+# Specifies the coverage gate and additional ignore directives
 [tool.coverage.report]
+fail_under = 100     # Requires the test suite to cover every measured statement
+show_missing = true  # Lists the statements missed by the test suite, so a failed check names the lines to cover
 exclude_lines = [
     "pragma: no cover",
     "def __repr__",
@@ -246,13 +280,3 @@ exclude_lines = [
     "if __name__ == .__main__.:",
     "pass",
 ]
-
-# Enables parallel coverage collection across the frame-extraction worker processes and the renderer thread.
-[tool.coverage.run]
-parallel = true
-concurrency = ["multiprocessing", "thread"]
-
-# Excludes the user-facing command-line and GUI entry points from coverage measurement. Per the project's testing
-# policy, the interface layer (Click commands, the napari GUI launcher, and their argument wiring) is verified manually
-# rather than by the automated suite, so its modules are not held to the coverage target.
-omit = ["*/interfaces/*"]
