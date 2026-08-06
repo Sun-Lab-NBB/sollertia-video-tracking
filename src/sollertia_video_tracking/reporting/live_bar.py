@@ -106,20 +106,26 @@ class LiveBar(Thread):
     def run(self) -> None:
         """Consumes queue messages and re-renders the bar until the shared ``stop`` sentinel arrives."""
         poll_timeout = _TTY_RENDER_INTERVAL if self._is_tty else _NON_TTY_POLL_INTERVAL
-        while True:
-            try:
-                message = self._progress_queue.get(timeout=poll_timeout)
-            except Empty:
-                self._render()
-                continue
-            if message == _STOP_SENTINEL:
-                break
-            force = self._ingest(message)
-            self._render(force=force)
-        self._render(force=True)
-        if self._is_tty:
-            self._stream.write("\n")
-            self._stream.flush()
+        try:
+            while True:
+                try:
+                    message = self._progress_queue.get(timeout=poll_timeout)
+                except Empty:
+                    self._render()
+                    continue
+                if message == _STOP_SENTINEL:
+                    break
+                force = self._ingest(message)
+                self._render(force=force)
+            self._render(force=True)
+            if self._is_tty:
+                self._stream.write("\n")
+                self._stream.flush()
+        except (OSError, EOFError, ValueError):
+            # The queue's manager, or the stream this bar renders through, was torn down while this thread was still
+            # running. Ending the thread here keeps that teardown race from reaching the interpreter as an unraisable
+            # exception, which reports as a bare object dump that hides whatever actually ended the run.
+            return
 
     def stop(self) -> None:
         """Signals the renderer to draw a final frame and exit."""

@@ -3,6 +3,7 @@
 import os
 from enum import StrEnum
 from dataclasses import dataclass
+import importlib.util
 
 import torch
 
@@ -153,7 +154,8 @@ def resolve_optimization_profile(
         tf32: The requested TF32 setting (CUDA only; a no-op on other devices).
         cudnn_benchmark: The requested cuDNN autotuner setting; its ``"auto"`` default follows ``fixed_input_size``,
             since the autotuner only pays off, and only stays deterministic-safe, when the input spatial size is fixed.
-        torch_compile: The requested ``torch.compile`` setting; disabled by default because of its warm-up cost.
+        torch_compile: The requested ``torch.compile`` setting. The default leaves it off because its warm-up cost
+            may not amortize, and a CUDA run with no importable Triton falls back to eager execution with a warning.
         dataloader_workers: The number of dataloader workers per process, or -1 to choose automatically.
         pin_memory: The requested host-memory pinning setting (meaningful for CUDA only).
         fixed_input_size: Determines whether the training transform produces one fixed input resolution, normally
@@ -194,6 +196,18 @@ def resolve_optimization_profile(
 
     resolved_pin_memory = resolve_toggle(value=pin_memory, auto=on_cuda) if on_cuda else False
 
+    # The inductor backend reaches CUDA hardware only through Triton, which torch bundles on Linux and leaves to a
+    # separate distribution on Windows. Resolving the request against what is importable keeps a missing Triton out of
+    # the first forward pass, where it surfaces as a compile failure partway into a run rather than at startup.
+    resolved_torch_compile = resolve_toggle(value=torch_compile, auto=False)
+    if resolved_torch_compile and on_cuda and importlib.util.find_spec("triton") is None:
+        warn(
+            "Model compilation was requested, but the torch.compile inductor backend generates its CUDA kernels "
+            "through Triton, which is not importable in this environment. Disabling compilation for this run. "
+            "Install the Triton distribution published for this platform to enable it."
+        )
+        resolved_torch_compile = False
+
     world_size = len(resolved_gpus) if strategy == MultiGpuStrategy.DDP else 1
     if dataloader_workers >= 0:
         workers = dataloader_workers
@@ -218,7 +232,7 @@ def resolve_optimization_profile(
         use_gradient_scaler=use_gradient_scaler,
         tf32=resolved_tf32,
         cudnn_benchmark=resolved_benchmark,
-        torch_compile=resolve_toggle(value=torch_compile, auto=False),
+        torch_compile=resolved_torch_compile,
         dataloader_workers=workers,
         pin_memory=resolved_pin_memory,
         cpu_threads=cpu_threads,

@@ -256,9 +256,13 @@ def train_model(
         if monitor is not None:
             monitor.stop()
             monitor.join(timeout=3)
-        if manager is not None:
+        # The manager owns the queue the monitor reads and the duplicate is the stream it writes, so both are released
+        # only once the renderer has actually exited. A renderer still running past the join keeps them, because
+        # leaking a descriptor until the process exits costs less than a live writer reaching a closed handle.
+        monitor_released = monitor is None or not monitor.is_alive()
+        if manager is not None and monitor_released:
             manager.shutdown()
-        if monitor_stream is not None:
+        if monitor_stream is not None and monitor_released:
             with contextlib.suppress(Exception):
                 monitor_stream.close()
         # The monitor has released the terminal, so on failure the operator can be pointed to the training log that

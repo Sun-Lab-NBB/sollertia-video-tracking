@@ -1,6 +1,7 @@
 """Contains tests for the training optimization profile resolver and the process-global optimization applier."""
 
 import os
+import importlib.util
 
 import torch
 import pytest
@@ -222,6 +223,29 @@ def test_resolve_profile_cuda_single_gpu_ampere(monkeypatch: pytest.MonkeyPatch)
     assert profile.cudnn_benchmark is False  # 'auto' follows fixed_input_size, which defaults False.
     assert profile.cpu_threads is None  # No CPU thread budget restored on the CUDA path.
     assert profile.dataloader_workers == 8  # Single rank on 12 cores minus reserve, capped at 8.
+
+
+def test_resolve_profile_cuda_disables_compile_without_triton(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Verifies that a CUDA run requesting compilation falls back to eager when Triton is not importable."""
+    _set_cuda(monkeypatch, 1)
+    _set_capabilities(monkeypatch, {0: (8, 0)})
+    _set_cpu_count(monkeypatch, 12)
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None if name == "triton" else object())
+    profile = resolve_optimization_profile(device=DeviceType.CUDA, torch_compile=Toggle.ON)
+    assert profile.torch_compile is False
+    assert "Triton" in capsys.readouterr().err
+
+
+def test_resolve_profile_cuda_keeps_compile_with_triton(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies that a CUDA run requesting compilation keeps it when Triton is importable."""
+    _set_cuda(monkeypatch, 1)
+    _set_capabilities(monkeypatch, {0: (8, 0)})
+    _set_cpu_count(monkeypatch, 12)
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: object())
+    profile = resolve_optimization_profile(device=DeviceType.CUDA, torch_compile=Toggle.ON)
+    assert profile.torch_compile is True
 
 
 def test_resolve_profile_cuda_fp16_enables_gradient_scaler(monkeypatch: pytest.MonkeyPatch) -> None:

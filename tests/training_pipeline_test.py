@@ -749,6 +749,7 @@ class _FakeMonitor:
         self.started = False
         self.stopped = False
         self.joined = None
+        self.alive = False
         _FakeMonitor.instances.append(self)
 
     def start(self):
@@ -759,6 +760,9 @@ class _FakeMonitor:
 
     def join(self, timeout=None):
         self.joined = timeout
+
+    def is_alive(self):
+        return self.alive
 
 
 class _FakeManager:
@@ -846,6 +850,28 @@ def test_train_model_single_process_with_monitor_and_evaluation(monkeypatch, tmp
     # The launch carried a preserved console because a stderr duplicate was held.
     assert records.worker[0][1].preserve_console is True
     assert records.worker[0][1].port == 45000
+
+
+def test_train_model_retains_monitor_resources_when_renderer_outlives_join(monkeypatch, tmp_path):
+    """Verifies that a renderer still running after the join keeps its queue manager and preserved stream open."""
+    loader = FakeLoader(
+        model_cfg={"train_settings": {"epochs": 10}},
+        pose_task=Task.BOTTOM_UP,
+        model_folder=tmp_path,
+    )
+    dup_stream = _FakeStream()
+
+    def mark_monitor_alive(**_kwargs):
+        _FakeMonitor.instances[0].alive = True
+
+    records = _patch_train_model_deps(monkeypatch, loader, dup_stream=dup_stream, worker=mark_monitor_alive)
+
+    train_model(str(tmp_path / "config.yaml"), _profile(device="cpu"), shuffle=2, epochs=None)
+
+    monitor = _FakeMonitor.instances[0]
+    assert monitor.stopped
+    assert not records.manager.shutdown_called
+    assert not dup_stream.closed
 
 
 def test_train_model_without_progress_skips_monitor(monkeypatch, tmp_path):
