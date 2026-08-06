@@ -667,13 +667,14 @@ def _build_dataloaders(
             pin_memory=pin_memory,
             persistent_workers=worker_count > 0,
         )
+    # Validation draws single-image batches over the held-out split, so worker processes add a second pool whose spawn
+    # cost is not repaid by the little decoding they do. Loading it in the training process keeps that pool off the
+    # platforms that spawn rather than fork, where each worker pays a full interpreter start.
     valid_dataloader = DataLoader(
         dataset=valid_dataset,
         batch_size=1,
         shuffle=False,
-        num_workers=worker_count,
         pin_memory=pin_memory,
-        persistent_workers=worker_count > 0,
     )
     return train_dataloader, valid_dataloader
 
