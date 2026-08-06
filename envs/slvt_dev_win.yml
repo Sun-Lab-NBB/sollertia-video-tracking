@@ -248,6 +248,7 @@ dependencies:
     - tox-uv==1.13.1
     - tqdm==4.70.0
     - traitlets==5.16.1
+    - triton-windows==3.7.1.post27
     - trove-classifiers==2026.6.1.19
     - twine==6.2.0
     - typer==0.27.1
