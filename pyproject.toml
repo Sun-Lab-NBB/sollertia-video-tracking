@@ -57,7 +57,7 @@ dependencies = [
     # The [gui] extra is included because the refinement loop's manual labeling and label-refinement steps run in
     # DeepLabCut's napari-based GUI, which lives in this same isolated environment. It pulls in napari-deeplabcut and
     # a Qt binding (PySide6).
-    "deeplabcut[gui]==3.0.0",
+    "deeplabcut[gui]==3.0.1",
     "torch>=2,<3",
 
     # CUDA Kernel Compilation on Windows (the torch.compile inductor backend generates its GPU kernels through Triton,
