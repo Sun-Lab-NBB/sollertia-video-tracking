@@ -230,7 +230,7 @@ def detect_fixed_input_size(
     try:
         project_config = read_config(str(Path(config)))
         sizes_or_none = {_resolve_input_size(project_config=project_config, video=video) for video in video_paths}
-    except Exception:  # noqa: BLE001 - detection is best-effort; any failure conservatively reports not-fixed.
+    except Exception:
         return False
     return None not in sizes_or_none and len(sizes_or_none) == 1
 
@@ -636,7 +636,7 @@ def _collect_results(
     for _ in video_paths:
         try:
             index, path, error = results_queue.get(timeout=_RESULT_POLL_TIMEOUT_SECONDS)
-        except Exception:  # noqa: BLE001 - a missing result means a worker died; report the remaining videos below.
+        except Exception:
             break
         reported.add(index)
         if error is None and path is not None:
@@ -727,7 +727,7 @@ def _analyze_one_video(
             )
         output = _resolve_output(video=video, scorer=scorer, destination=output_directory)
         launch.results_queue.put((index, str(output) if output is not None else None, None))
-    except Exception as error:  # noqa: BLE001 - report the per-video failure and keep draining the queue.
+    except Exception as error:
         launch.results_queue.put((index, None, f"{type(error).__name__}: {error}"))
     finally:
         dlc_videos.tqdm = original_tqdm
@@ -1109,7 +1109,7 @@ def _analyze_one_chunk(runner: Any, launch: _InferenceLaunch, item: _ChunkItem) 
             launch.results_queue.put((item.task_id, item.video_index, item.chunk_index, None, error_message))
         else:
             launch.results_queue.put((item.task_id, item.video_index, item.chunk_index, predictions, None))
-    except Exception as error:  # noqa: BLE001 - report the per-chunk failure and keep draining the queue.
+    except Exception as error:
         launch.results_queue.put(
             (item.task_id, item.video_index, item.chunk_index, None, f"{type(error).__name__}: {error}")
         )
@@ -1146,7 +1146,7 @@ def _collect_chunk_results(
             task_id, _video_index, _chunk_index, predictions, error = results_queue.get(
                 timeout=_RESULT_POLL_TIMEOUT_SECONDS
             )
-        except Exception:  # noqa: BLE001 - a missing result means a worker died. Report the affected videos below.
+        except Exception:
             break
         gathered[task_id] = (predictions, error)
 
@@ -1179,7 +1179,7 @@ def _collect_chunk_results(
                 crop=items[0].crop,
                 predictions=predictions,
             )
-        except Exception as stitch_error:  # noqa: BLE001 - a stitch or write failure fails just this video.
+        except Exception as stitch_error:
             failures.append((name, f"{type(stitch_error).__name__}: {stitch_error}"))
     return outputs, failures
 

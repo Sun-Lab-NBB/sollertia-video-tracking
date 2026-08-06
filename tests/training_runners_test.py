@@ -9,8 +9,8 @@ mixin ``__init__``.
 """
 
 from types import SimpleNamespace
-import contextlib
 from pathlib import Path
+import contextlib
 
 import numpy as np
 import torch

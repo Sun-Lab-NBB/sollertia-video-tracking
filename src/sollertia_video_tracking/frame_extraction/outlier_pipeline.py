@@ -519,7 +519,7 @@ def _detect_all_videos(
         except FileNotFoundError:
             unanalyzed_videos.append(video)
             continue
-        except Exception:  # noqa: BLE001 -- a malformed prediction table is recorded per-video, not raised.
+        except Exception:
             errors.append((video, "detection error:\n" + traceback.format_exc()))
             continue
 
@@ -905,7 +905,7 @@ def _clear_iteration_outliers(
             removed_count, had_refined_labels = _clear_video_iteration_outliers(
                 directory=directory, iteration=iteration, scorer=scorer
             )
-        except Exception:  # noqa: BLE001 -- a directory that cannot be read is warned about, not fatal to the run.
+        except Exception:
             sys.stderr.write(f"WARNING: {scope_label} could not clear the outlier frames in '{directory}'.\n")
             continue
         if removed_count or had_refined_labels:
@@ -1045,7 +1045,7 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
             )
     except FileNotFoundError:
         return video, 0, "not_analyzed"
-    except Exception:  # noqa: BLE001 -- one bad video must not kill the pool; the traceback is returned as status.
+    except Exception:
         return video, 0, "error:\n" + traceback.format_exc()
     else:
         frames_written = _count_directory_frames(output_directory) - frame_count_before

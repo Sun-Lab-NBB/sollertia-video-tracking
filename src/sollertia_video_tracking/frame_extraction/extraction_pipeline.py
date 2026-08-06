@@ -625,7 +625,7 @@ def _clear_bare_frames(
         directory = labeled_data_directory / stem
         try:
             removed_count = _clear_bare_frames_in_directory(directory=directory, scorer=scorer)
-        except Exception:  # noqa: BLE001 -- a directory that cannot be read is warned about, not fatal to the run.
+        except Exception:
             sys.stderr.write(f"WARNING: {scope_label} could not clear the unlabeled frames in '{directory}'.\n")
             continue
         if removed_count:
@@ -803,7 +803,7 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
                 # Restricts DeepLabCut to this one video.
                 videos_list=[video_path],
             )
-    except Exception:  # noqa: BLE001 -- one bad video must not kill the pool; the traceback is returned as status.
+    except Exception:
         return video_path, 0, "error:\n" + traceback.format_exc()
     else:
         written = len(extracted_frame_paths(output_directory)) - frame_count_before

@@ -109,7 +109,7 @@ def _optimize_inference_runner(runner: InferenceRunner, profile: InferenceProfil
         # torch.compile can raise a range of backend errors; the wrapper falls back to eager execution when it does.
         try:
             runner.model = torch.compile(runner.model)
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             warnings.warn(f"torch.compile failed; falling back to eager execution. Error: {error}", stacklevel=2)
 
     device_type = "cuda" if str(runner.device).startswith("cuda") else str(runner.device)

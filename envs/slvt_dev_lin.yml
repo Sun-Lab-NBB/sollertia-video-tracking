@@ -67,7 +67,7 @@ dependencies:
     - appdirs==1.4.4
     - ast_serialize==0.6.0
     - asttokens==3.0.2
-    - ataraxis-automation==8.1.1
+    - ataraxis-automation==9.0.2
     - attrs==26.1.0
     - babel==2.18.0
     - bashlex==0.18
@@ -276,7 +276,7 @@ dependencies:
     - traitlets==5.15.1
     - triton==3.7.1
     - trove-classifiers==2026.6.1.19
-    - twine==6.2.0
+    - twine==7.0.0
     - typer==0.27.0
     - types-psutil==7.2.2.20260518
     - types-pytz==2026.2.0.20260518

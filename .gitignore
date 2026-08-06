@@ -208,6 +208,7 @@ cython_debug/
 /docs/build/
 /stubs/
 /.pypirc
+/.netlifyrc
 
 
 # Project: Add any project-specific exclusions here

@@ -336,7 +336,7 @@ def detect_fixed_input_size(
         if trains_detector and not _augmentation_is_fixed_size(detector.get("data", {}).get("train", {})):
             return False
         return _augmentation_is_fixed_size(model_cfg["data"]["train"])
-    except Exception:  # noqa: BLE001 - detection is best-effort; any failure conservatively reports not-fixed.
+    except Exception:
         return False
 
 
@@ -422,7 +422,7 @@ def _evaluate_after_training(
             confidence_cutoff=confidence_cutoff,
             device=device,
         )
-    except Exception:  # noqa: BLE001 - evaluation is best-effort; a completed training run must not be lost.
+    except Exception:
         _logger.warning("Post-training evaluation failed and was skipped.", exc_info=True)
         return None
 

@@ -562,7 +562,7 @@ def summarize_refinement_status(config_path: Path, *, videos: tuple[str | Path, 
             # MachineLabelsRefine table covers the legacy refine flow and is absent under the napari labeler.
             refined_frame_names = finite_labeled_frame_names(directory / f"CollectedData_{scorer}.h5")
             refined_frame_names |= finite_labeled_frame_names(directory / "MachineLabelsRefine.h5")
-        except Exception as error:  # noqa: BLE001 -- a directory whose tables cannot be read is reported, not fatal.
+        except Exception as error:
             unreadable.append((directory, str(error)))
             continue
         unrefined_frame_names = machine_frame_names - refined_frame_names
