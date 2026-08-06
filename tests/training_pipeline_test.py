@@ -465,12 +465,12 @@ def test_build_dataloaders_ddp_injects_distributed_sampler(monkeypatch):
     assert dataloader_calls[0]["batch_size"] == 4
     assert dataloader_calls[0]["num_workers"] == 2
     assert dataloader_calls[0]["pin_memory"] is True
-    # The validation loader always scores one frame at a time, never shuffles, and reuses the same worker count.
+    # The validation loader always scores one frame at a time, never shuffles, and loads in the training process.
     assert dataloader_calls[1]["batch_size"] == 1
     assert dataloader_calls[1]["shuffle"] is False
-    assert dataloader_calls[1]["num_workers"] == 2
+    assert "num_workers" not in dataloader_calls[1]
+    assert "persistent_workers" not in dataloader_calls[1]
     assert dataloader_calls[1]["pin_memory"] is True
-    assert dataloader_calls[1]["persistent_workers"] is True
     assert (train_loader, valid_loader) == (("dataloader", 1), ("dataloader", 2))
 
 
@@ -496,7 +496,7 @@ def test_build_dataloaders_single_process_shuffles_without_collate(monkeypatch):
     assert dataloader_calls[0]["num_workers"] == 0
     assert dataloader_calls[0]["pin_memory"] is False
     assert dataloader_calls[1]["batch_size"] == 1
-    assert dataloader_calls[1]["persistent_workers"] is False
+    assert "num_workers" not in dataloader_calls[1]
 
 
 # _train_single_model
@@ -1212,6 +1212,19 @@ def test_redirect_worker_console_active_captures_descriptor_output(tmp_path):
     content = log_path.read_text()
     assert "redirected-stdout" in content
     assert "redirected-stderr" in content
+
+
+def test_redirect_worker_console_records_traceback_in_log(tmp_path):
+    """Verifies that a failure inside the redirected body is written to the log before descriptors are restored."""
+    log_path = tmp_path / "worker.log"
+    with pytest.raises(RuntimeError, match="worker exploded"):
+        with _redirect_worker_console(log_path, active=True):
+            message = "worker exploded"
+            raise RuntimeError(message)
+    content = log_path.read_text()
+    assert "RuntimeError" in content
+    assert "worker exploded" in content
+    assert "Traceback" in content
 
 
 def test_report_training_log_writes_notice(capsys):

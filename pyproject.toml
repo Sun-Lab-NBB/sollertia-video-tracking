@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 # Project metadata section. Provides the general ID information about the project.
 [project]
 name = "sollertia-video-tracking"
-version = "1.1.1rc2"
+version = "1.1.1rc3"
 description = "Provides assets for designing and deploying DeepLabCut video tracking pipelines within the Sollertia platform."
 readme = "README.md"
 license = "Apache-2.0"

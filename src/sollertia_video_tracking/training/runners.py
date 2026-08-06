@@ -3,8 +3,9 @@
 from typing import Any
 import logging
 from pathlib import Path
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager, nullcontext, contextmanager
 from collections import defaultdict
+from collections.abc import Iterator
 
 import numpy as np
 import torch
@@ -329,7 +330,8 @@ class _OptimizedTrainingRunnerMixin(TrainingRunner):
             message += self._gpu_usage_str()
 
             if self._is_main:
-                self.snapshot_manager.update(epoch=epoch, state_dict=self.state_dict(), last=(epoch == epochs))
+                with _overwriting_path_rename():
+                    self.snapshot_manager.update(epoch=epoch, state_dict=self.state_dict(), last=(epoch == epochs))
                 _logger.info("%s", message)
                 epoch_metrics = self._metadata.get("metrics")
                 if epoch % self.eval_interval == 0 and epoch_metrics:
@@ -549,3 +551,24 @@ class _OptimizedDetectorTrainingRunner(_OptimizedTrainingRunnerMixin, DetectorTr
             )
 
         return losses
+
+
+@contextmanager
+def _overwriting_path_rename() -> Iterator[None]:
+    """Gives ``Path.rename`` the same replace-the-destination behavior on every platform while the context is open.
+
+    DeepLabCut's snapshot manager rotates the previous best snapshot into a regular snapshot name with ``Path.rename``.
+    That call replaces an existing destination on POSIX and raises ``FileExistsError`` on Windows, so a model directory
+    that already holds a snapshot for the rotated epoch aborts training at the evaluation that rotates the best
+    snapshot. Routing the call through ``Path.replace`` gives every platform the POSIX behavior the manager is written
+    against. The patch is restored on exit so it applies to the snapshot update alone.
+
+    Yields:
+        None, for the duration of the patch.
+    """
+    original_rename = Path.rename
+    Path.rename = Path.replace  # type: ignore[method-assign]
+    try:
+        yield
+    finally:
+        Path.rename = original_rename  # type: ignore[method-assign]

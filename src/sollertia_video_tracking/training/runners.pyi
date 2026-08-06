@@ -1,6 +1,7 @@
 from typing import Any
 from pathlib import Path
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, contextmanager
+from collections.abc import Iterator
 
 import torch
 from torch import nn as nn
@@ -78,3 +79,6 @@ class _OptimizedPoseTrainingRunner(_OptimizedTrainingRunnerMixin, PoseTrainingRu
 class _OptimizedDetectorTrainingRunner(_OptimizedTrainingRunnerMixin, DetectorTrainingRunner):
     _ddp_static_graph: bool
     def step(self, batch: dict[str, Any], mode: str = "train") -> dict[str, Any]: ...
+
+@contextmanager
+def _overwriting_path_rename() -> Iterator[None]: ...
