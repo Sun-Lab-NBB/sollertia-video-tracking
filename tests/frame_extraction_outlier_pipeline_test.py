@@ -275,10 +275,14 @@ def test_detect_fitting_outliers_auto_workers_reports_progress(
     # Pin the visible core count so the auto worker-sizing arithmetic is deterministic and can be asserted exactly.
     monkeypatch.setattr(outlier_pipeline.os, "cpu_count", lambda: 8)
     monkeypatch.setattr(outlier_pipeline.multiprocessing, "get_context", lambda *_a: context)
-    monkeypatch.setattr(outlier_pipeline, "fit_keypoint_distance", lambda *_a: np.array([0.0, 0.0, 100.0, 0.0, 0.0]))
+    monkeypatch.setattr(outlier_pipeline, "_fit_video_keypoint", lambda *_a: np.array([0.0, 0.0, 100.0, 0.0, 0.0]))
 
     result = outlier_pipeline._detect_fitting_outliers(
-        keypoint_series_by_video=_fit_series(),
+        fitting_keypoint_counts=_fit_keypoint_counts(),
+        scorer="DLC",
+        configuration={},
+        tracking_method="",
+        resolved_comparison_bodyparts=["bp0"],
         frames_per_video_count=0,
         pixel_distance_threshold=20.0,
         minimum_confidence=0.5,
@@ -305,10 +309,14 @@ def test_detect_fitting_outliers_explicit_workers_no_progress(
     # With 8 - 2 = 6 usable cores the auto path would size the pool at 3 (the task count). An explicit 2 must win.
     monkeypatch.setattr(outlier_pipeline.os, "cpu_count", lambda: 8)
     monkeypatch.setattr(outlier_pipeline.multiprocessing, "get_context", lambda *_a: context)
-    monkeypatch.setattr(outlier_pipeline, "fit_keypoint_distance", lambda *_a: np.array([0.0, 0.0, 100.0, 0.0, 0.0]))
+    monkeypatch.setattr(outlier_pipeline, "_fit_video_keypoint", lambda *_a: np.array([0.0, 0.0, 100.0, 0.0, 0.0]))
 
     result = outlier_pipeline._detect_fitting_outliers(
-        keypoint_series_by_video=_fit_series(),
+        fitting_keypoint_counts=_fit_keypoint_counts(),
+        scorer="DLC",
+        configuration={},
+        tracking_method="",
+        resolved_comparison_bodyparts=["bp0"],
         frames_per_video_count=0,
         pixel_distance_threshold=20.0,
         minimum_confidence=0.5,
@@ -324,6 +332,58 @@ def test_detect_fitting_outliers_explicit_workers_no_progress(
     assert context.pool_process_counts == [2]
     # display_progress=False suppresses the fitting progress line entirely.
     assert "fitting" not in capsys.readouterr().err
+
+
+# _fit_video_keypoint
+def test_fit_video_keypoint_reloads_its_own_slice_and_forwards_the_fit_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verifies that a fit worker reloads the video, restricts it to the comparison bodyparts, and fits one keypoint."""
+    columns = pd.MultiIndex.from_product(
+        [["DLC"], ["bp0", "bp1", "dropped"], ["x", "y", "likelihood"]],
+        names=["scorer", "bodyparts", "coords"],
+    )
+    data = np.zeros((4, 9), dtype=np.float64)
+    data[:, 3] = [10.0, 11.0, 12.0, 13.0]  # bp1 x
+    data[:, 4] = [20.0, 21.0, 22.0, 23.0]  # bp1 y
+    data[:, 5] = [0.1, 0.2, 0.3, 0.4]  # bp1 likelihood
+    load_calls: list[dict[str, object]] = []
+    fit_calls: list[dict[str, object]] = []
+
+    def _fake_load(**kwargs):
+        load_calls.append(kwargs)
+        return pd.DataFrame(data=data, columns=columns)
+
+    def _fake_fit(**kwargs):
+        fit_calls.append(kwargs)
+        return np.array([0.0, 1.0, 2.0, 3.0])
+
+    monkeypatch.setattr(outlier_pipeline, "_load_sliced_predictions", _fake_load)
+    monkeypatch.setattr(outlier_pipeline, "fit_keypoint_distance", _fake_fit)
+
+    deviation = outlier_pipeline._fit_video_keypoint(
+        "/videos/v1.mp4",
+        1,
+        "DLC",
+        {"start": 0, "stop": 1},
+        "",
+        ["bp0", "bp1"],
+        0.5,
+        3,
+        1,
+    )
+
+    np.testing.assert_array_equal(deviation, [0.0, 1.0, 2.0, 3.0])
+    # The worker loads the predictions itself rather than receiving trajectories from the parent.
+    assert load_calls[0]["video"] == "/videos/v1.mp4"
+    assert load_calls[0]["video_predictions_directory"] == Path("/videos")
+    # The "dropped" bodypart is filtered out, so keypoint index 1 selects bp1 rather than the third column triple.
+    np.testing.assert_array_equal(fit_calls[0]["horizontal_positions"], [10.0, 11.0, 12.0, 13.0])
+    np.testing.assert_array_equal(fit_calls[0]["vertical_positions"], [20.0, 21.0, 22.0, 23.0])
+    np.testing.assert_array_equal(fit_calls[0]["confidences"], [0.1, 0.2, 0.3, 0.4])
+    assert fit_calls[0]["minimum_confidence"] == 0.5
+    assert fit_calls[0]["autoregressive_degree"] == 3
+    assert fit_calls[0]["moving_average_degree"] == 1
 
 
 # _extract_all_videos (and _report_plan through it)
@@ -960,10 +1020,9 @@ def _detect(monkeypatch: pytest.MonkeyPatch, load_stub, algorithm, **overrides):
     return outlier_pipeline._detect_all_videos(**kwargs)
 
 
-def _fit_series() -> dict[str, list]:
-    """Builds two videos' worth of zeroed keypoint trajectories for the fitting pool."""
-    keypoint = (np.zeros(5), np.zeros(5), np.ones(5))
-    return {"vA": [keypoint, keypoint], "vB": [keypoint]}
+def _fit_keypoint_counts() -> dict[str, int]:
+    """Builds two videos' keypoint counts for the fitting pool, three fit tasks in total."""
+    return {"vA": 2, "vB": 1}
 
 
 def _fake_iter_factory(results):

@@ -115,14 +115,18 @@ def _optimize_inference_runner(runner: InferenceRunner, profile: InferenceProfil
     amp_dtype = profile.amp_dtype
     channels_last = profile.channels_last
 
-    def autocast_context() -> AbstractContextManager[None]:
-        """Returns the autocast context for the forward pass, or a null context when mixed precision is off."""
-        if amp_dtype is None:
-            return nullcontext()
-        return torch.autocast(device_type=device_type, dtype=amp_dtype)
+    # Built once rather than per forward pass. Constructing a bfloat16 CUDA autocast probes backend capability and
+    # string-parses the CUDA version, and DeepLabCut drives predict from a single consumer thread, so one instance is
+    # entered and exited sequentially and never nests.
+    autocast_context: AbstractContextManager[None] = (
+        nullcontext() if amp_dtype is None else torch.autocast(device_type=device_type, dtype=amp_dtype)
+    )
 
     def move_inputs(inputs: torch.Tensor) -> torch.Tensor:
         """Moves a batch to the runner device, adopting the channels-last format when enabled."""
+        # Staging through the device-side permute holds the contiguous destination and the source batch at once, so a
+        # channels-last run peaks at twice the batch's device footprint. Permuting on the host halves that peak but
+        # runs the whole transfer two to three times slower, so the peak is accepted and bounds the usable batch size.
         moved = inputs.to(runner.device)
         if channels_last:
             moved = moved.contiguous(memory_format=torch.channels_last)
@@ -139,14 +143,14 @@ def _optimize_inference_runner(runner: InferenceRunner, profile: InferenceProfil
 
 def _build_pose_predict(
     runner: PoseInferenceRunner,
-    autocast_context: Callable[[], AbstractContextManager[None]],
+    autocast_context: AbstractContextManager[None],
     move_inputs: Callable[[torch.Tensor], torch.Tensor],
 ) -> Callable[..., list[dict[str, dict[str, Any]]]]:
     """Builds the optimized pose ``predict`` replacement bound to the runner's model and dynamic cropper.
 
     Args:
         runner: The pose runner being enhanced.
-        autocast_context: A no-argument callable returning the autocast context for the forward pass.
+        autocast_context: The autocast context entered around the forward pass.
         move_inputs: A callable that moves a batch to the device with the configured memory format.
 
     Returns:
@@ -158,7 +162,7 @@ def _build_pose_predict(
         batch_size = len(inputs)
         if runner.dynamic is not None:
             inputs = runner.dynamic.crop(inputs)
-        with autocast_context():
+        with autocast_context:
             outputs = runner.model(move_inputs(inputs), **kwargs)
             raw_predictions = runner.model.get_predictions(outputs)
         if runner.dynamic is not None:
@@ -182,14 +186,14 @@ def _build_pose_predict(
 
 def _build_detector_predict(
     runner: DetectorInferenceRunner,
-    autocast_context: Callable[[], AbstractContextManager[None]],
+    autocast_context: AbstractContextManager[None],
     move_inputs: Callable[[torch.Tensor], torch.Tensor],
 ) -> Callable[..., list[dict[str, dict[str, Any]]]]:
     """Builds the optimized detector ``predict`` replacement bound to the runner's model.
 
     Args:
         runner: The detector runner being enhanced.
-        autocast_context: A no-argument callable returning the autocast context for the forward pass.
+        autocast_context: The autocast context entered around the forward pass.
         move_inputs: A callable that moves a batch to the device with the configured memory format.
 
     Returns:
@@ -198,16 +202,23 @@ def _build_detector_predict(
     """
 
     def predict(inputs: torch.Tensor, **kwargs: Any) -> list[dict[str, dict[str, Any]]]:
-        with autocast_context():
+        with autocast_context:
             _, raw_predictions = runner.model(move_inputs(inputs))
-        return [
-            {
-                "detection": {
-                    "bboxes": item["boxes"].cpu().numpy().reshape(-1, 4),
-                    "scores": item["scores"].cpu().numpy().reshape(-1),
-                }
-            }
-            for item in raw_predictions
-        ]
+        if not raw_predictions:
+            return []
+        # Copies the batch's detections to host in two transfers, then slices the resulting arrays per image. Each
+        # transfer synchronizes the device, so their count rather than the few hundred bytes they carry sets the cost,
+        # and one pair per image would scale that count with the batch size. Reading a tensor's length is metadata
+        # access, so it adds no synchronization of its own.
+        detection_counts = [len(item["boxes"]) for item in raw_predictions]
+        boxes = torch.cat([item["boxes"] for item in raw_predictions]).cpu().numpy().reshape(-1, 4)
+        scores = torch.cat([item["scores"] for item in raw_predictions]).cpu().numpy().reshape(-1)
+        predictions: list[dict[str, dict[str, Any]]] = []
+        start = 0
+        for count in detection_counts:
+            stop = start + count
+            predictions.append({"detection": {"bboxes": boxes[start:stop], "scores": scores[start:stop]}})
+            start = stop
+        return predictions
 
     return predict

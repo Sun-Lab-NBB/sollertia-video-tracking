@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-type KeypointSeries = tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]
+type _KeypointSeries = tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]
 _DISCARDED_INTERVAL_ALPHA: float
 
 class OutlierAlgorithm(StrEnum):
@@ -15,7 +15,8 @@ class OutlierAlgorithm(StrEnum):
 
 def uncertain_outlier_indices(predictions: pd.DataFrame, minimum_confidence: float) -> list[int]: ...
 def jump_outlier_indices(predictions: pd.DataFrame, pixel_distance_threshold: float) -> list[int]: ...
-def fitting_keypoint_series(predictions: pd.DataFrame) -> list[KeypointSeries]: ...
+def fitting_keypoint_count(predictions: pd.DataFrame) -> int: ...
+def fitting_keypoint_series(predictions: pd.DataFrame, keypoint_index: int) -> _KeypointSeries: ...
 def fit_keypoint_distance(
     horizontal_positions: NDArray[np.float64],
     vertical_positions: NDArray[np.float64],

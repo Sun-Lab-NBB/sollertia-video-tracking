@@ -49,17 +49,21 @@ from sollertia_video_tracking.training.optimization import MultiGpuStrategy, Opt
 class _FakeLoader:
     """Stands in for DeepLabCut's DLCLoader, exposing only the attributes the pipeline reads."""
 
-    def __init__(self, model_cfg, pose_task, model_folder):
+    def __init__(self, model_cfg, pose_task, model_folder, image_sizes=((512, 512),)):
         self.model_cfg = model_cfg
         self.pose_task = pose_task
         self.model_folder = model_folder
         self.updates = []
+        self.image_sizes = image_sizes
 
     def update_model_cfg(self, updates):
         self.updates.append(updates)
 
     def create_dataset(self, transform, mode, task):
         return ("dataset", mode, task, transform)
+
+    def load_data(self, _split):
+        return {"images": [{"height": height, "width": width} for height, width in self.image_sizes]}
 
 
 # TrainingSummary.describe
@@ -374,13 +378,35 @@ def test_build_dataloaders_ddp_injects_distributed_sampler(monkeypatch):
     assert dataloader_calls[0]["num_workers"] == 2
     assert dataloader_calls[0]["pin_memory"] is True
     assert dataloader_calls[0]["persistent_workers"] is True
-    # The validation loader always scores one frame at a time, never shuffles, and loads in the training process.
-    assert dataloader_calls[1]["batch_size"] == 1
+    # Uniformly sized labeled frames let validation batch, capped at the training batch size. It never shuffles and
+    # loads in the training process.
+    assert dataloader_calls[1]["batch_size"] == 4
     assert dataloader_calls[1]["shuffle"] is False
     assert "num_workers" not in dataloader_calls[1]
     assert "persistent_workers" not in dataloader_calls[1]
     assert dataloader_calls[1]["pin_memory"] is True
     assert (train_loader, valid_loader) == (("dataloader", 1), ("dataloader", 2))
+
+
+def test_build_dataloaders_drops_validation_to_one_frame_on_mixed_resolutions(monkeypatch):
+    """Verifies that labeled frames spanning several resolutions force validation back to one frame per batch."""
+    dataloader_calls, _sampler_calls, _collate = _patch_dataloader_factories(monkeypatch)
+    loader = _FakeLoader(
+        model_cfg={},
+        pose_task=Task.BOTTOM_UP,
+        model_folder=Path("/m"),
+        image_sizes=((512, 512), (640, 480)),
+    )
+    run_config = {
+        "data": {"train": {}, "inference": {}},
+        "train_settings": {"batch_size": 8, "dataloader_workers": 0, "dataloader_pin_memory": False},
+    }
+
+    _build_dataloaders(loader=loader, run_config=run_config, task=Task.BOTTOM_UP, ddp=False, rank=0, world_size=1)
+
+    # Default collation cannot stack frames of differing size, so the training batch size is not carried over.
+    assert dataloader_calls[0]["batch_size"] == 8
+    assert dataloader_calls[1]["batch_size"] == 1
 
 
 def test_build_dataloaders_single_process_shuffles_without_collate(monkeypatch):
@@ -404,7 +430,7 @@ def test_build_dataloaders_single_process_shuffles_without_collate(monkeypatch):
     assert dataloader_calls[0]["batch_size"] == 8
     assert dataloader_calls[0]["num_workers"] == 0
     assert dataloader_calls[0]["pin_memory"] is False
-    assert dataloader_calls[1]["batch_size"] == 1
+    assert dataloader_calls[1]["batch_size"] == 8
     assert "num_workers" not in dataloader_calls[1]
 
 

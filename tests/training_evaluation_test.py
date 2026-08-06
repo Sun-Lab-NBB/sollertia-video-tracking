@@ -31,7 +31,7 @@ from sollertia_video_tracking.training.evaluation import (
     evaluate_trained_model,
     _derive_relative_image_path,
     _surviving_individual_indices,
-    _resolve_evaluation_batch_size,
+    resolve_evaluation_batch_size,
     _realign_memory_replay_parameters,
 )
 
@@ -199,31 +199,31 @@ def test_rank_worst_keypoints_empty_when_no_metrics() -> None:
     assert _rank_worst_keypoints(metrics={}, bodyparts=["only"]) == []
 
 
-# _resolve_evaluation_batch_size
+# resolve_evaluation_batch_size
 def test_resolve_batch_size_one_is_kept() -> None:
     """Verifies that a requested size of one short-circuits without inspecting any frame."""
     loader = _loader_with_images({"train": [], "test": []})
-    assert _resolve_evaluation_batch_size(loader=loader, requested=1) == 1
+    assert resolve_evaluation_batch_size(loader=loader, requested=1) == 1
 
 
 def test_resolve_batch_size_uniform_resolution_keeps_request() -> None:
     """Verifies that when every frame shares one native resolution the requested batch size is kept."""
     uniform = {"train": [{"height": 100, "width": 200}], "test": [{"height": 100, "width": 200}]}
-    assert _resolve_evaluation_batch_size(loader=_loader_with_images(uniform), requested=8) == 8
+    assert resolve_evaluation_batch_size(loader=_loader_with_images(uniform), requested=8) == 8
 
 
 def test_resolve_batch_size_multiple_resolutions_falls_to_one(caplog: pytest.LogCaptureFixture) -> None:
     """Verifies that frames spanning more than one resolution cannot be stacked, so the batch size drops to one."""
     multi = {"train": [{"height": 100, "width": 200}], "test": [{"height": 50, "width": 60}]}
     with caplog.at_level("INFO"):
-        assert _resolve_evaluation_batch_size(loader=_loader_with_images(multi), requested=8) == 1
+        assert resolve_evaluation_batch_size(loader=_loader_with_images(multi), requested=8) == 1
     assert "multiple resolutions" in caplog.text
 
 
 def test_resolve_batch_size_missing_dimension_falls_to_one() -> None:
     """Verifies that a frame whose header lacks a dimension is treated as unbatchable, so batch size drops to one."""
     missing = {"train": [{"height": None, "width": 200}], "test": []}
-    assert _resolve_evaluation_batch_size(loader=_loader_with_images(missing), requested=8) == 1
+    assert resolve_evaluation_batch_size(loader=_loader_with_images(missing), requested=8) == 1
 
 
 # _resolve_snapshot

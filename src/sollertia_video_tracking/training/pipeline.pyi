@@ -18,6 +18,7 @@ from .runners import build_optimized_training_runner as build_optimized_training
 from .evaluation import (
     EvaluationSummary as EvaluationSummary,
     evaluate_trained_model as evaluate_trained_model,
+    resolve_evaluation_batch_size as resolve_evaluation_batch_size,
 )
 from .optimization import (
     MultiGpuStrategy as MultiGpuStrategy,

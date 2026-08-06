@@ -9,6 +9,7 @@ from sollertia_video_tracking.frame_extraction.outlier_detection import (
     OutlierAlgorithm,
     jump_outlier_indices,
     fit_keypoint_distance,
+    fitting_keypoint_count,
     fitting_keypoint_series,
     fitting_outlier_indices,
     uncertain_outlier_indices,
@@ -95,24 +96,34 @@ def test_jump_sums_displacement_across_individuals_sharing_a_bodypart() -> None:
     assert jump_outlier_indices(predictions=predictions, pixel_distance_threshold=6.0) == []
 
 
+# fitting_keypoint_count
+def test_fitting_keypoint_count_groups_columns_into_channel_triples() -> None:
+    """Verifies that the keypoint count is the column count divided by the three channels each keypoint carries."""
+    predictions = _make_predictions(
+        per_bodypart={
+            "bp0": ([1.0, 2.0], [3.0, 4.0], [0.7, 0.8]),
+            "bp1": ([5.0, 6.0], [7.0, 8.0], [0.1, 0.2]),
+            "bp2": ([9.0, 10.0], [11.0, 12.0], [0.3, 0.4]),
+        },
+    )
+    assert fitting_keypoint_count(predictions) == 3
+
+
 # fitting_keypoint_series
-def test_fitting_keypoint_series_splits_into_contiguous_channel_arrays() -> None:
-    """Verifies that each keypoint becomes one (x, y, likelihood) tuple of contiguous arrays, in column order."""
+def test_fitting_keypoint_series_returns_the_indexed_keypoints_contiguous_channels() -> None:
+    """Verifies that each keypoint index selects its own (x, y, likelihood) contiguous arrays, in column order."""
     predictions = _make_predictions(
         per_bodypart={
             "bp0": ([1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [0.7, 0.8, 0.9]),
             "bp1": ([10.0, 11.0, 12.0], [13.0, 14.0, 15.0], [0.1, 0.2, 0.3]),
         },
     )
-    series = fitting_keypoint_series(predictions)
-    assert len(series) == 2
-
-    horizontal_0, vertical_0, confidence_0 = series[0]
+    horizontal_0, vertical_0, confidence_0 = fitting_keypoint_series(predictions=predictions, keypoint_index=0)
     np.testing.assert_array_equal(horizontal_0, [1.0, 2.0, 3.0])
     np.testing.assert_array_equal(vertical_0, [4.0, 5.0, 6.0])
     np.testing.assert_array_equal(confidence_0, [0.7, 0.8, 0.9])
 
-    horizontal_1, vertical_1, confidence_1 = series[1]
+    horizontal_1, vertical_1, confidence_1 = fitting_keypoint_series(predictions=predictions, keypoint_index=1)
     np.testing.assert_array_equal(horizontal_1, [10.0, 11.0, 12.0])
     np.testing.assert_array_equal(vertical_1, [13.0, 14.0, 15.0])
     np.testing.assert_array_equal(confidence_1, [0.1, 0.2, 0.3])
@@ -241,7 +252,7 @@ def _make_predictions(
     """Builds a single-animal DeepLabCut prediction table from per-bodypart (x, y, likelihood) triples.
 
     The columns carry the ``scorer / bodyparts / coords`` MultiIndex the detection functions read, ordered so that each
-    keypoint's ``x, y, likelihood`` channels are contiguous, matching the reshape in fitting_keypoint_series.
+    keypoint's ``x, y, likelihood`` channels are contiguous, matching the grouping fitting_keypoint_series reads.
     """
     bodyparts = list(per_bodypart.keys())
     frame_count = len(next(iter(per_bodypart.values()))[0])

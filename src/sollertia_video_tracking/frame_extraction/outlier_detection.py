@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     import pandas as pd
     from numpy.typing import NDArray
 
-type KeypointSeries = tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]
+type _KeypointSeries = tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]
 """One keypoint's per-frame horizontal positions, vertical positions, and confidences, as three float arrays."""
 
 _DISCARDED_INTERVAL_ALPHA: float = 0.01
@@ -84,32 +84,40 @@ def jump_outlier_indices(predictions: pd.DataFrame, pixel_distance_threshold: fl
     return predictions.index[(per_bodypart > pixel_distance_threshold**2).any(axis=1)].tolist()
 
 
-def fitting_keypoint_series(predictions: pd.DataFrame) -> list[KeypointSeries]:
-    """Splits a prediction table into per-keypoint position-and-confidence trajectories for SARIMAX fitting.
+def fitting_keypoint_count(predictions: pd.DataFrame) -> int:
+    """Counts the keypoints a prediction table's columns encode.
 
     Notes:
-        The columns are reshaped into ``(frames, keypoints, 3)`` exactly as DeepLabCut does before fitting, so every
-        ``(individual, bodypart)`` keypoint becomes one work item regardless of whether the project is single- or
+        The columns are grouped into ``(x, y, likelihood)`` triples exactly as DeepLabCut groups them before fitting,
+        so every ``(individual, bodypart)`` keypoint counts once regardless of whether the project is single- or
         multi-animal.
+
+    Args:
+        predictions: The prediction table for one video, restricted to the comparison bodyparts.
+
+    Returns:
+        The number of keypoints the table holds.
+    """
+    return predictions.shape[1] // 3
+
+
+def fitting_keypoint_series(predictions: pd.DataFrame, keypoint_index: int) -> _KeypointSeries:
+    """Extracts one keypoint's position-and-confidence trajectory for SARIMAX fitting.
 
     Args:
         predictions: The prediction table for one video, restricted to the comparison bodyparts and sliced to the
             configured start/stop window.
+        keypoint_index: The position of the keypoint among the table's ``(x, y, likelihood)`` column triples.
 
     Returns:
-        One ``(horizontal_positions, vertical_positions, confidences)`` tuple of per-frame arrays for each keypoint,
-        in column order.
+        The keypoint's per-frame horizontal positions, vertical positions, and confidences.
     """
-    channels = predictions.to_numpy(dtype=np.float64).reshape((predictions.shape[0], -1, 3))
-    horizontal_positions, vertical_positions, confidences = channels.T
-    return [
-        (
-            np.ascontiguousarray(horizontal_positions[keypoint]),
-            np.ascontiguousarray(vertical_positions[keypoint]),
-            np.ascontiguousarray(confidences[keypoint]),
-        )
-        for keypoint in range(horizontal_positions.shape[0])
-    ]
+    channels = predictions.iloc[:, keypoint_index * 3 : (keypoint_index + 1) * 3].to_numpy(dtype=np.float64)
+    return (
+        np.ascontiguousarray(channels[:, 0]),
+        np.ascontiguousarray(channels[:, 1]),
+        np.ascontiguousarray(channels[:, 2]),
+    )
 
 
 def fit_keypoint_distance(

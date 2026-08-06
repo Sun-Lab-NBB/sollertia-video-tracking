@@ -370,6 +370,13 @@ def test_detector_predict_no_amp():
     assert output[1]["detection"]["scores"].tolist() == pytest.approx([0.8, 0.7])
 
 
+def test_detector_predict_returns_empty_for_a_batch_with_no_detections():
+    """Verifies that a batch the detector returns nothing for yields no rows rather than concatenating empty tensors."""
+    runner = _new_detector_runner(items=[])
+    runners._optimize_inference_runner(runner=runner, profile=_make_profile(amp_dtype=None))
+    assert runner.predict(torch.zeros(2, 5)) == []
+
+
 def test_detector_predict_channels_last_and_amp():
     """Verifies that with channels_last and bfloat16 autocast the detector move path runs contiguous under autocast."""
     runner = _new_detector_runner(items=_detector_items())

@@ -26,7 +26,7 @@ from deeplabcut.pose_estimation_pytorch.runners.logger import setup_file_logging
 
 from .monitor import TrainingMonitor, QueueTrainingLogger
 from .runners import build_optimized_training_runner
-from .evaluation import EvaluationSummary, evaluate_trained_model
+from .evaluation import EvaluationSummary, evaluate_trained_model, resolve_evaluation_batch_size
 from .optimization import MultiGpuStrategy, OptimizationProfile, apply_runtime_optimizations
 
 _logger = logging.getLogger(__name__)
@@ -667,12 +667,17 @@ def _build_dataloaders(
             pin_memory=pin_memory,
             persistent_workers=worker_count > 0,
         )
-    # Validation draws single-image batches over the held-out split, so worker processes add a second pool whose spawn
-    # cost is not repaid by the little decoding they do. Loading it in the training process keeps that pool off the
-    # platforms that spawn rather than fork, where each worker pays a full interpreter start.
+    # Validation batches only as far as the training batch size. Its forward pass runs under no-grad, so a batch the
+    # training step already holds cannot exhaust the device, which keeps the larger batch from turning a run that fits
+    # into one that runs out of memory mid-epoch. The size drops back to one whenever the labeled frames span several
+    # resolutions, which default collation cannot stack.
+    valid_batch_size = resolve_evaluation_batch_size(loader=loader, requested=batch_size)
+    # Validation decodes little, so worker processes add a second pool whose spawn cost is not repaid. Loading it in
+    # the training process keeps that pool off the platforms that spawn rather than fork, where each worker pays a
+    # full interpreter start.
     valid_dataloader = DataLoader(
         dataset=valid_dataset,
-        batch_size=1,
+        batch_size=valid_batch_size,
         shuffle=False,
         pin_memory=pin_memory,
     )

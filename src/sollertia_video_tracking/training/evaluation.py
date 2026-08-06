@@ -192,7 +192,7 @@ def evaluate_trained_model(
     parameters = loader.get_dataset_parameters()
     single_animal = parameters.max_num_animals == 1
     cutoff = float(loader.project_cfg.get("pcutoff", 0.6)) if confidence_cutoff is None else float(confidence_cutoff)
-    batch_size = _resolve_evaluation_batch_size(loader=loader, requested=batch_size)
+    batch_size = resolve_evaluation_batch_size(loader=loader, requested=batch_size)
 
     pose_snapshot = _resolve_snapshot(loader=loader, index=snapshot_index, task=loader.pose_task)
     detector_snapshot = None
@@ -313,7 +313,7 @@ def evaluate_trained_model(
     )
 
 
-def _resolve_evaluation_batch_size(loader: DLCLoader, requested: int) -> int:
+def resolve_evaluation_batch_size(loader: DLCLoader, requested: int) -> int:
     """Reduces the evaluation batch size to one unless every labeled frame shares a single native resolution.
 
     DeepLabCut's inference runner stacks each forward-pass batch into one tensor, and its evaluation transforms do not

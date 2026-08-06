@@ -14,7 +14,6 @@ from dataclasses import dataclass
 import multiprocessing
 
 import cv2
-import numpy as np
 import pandas as pd
 from deeplabcut.utils import auxfun_multianimal, auxiliaryfunctions, frameselectiontools
 from deeplabcut.refine_training_dataset import outlier_frames as dlc_outlier_frames
@@ -32,16 +31,17 @@ from .utilities import (
 from .frame_reading import make_fast_kmeans_selector
 from .cpu_allocation import DEFAULT_RESERVED_CORE_COUNT, plan_core_allocation
 from .outlier_detection import (
-    KeypointSeries,
     OutlierAlgorithm,
     jump_outlier_indices,
     fit_keypoint_distance,
+    fitting_keypoint_count,
     fitting_keypoint_series,
     fitting_outlier_indices,
     uncertain_outlier_indices,
 )
 
 if TYPE_CHECKING:
+    import numpy as np
     from numpy.typing import NDArray
 
 _CROP_FIELD_COUNT: int = 4
@@ -488,7 +488,7 @@ def _detect_all_videos(
         ``(video, detail)`` detection failures.
     """
     candidates: dict[str, list[int]] = {}
-    keypoint_series_by_video: dict[str, list[KeypointSeries]] = {}
+    fitting_keypoint_counts: dict[str, int] = {}
     unanalyzed_videos: list[str] = []
     errors: list[tuple[str, str]] = []
 
@@ -519,7 +519,9 @@ def _detect_all_videos(
                     predictions=comparison_predictions, pixel_distance_threshold=pixel_distance_threshold
                 )
             else:
-                keypoint_series_by_video[video] = fitting_keypoint_series(comparison_predictions)
+                # Only the keypoint count is kept here. Each fit reloads its own keypoint inside the worker, so the
+                # parent never retains one trajectory set per video, and the pool receives paths instead of arrays.
+                fitting_keypoint_counts[video] = fitting_keypoint_count(comparison_predictions)
         except FileNotFoundError:
             unanalyzed_videos.append(video)
             continue
@@ -527,7 +529,7 @@ def _detect_all_videos(
             errors.append((video, "detection error:\n" + traceback.format_exc()))
             continue
 
-    if keypoint_series_by_video:
+    if fitting_keypoint_counts:
         # The fitting reduction needs a valid numframes2pick to size its fallback selection. Guards it here (the k-means
         # budgeted path guards the identical value) so a config that is missing or nulls the key fails with a clean
         # ValueError the CLI reports, rather than an uncaught KeyError/TypeError escaping as a raw traceback.
@@ -540,7 +542,11 @@ def _detect_all_videos(
             raise ValueError(message)
         candidates.update(
             _detect_fitting_outliers(
-                keypoint_series_by_video=keypoint_series_by_video,
+                fitting_keypoint_counts=fitting_keypoint_counts,
+                scorer=scorer,
+                configuration=configuration,
+                tracking_method=tracking_method,
+                resolved_comparison_bodyparts=resolved_comparison_bodyparts,
                 frames_per_video_count=frames_per_video_count,
                 pixel_distance_threshold=pixel_distance_threshold,
                 minimum_confidence=minimum_confidence,
@@ -559,7 +565,11 @@ def _detect_all_videos(
 
 def _detect_fitting_outliers(
     *,
-    keypoint_series_by_video: dict[str, list[KeypointSeries]],
+    fitting_keypoint_counts: dict[str, int],
+    scorer: str,
+    configuration: dict[str, Any],
+    tracking_method: str,
+    resolved_comparison_bodyparts: list[str],
     frames_per_video_count: int,
     pixel_distance_threshold: float,
     minimum_confidence: float,
@@ -574,9 +584,17 @@ def _detect_fitting_outliers(
     Flattening every video's keypoints into a single pool keeps all usable cores busy even when only a few videos are
     refined, which is the expensive path the fitting algorithm needs to scale on high-core machines.
 
+    Notes:
+        Each work item names a video and a keypoint rather than carrying its trajectory, so the parent holds no
+        trajectory at all and the pool ships paths instead of arrays. The worker reloads the video's prediction table,
+        which costs about a thousandth of the SARIMAX fit it then performs.
+
     Args:
-        keypoint_series_by_video: The per-keypoint ``(x, y, likelihood)`` trajectories for each video needing SARIMAX
-            fits.
+        fitting_keypoint_counts: The number of keypoints to fit for each video needing SARIMAX fits.
+        scorer: The DeepLabCut scorer string naming each video's prediction files.
+        configuration: The loaded project configuration, reused by each worker to reload its video's predictions.
+        tracking_method: The resolved multi-animal tracker method.
+        resolved_comparison_bodyparts: The comparison bodyparts each worker restricts its reloaded table to.
         frames_per_video_count: The project's ``numframes2pick``, used to size the fallback selection.
         pixel_distance_threshold: The averaged-deviation bound above which a frame is flagged.
         minimum_confidence: The likelihood below which a position is treated as missing while fitting.
@@ -589,15 +607,18 @@ def _detect_fitting_outliers(
     Returns:
         The outlier candidate frames keyed by video.
     """
-    tasks: list[tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], float, int, int]] = []
+    tasks: list[tuple[str, int, str, dict[str, Any], str, list[str], float, int, int]] = []
     owner_videos: list[str] = []
-    for video, keypoint_series in keypoint_series_by_video.items():
-        for horizontal_positions, vertical_positions, confidences in keypoint_series:
+    for video, keypoint_count in fitting_keypoint_counts.items():
+        for keypoint_index in range(keypoint_count):
             tasks.append(
                 (
-                    horizontal_positions,
-                    vertical_positions,
-                    confidences,
+                    video,
+                    keypoint_index,
+                    scorer,
+                    configuration,
+                    tracking_method,
+                    resolved_comparison_bodyparts,
                     minimum_confidence,
                     autoregressive_degree,
                     moving_average_degree,
@@ -611,16 +632,16 @@ def _detect_fitting_outliers(
     resolved_fitting_worker_count = max(1, min(resolved_fitting_worker_count, len(tasks)))
     if display_progress:
         sys.stderr.write(
-            f"fitting {len(tasks)} keypoint trajectories across {len(keypoint_series_by_video)} video(s) on "
+            f"fitting {len(tasks)} keypoint trajectories across {len(fitting_keypoint_counts)} video(s) on "
             f"{resolved_fitting_worker_count} processes\n"
         )
         sys.stderr.flush()
 
     context = multiprocessing.get_context("spawn")
     with context.Pool(processes=resolved_fitting_worker_count) as pool:
-        keypoint_deviations = pool.starmap(func=fit_keypoint_distance, iterable=tasks)
+        keypoint_deviations = pool.starmap(func=_fit_video_keypoint, iterable=tasks)
 
-    deviations_by_video: dict[str, list[NDArray[np.float64]]] = {video: [] for video in keypoint_series_by_video}
+    deviations_by_video: dict[str, list[NDArray[np.float64]]] = {video: [] for video in fitting_keypoint_counts}
     for video, deviation in zip(owner_videos, keypoint_deviations, strict=True):
         deviations_by_video[video].append(deviation)
 
@@ -632,6 +653,56 @@ def _detect_fitting_outliers(
         )
         for video, video_deviations in deviations_by_video.items()
     }
+
+
+def _fit_video_keypoint(
+    video: str,
+    keypoint_index: int,
+    scorer: str,
+    configuration: dict[str, Any],
+    tracking_method: str,
+    resolved_comparison_bodyparts: list[str],
+    minimum_confidence: float,
+    autoregressive_degree: int,
+    moving_average_degree: int,
+) -> NDArray[np.float64]:
+    """Reloads one keypoint's trajectory inside a fit worker and returns its per-frame deviation from a SARIMAX fit.
+
+    Args:
+        video: The analyzed video whose predictions the worker reloads.
+        keypoint_index: The position of the keypoint among the table's ``(x, y, likelihood)`` column triples.
+        scorer: The DeepLabCut scorer string naming the prediction files.
+        configuration: The loaded project configuration, read for the start/stop bounds and the video's crop margins.
+        tracking_method: The resolved multi-animal tracker method.
+        resolved_comparison_bodyparts: The comparison bodyparts the reloaded table is restricted to.
+        minimum_confidence: The likelihood below which a position is treated as missing while fitting.
+        autoregressive_degree: The autoregressive degree of the SARIMAX model.
+        moving_average_degree: The moving-average degree of the SARIMAX model.
+
+    Returns:
+        The keypoint's per-frame Euclidean distance between the observed position and the model's fitted position.
+    """
+    predictions = _load_sliced_predictions(
+        video=video,
+        video_predictions_directory=Path(video).parent,
+        scorer=scorer,
+        configuration=configuration,
+        tracking_method=tracking_method,
+    )
+    comparison_predictions = predictions.loc[
+        :, predictions.columns.get_level_values("bodyparts").isin(resolved_comparison_bodyparts)
+    ]
+    horizontal_positions, vertical_positions, confidences = fitting_keypoint_series(
+        predictions=comparison_predictions, keypoint_index=keypoint_index
+    )
+    return fit_keypoint_distance(
+        horizontal_positions=horizontal_positions,
+        vertical_positions=vertical_positions,
+        confidences=confidences,
+        minimum_confidence=minimum_confidence,
+        autoregressive_degree=autoregressive_degree,
+        moving_average_degree=moving_average_degree,
+    )
 
 
 def _extract_all_videos(
@@ -830,14 +901,15 @@ def _load_sliced_predictions(
     frame_count = len(predictions)
     start_index = max(math.floor(frame_count * configuration["start"]), 0)
     stop_index = min(math.ceil(frame_count * configuration["stop"]), frame_count)
-    window = np.arange(start_index, stop_index)
 
     output_crop_x, output_crop_y = _video_cropping_offset(configuration=configuration, video=video)
     if metadata.get("data", {}).get("cropping"):
         x1, _, y1, _ = metadata["data"]["cropping_parameters"]
         predictions.iloc[:, predictions.columns.get_level_values(level="coords") == "x"] += x1 - output_crop_x
         predictions.iloc[:, predictions.columns.get_level_values(level="coords") == "y"] += y1 - output_crop_y
-    return predictions.iloc[window]
+    # Slices rather than gathering through a positional index array, so the window is a view over the already-owned
+    # table instead of a second full copy of it.
+    return predictions.iloc[start_index:stop_index]
 
 
 def _video_cropping_offset(configuration: dict[str, Any], video: str) -> tuple[int, int]:
