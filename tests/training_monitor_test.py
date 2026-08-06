@@ -1,6 +1,6 @@
 """Contains tests for the training progress monitor and its rank-0 queue logger (training/monitor.py).
 
-These drive the logger and renderer directly with tiny in-memory messages; no queue thread, DLC runtime, or GPU is
+These drive the logger and renderer directly with tiny in-memory messages. No queue thread, DLC runtime, or GPU is
 started. The renderer's compose/ingest helpers are exercised in isolation so every line is covered deterministically.
 """
 
@@ -12,33 +12,6 @@ from sollertia_video_tracking.training.monitor import (
     TrainingMonitor,
     QueueTrainingLogger,
 )
-
-
-class _RecordingQueue:
-    """A minimal queue stand-in that records every message put on it via put_nowait."""
-
-    def __init__(self) -> None:
-        self.messages: list[object] = []
-
-    def put_nowait(self, message: object) -> None:
-        self.messages.append(message)
-
-
-class _RaisingQueue:
-    """A queue stand-in whose put_nowait always raises, to drive the suppressed-error path."""
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def put_nowait(self, *_: object) -> None:
-        self.calls += 1
-        raise RuntimeError
-
-
-def _make_monitor() -> TrainingMonitor:
-    """Builds a TrainingMonitor over a recording queue and a non-tty StringIO stream (no thread started)."""
-    return TrainingMonitor(progress_queue=_RecordingQueue(), stream=io.StringIO())
-
 
 # QueueTrainingLogger
 
@@ -352,3 +325,29 @@ def test_repr_reports_task_and_epoch_progress() -> None:
     monitor._total_epochs = 100
     monitor._current_epoch = 3
     assert repr(monitor) == "TrainingMonitor(task=pose, epoch=3/100)"
+
+
+class _RecordingQueue:
+    """Records every message placed on the queue through put_nowait."""
+
+    def __init__(self) -> None:
+        self.messages: list[object] = []
+
+    def put_nowait(self, message: object) -> None:
+        self.messages.append(message)
+
+
+class _RaisingQueue:
+    """Raises from put_nowait on every call, driving the suppressed-error path."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def put_nowait(self, *_: object) -> None:
+        self.calls += 1
+        raise RuntimeError
+
+
+def _make_monitor() -> TrainingMonitor:
+    """Builds a TrainingMonitor over a recording queue and a non-tty StringIO stream (no thread started)."""
+    return TrainingMonitor(progress_queue=_RecordingQueue(), stream=io.StringIO())

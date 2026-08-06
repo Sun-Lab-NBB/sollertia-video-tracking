@@ -18,42 +18,6 @@ from sollertia_video_tracking.training.optimization import (
 )
 
 
-# Helpers
-def _set_cuda(monkeypatch: pytest.MonkeyPatch, count: int) -> None:
-    """Fakes the visible CUDA device count so the resolvers see a deterministic machine."""
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: count > 0)
-    monkeypatch.setattr(torch.cuda, "device_count", lambda: count)
-
-
-def _set_capabilities(monkeypatch: pytest.MonkeyPatch, capabilities: dict[int, tuple[int, int]]) -> None:
-    """Fakes per-index CUDA compute capabilities for the Ampere check."""
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: capabilities[device])
-
-
-def _set_cpu_count(monkeypatch: pytest.MonkeyPatch, count: int | None) -> None:
-    """Pins the reported CPU core count so worker and thread budgets are deterministic."""
-    monkeypatch.setattr(os, "cpu_count", lambda: count)
-
-
-def _profile(**overrides: object) -> OptimizationProfile:
-    """Builds an OptimizationProfile with sensible defaults, overriding only the fields a test cares about."""
-    fields: dict[str, object] = {
-        "device": "cpu",
-        "gpus": (),
-        "multi_gpu_strategy": MultiGpuStrategy.SINGLE,
-        "amp_dtype": None,
-        "use_gradient_scaler": False,
-        "tf32": False,
-        "cudnn_benchmark": False,
-        "torch_compile": False,
-        "dataloader_workers": 0,
-        "pin_memory": False,
-        "cpu_threads": None,
-    }
-    fields.update(overrides)
-    return OptimizationProfile(**fields)  # type: ignore[arg-type]
-
-
 # MultiGpuStrategy enum
 def test_multi_gpu_strategy_string_values() -> None:
     """Verifies that the multi-GPU strategy enum is a string enum with the documented literal values."""
@@ -158,33 +122,33 @@ def test_resolve_multi_gpu_two_gpus_ddp_stays_ddp() -> None:
 # _choose_dataloader_worker_count
 def test_choose_workers_caps_at_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies that a single rank on a big box is capped at the automatic worker ceiling."""
-    _set_cpu_count(monkeypatch, 32)  # usable = 30, but ceiling is 8.
+    _set_cpu_count(monkeypatch, count=32)  # usable = 30, but ceiling is 8.
     assert _choose_dataloader_worker_count(world_size=1) == 8
 
 
 def test_choose_workers_splits_across_ranks(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies that the usable cores are divided evenly across the training ranks."""
-    _set_cpu_count(monkeypatch, 12)  # usable = 10, split across 4 ranks -> 2 each.
+    _set_cpu_count(monkeypatch, count=12)  # usable = 10, split across 4 ranks -> 2 each.
     assert _choose_dataloader_worker_count(world_size=4) == 2
 
 
 def test_choose_workers_floors_at_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies that a machine with fewer cores than the reserve floors the worker count at zero."""
-    _set_cpu_count(monkeypatch, 1)  # usable = -1, floored to 0.
+    _set_cpu_count(monkeypatch, count=1)  # usable = -1, floored to 0.
     assert _choose_dataloader_worker_count(world_size=1) == 0
 
 
 def test_choose_workers_handles_unknown_cpu_count(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies that when os.cpu_count returns None the fallback of one core is used, yielding zero workers."""
-    _set_cpu_count(monkeypatch, None)  # (None or 1) - 2 = -1, floored to 0.
+    _set_cpu_count(monkeypatch, count=None)  # (None or 1) - 2 = -1, floored to 0.
     assert _choose_dataloader_worker_count(world_size=1) == 0
 
 
 # resolve_optimization_profile
 def test_resolve_profile_cpu_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies a CPU run disables CUDA-only optimizations, uses zero workers, and restores the held thread budget."""
-    _set_cuda(monkeypatch, 0)  # No CUDA, so even 'auto' cascades to CPU.
-    _set_cpu_count(monkeypatch, 10)
+    _set_cuda(monkeypatch, count=0)  # No CUDA, so even 'auto' cascades to CPU.
+    _set_cpu_count(monkeypatch, count=10)
     profile = resolve_optimization_profile(device=DeviceType.CPU)
     assert profile.device == "cpu"
     assert profile.gpus == ()
@@ -201,17 +165,17 @@ def test_resolve_profile_cpu_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_resolve_profile_cpu_explicit_worker_count(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies that an explicit non-negative worker count overrides the CPU zero-worker default."""
-    _set_cuda(monkeypatch, 0)
-    _set_cpu_count(monkeypatch, 10)
+    _set_cuda(monkeypatch, count=0)
+    _set_cpu_count(monkeypatch, count=10)
     profile = resolve_optimization_profile(device=DeviceType.CPU, dataloader_workers=4)
     assert profile.dataloader_workers == 4
 
 
 def test_resolve_profile_cuda_single_gpu_ampere(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies a single Ampere GPU auto-enables bfloat16, TF32, and pinning, and auto-picks the worker count."""
-    _set_cuda(monkeypatch, 1)
-    _set_capabilities(monkeypatch, {0: (8, 0)})
-    _set_cpu_count(monkeypatch, 12)
+    _set_cuda(monkeypatch, count=1)
+    _set_capabilities(monkeypatch, capabilities={0: (8, 0)})
+    _set_cpu_count(monkeypatch, count=12)
     profile = resolve_optimization_profile(device=DeviceType.CUDA)
     assert profile.device == "cuda"
     assert profile.gpus == (0,)
@@ -229,9 +193,9 @@ def test_resolve_profile_cuda_disables_compile_without_triton(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Verifies that a CUDA run requesting compilation falls back to eager when Triton is not importable."""
-    _set_cuda(monkeypatch, 1)
-    _set_capabilities(monkeypatch, {0: (8, 0)})
-    _set_cpu_count(monkeypatch, 12)
+    _set_cuda(monkeypatch, count=1)
+    _set_capabilities(monkeypatch, capabilities={0: (8, 0)})
+    _set_cpu_count(monkeypatch, count=12)
     monkeypatch.setattr(importlib.util, "find_spec", lambda name: None if name == "triton" else object())
     profile = resolve_optimization_profile(device=DeviceType.CUDA, torch_compile=Toggle.ON)
     assert profile.torch_compile is False
@@ -240,9 +204,9 @@ def test_resolve_profile_cuda_disables_compile_without_triton(
 
 def test_resolve_profile_cuda_keeps_compile_with_triton(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies that a CUDA run requesting compilation keeps it when Triton is importable."""
-    _set_cuda(monkeypatch, 1)
-    _set_capabilities(monkeypatch, {0: (8, 0)})
-    _set_cpu_count(monkeypatch, 12)
+    _set_cuda(monkeypatch, count=1)
+    _set_capabilities(monkeypatch, capabilities={0: (8, 0)})
+    _set_cpu_count(monkeypatch, count=12)
     monkeypatch.setattr(importlib.util, "find_spec", lambda _name: object())
     profile = resolve_optimization_profile(device=DeviceType.CUDA, torch_compile=Toggle.ON)
     assert profile.torch_compile is True
@@ -250,9 +214,9 @@ def test_resolve_profile_cuda_keeps_compile_with_triton(monkeypatch: pytest.Monk
 
 def test_resolve_profile_cuda_fp16_enables_gradient_scaler(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies that forced float16 on CUDA sets the autocast dtype and requires the gradient scaler."""
-    _set_cuda(monkeypatch, 1)
-    _set_capabilities(monkeypatch, {0: (8, 0)})
-    _set_cpu_count(monkeypatch, 12)
+    _set_cuda(monkeypatch, count=1)
+    _set_capabilities(monkeypatch, capabilities={0: (8, 0)})
+    _set_cpu_count(monkeypatch, count=12)
     profile = resolve_optimization_profile(device=DeviceType.CUDA, amp=AmpMode.FP16)
     assert profile.amp_dtype is torch.float16
     assert profile.use_gradient_scaler is True
@@ -260,9 +224,9 @@ def test_resolve_profile_cuda_fp16_enables_gradient_scaler(monkeypatch: pytest.M
 
 def test_resolve_profile_cuda_ddp_world_size(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies two GPUs under DDP split the worker budget by the world size rather than treating it as one rank."""
-    _set_cuda(monkeypatch, 2)
-    _set_capabilities(monkeypatch, {0: (8, 0), 1: (8, 0)})
-    _set_cpu_count(monkeypatch, 12)
+    _set_cuda(monkeypatch, count=2)
+    _set_capabilities(monkeypatch, capabilities={0: (8, 0), 1: (8, 0)})
+    _set_cpu_count(monkeypatch, count=12)
     profile = resolve_optimization_profile(device=DeviceType.CUDA, gpus=(0, 1), multi_gpu=MultiGpuStrategy.DDP)
     assert profile.multi_gpu_strategy == MultiGpuStrategy.DDP
     assert profile.gpus == (0, 1)
@@ -274,9 +238,9 @@ def test_resolve_profile_dp_with_amp_warns_and_disables(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Verifies that DataParallel with mixed precision requested is warned about and reported as full float32."""
-    _set_cuda(monkeypatch, 2)
-    _set_capabilities(monkeypatch, {0: (8, 0), 1: (8, 0)})
-    _set_cpu_count(monkeypatch, 12)
+    _set_cuda(monkeypatch, count=2)
+    _set_capabilities(monkeypatch, capabilities={0: (8, 0), 1: (8, 0)})
+    _set_cpu_count(monkeypatch, count=12)
     profile = resolve_optimization_profile(
         device=DeviceType.CUDA, gpus=(0, 1), multi_gpu=MultiGpuStrategy.DP, amp=AmpMode.AUTO
     )
@@ -292,9 +256,9 @@ def test_resolve_profile_cudnn_benchmark_forced_on_without_fixed_size_warns(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Verifies that forcing the cuDNN autotuner on without a detected fixed input size enables it but warns."""
-    _set_cuda(monkeypatch, 1)
-    _set_capabilities(monkeypatch, {0: (8, 0)})
-    _set_cpu_count(monkeypatch, 12)
+    _set_cuda(monkeypatch, count=1)
+    _set_capabilities(monkeypatch, capabilities={0: (8, 0)})
+    _set_cpu_count(monkeypatch, count=12)
     profile = resolve_optimization_profile(device=DeviceType.CUDA, cudnn_benchmark=Toggle.ON, fixed_input_size=False)
     assert profile.cudnn_benchmark is True
     assert "cuDNN benchmark was forced on" in capsys.readouterr().err
@@ -304,9 +268,9 @@ def test_resolve_profile_cudnn_benchmark_auto_with_fixed_size_is_silent(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Verifies that the autotuner's 'auto' default enables it for a fixed input size without a warning."""
-    _set_cuda(monkeypatch, 1)
-    _set_capabilities(monkeypatch, {0: (8, 0)})
-    _set_cpu_count(monkeypatch, 12)
+    _set_cuda(monkeypatch, count=1)
+    _set_capabilities(monkeypatch, capabilities={0: (8, 0)})
+    _set_cpu_count(monkeypatch, count=12)
     profile = resolve_optimization_profile(device=DeviceType.CUDA, fixed_input_size=True)
     assert profile.cudnn_benchmark is True
     assert capsys.readouterr().err == ""
@@ -349,3 +313,39 @@ def test_apply_runtime_optimizations_skips_thread_count_when_none(monkeypatch: p
     apply_runtime_optimizations(profile)
     assert forwarded == {"device": "cuda", "tf32": True, "cudnn_benchmark": False}
     assert threads == []  # None thread budget means the intra-op thread count is left untouched.
+
+
+# Helpers
+def _set_cuda(monkeypatch: pytest.MonkeyPatch, count: int) -> None:
+    """Fakes the visible CUDA device count so the resolvers see a deterministic machine."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: count > 0)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: count)
+
+
+def _set_capabilities(monkeypatch: pytest.MonkeyPatch, capabilities: dict[int, tuple[int, int]]) -> None:
+    """Fakes per-index CUDA compute capabilities for the Ampere check."""
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: capabilities[device])
+
+
+def _set_cpu_count(monkeypatch: pytest.MonkeyPatch, count: int | None) -> None:
+    """Pins the reported CPU core count so worker and thread budgets are deterministic."""
+    monkeypatch.setattr(os, "cpu_count", lambda: count)
+
+
+def _profile(**overrides: object) -> OptimizationProfile:
+    """Builds an OptimizationProfile with sensible defaults, overriding only the fields a test cares about."""
+    fields: dict[str, object] = {
+        "device": "cpu",
+        "gpus": (),
+        "multi_gpu_strategy": MultiGpuStrategy.SINGLE,
+        "amp_dtype": None,
+        "use_gradient_scaler": False,
+        "tf32": False,
+        "cudnn_benchmark": False,
+        "torch_compile": False,
+        "dataloader_workers": 0,
+        "pin_memory": False,
+        "cpu_threads": None,
+    }
+    fields.update(overrides)
+    return OptimizationProfile(**fields)  # type: ignore[arg-type]

@@ -128,7 +128,7 @@ def build_superanimal_weight_init(
     Args:
         config: The path of the DeepLabCut project configuration file.
         super_animal: The SuperAnimal dataset to initialize from, one of ``get_available_super_animals``.
-        network_type: The project's pose-model architecture; a ``top_down_`` prefix is stripped to name the SuperAnimal
+        network_type: The project's pose-model architecture. A ``top_down_`` prefix is stripped to name the SuperAnimal
             pose model.
         detector_type: The project's detector architecture for top-down models, or None.
         fine_tune: Determines whether to fine-tune, loading the SuperAnimal decoder head (requires a conversion
@@ -200,9 +200,8 @@ def create_training_dataset(
     """Creates a training-dataset shuffle for a project at parity with the DeepLabCut GUI's create-training-dataset tab.
 
     Wraps DeepLabCut's training-dataset creation for the PyTorch engine, which bakes the model architecture, weight
-    initialization, and train/test split into the shuffle (training is run afterward with ``slvt train``).
-    Multi-animal projects are handled automatically. When ``from_shuffle`` is given, the new shuffle reuses that
-    shuffle's train/test split instead of drawing a fresh one.
+    initialization, and train/test split into the shuffle. Multi-animal projects are handled automatically. When
+    ``from_shuffle`` is given, the new shuffle reuses that shuffle's train/test split instead of drawing a fresh one.
 
     Args:
         config: The path of the DeepLabCut project configuration file.
@@ -318,6 +317,17 @@ class _UnannotatedNoticeFilter:
         self._marker: str = marker
         self._pending: str = ""
 
+    def __getattr__(self, name: str) -> Any:
+        """Delegates stream attributes not defined on the filter to the underlying target stream.
+
+        Args:
+            name: The attribute requested on the filter.
+
+        Returns:
+            The corresponding attribute of the target stream.
+        """
+        return getattr(self._target, name)
+
     def write(self, text: str) -> int:
         """Buffers the text and forwards every newly completed line that does not contain the marker.
 
@@ -343,17 +353,6 @@ class _UnannotatedNoticeFilter:
         if self._pending and self._marker not in self._pending:
             self._target.write(self._pending)
         self._pending = ""
-
-    def __getattr__(self, name: str) -> Any:
-        """Delegates stream attributes not defined on the filter to the underlying target stream.
-
-        Args:
-            name: The attribute requested on the filter.
-
-        Returns:
-            The corresponding attribute of the target stream.
-        """
-        return getattr(self._target, name)
 
 
 @contextlib.contextmanager

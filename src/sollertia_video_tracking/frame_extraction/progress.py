@@ -11,12 +11,12 @@ if TYPE_CHECKING:
     from typing import TextIO
     from collections.abc import Callable, Iterable
 
-_MAX_PROGRESS_UPDATES_PER_VIDEO: int = 100
+_MAXIMUM_PROGRESS_UPDATES_PER_VIDEO: int = 100
 """The approximate number of progress messages each worker targets per video. It sets the base per-video update stride
-of ``frame_total // this value``, which ``_MAX_FRAMES_PER_UPDATE`` then caps. The real message count can therefore
+of ``frame_total // this value``, which ``_MAXIMUM_FRAMES_PER_UPDATE`` then caps. The real message count can therefore
 exceed this target both for very small videos and for very large ones whose stride is capped."""
 
-_MAX_FRAMES_PER_UPDATE: int = 250
+_MAXIMUM_FRAMES_PER_UPDATE: int = 250
 """The largest per-video frame stride between progress messages. It caps the ``frame_total // updates`` stride so a
 video with a very large frame count still reports at a steady, visible cadence. Without the cap a huge
 outlier-candidate pool decoded off a multi-gigabyte file would update only once every one percent of a long decode."""
@@ -37,11 +37,11 @@ def make_progress_reporter(progress_queue: Any, video_index: int, frame_total: i
     Returns:
         A callable that mirrors the tqdm interface and emits throttled progress messages while iterating.
     """
-    frames_per_update = max(1, min(frame_total // _MAX_PROGRESS_UPDATES_PER_VIDEO, _MAX_FRAMES_PER_UPDATE))
+    frames_per_update = max(1, min(frame_total // _MAXIMUM_PROGRESS_UPDATES_PER_VIDEO, _MAXIMUM_FRAMES_PER_UPDATE))
 
     def reporter(iterable: Iterable[Any], *_args: Any, **_kwargs: Any) -> Iterable[Any]:
         """Iterates over the wrapped iterable, forwarding each item and emitting throttled progress messages."""
-        # Announce the video as in flight before its first frame is decoded. A large candidate pool can spend minutes
+        # Announces the video as in flight before its first frame is decoded. A large candidate pool can spend minutes
         # in random-access reads before the first stride is crossed, and this initial zero lets the aggregate bar count
         # the video as actively decoding immediately instead of leaving it invisible until the first stride.
         with contextlib.suppress(Exception):
@@ -61,10 +61,10 @@ class AggregateBar(LiveBar):
 
     Notes:
         The renderer consumes ``("progress", key, count)`` and ``("done", key)`` messages from the shared queue, where
-        ``key`` identifies a work unit (a whole video, or one frame-range chunk of a video), on top of the warm-up,
-        spinner, interval, and ``stop``-sentinel handling inherited from ``LiveBar``. Each reporter announces its work
-        unit with a ``count`` of zero before its first frame is decoded, so the bar leaves the warm-up line for the
-        active bar as soon as any worker begins. It counts every announced but unfinished video as actively decoding.
+        ``key`` identifies a work unit (a whole video, or one frame-range chunk of a video). The warm-up, spinner,
+        interval, and ``stop``-sentinel handling is inherited from ``LiveBar``. Each reporter announces its work unit
+        with a ``count`` of zero before its first frame is decoded, so the bar leaves the warm-up line for the active
+        bar as soon as any worker begins. It counts every announced but unfinished video as actively decoding.
 
     Attributes:
         _total_video_count: The total number of videos in the run.

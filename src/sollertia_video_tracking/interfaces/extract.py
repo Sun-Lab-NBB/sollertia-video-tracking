@@ -38,18 +38,18 @@ class _SharedExtractionParameters:
     """
 
     worker_count: int
-    """How many videos to process at the same time; -1 uses the available CPU cores automatically."""
+    """How many videos to process at the same time. Set to -1 to use the available CPU cores automatically."""
 
     cores_per_worker: int
-    """How many CPU cores to devote to each processed video; -1 gives each worker a saturating block when --workers is
-    automatic, or splits the usable cores evenly across an explicit --workers count."""
+    """How many CPU cores to devote to each processed video. Setting -1 gives each worker a saturating block when
+    --workers is automatic, or splits the usable cores evenly across an explicit --workers count."""
 
     frames_per_video: int
-    """How many frames to keep from each processed video; -1 uses the project's configured amount."""
+    """How many frames to keep from each processed video. Set to -1 to use the project's configured amount."""
 
     clustering_stride: int
-    """How far apart, in frames, to sample before clustering; 1 uses every frame. For ``frames`` this strides the whole
-    video, and for ``outliers`` it strides the flagged candidate frames."""
+    """How far apart, in frames, to sample before clustering. A value of 1 uses every frame. For ``frames`` this strides
+    the whole video, and for ``outliers`` it strides the flagged candidate frames."""
 
     clustering_resize_width: int
     """The width, in pixels, frames are shrunk to before they are compared for similarity."""
@@ -281,16 +281,16 @@ def frames_command(
 ) -> None:
     """Selects initial training frames from a subset of the project's videos by clustering them in parallel.
 
-    Each video is clustered in its own worker process pinned to a disjoint block of CPU cores. ``--frames-per-video``
-    is a per-video ceiling: each selected video is topped up to it, so a not-yet-extracted video gains a full set and a
+    Each video is clustered in its own worker process pinned to a disjoint block of CPU cores. ``--frames-per-video`` is
+    a per-video ceiling: each selected video is topped up to it, so a not-yet-extracted video gains a full set and a
     partly-extracted one gains only the frames that reach the ceiling. Passing ``--total-frames`` selects just enough
-    videos to reach that project-wide total, preferring not-yet-extracted videos and falling back to below-ceiling
-    ones. Any videos named with ``--videos`` are included first. If even topping every eligible video to the ceiling
-    cannot reach the total in one pass, the run reports the shortfall and stops, so raise ``--frames-per-video``, lower
+    videos to reach that project-wide total, preferring not-yet-extracted videos and falling back to below-ceiling ones.
+    Any videos named with ``--videos`` are included first. If even topping every eligible video to the ceiling cannot
+    reach the total in one pass, the run reports the shortfall and stops, so raise ``--frames-per-video``, lower
     ``--total-frames``, or register more videos. Passing ``--exclusive`` with ``--videos`` instead restricts the run to
     exactly those files, topping each up to ``--frames-per-video`` and ignoring the budget and group balancing. Passing
     ``--overwrite`` clears the selected videos' unlabeled frames first so they are re-rolled from scratch (refused for
-    any already in outlier refinement), and ``--reset`` does the same across every not-yet-refined project video; both
+    any already in outlier refinement), and ``--reset`` does the same across every not-yet-refined project video. Both
     keep already-labeled and outlier frames.
     """
     if exclusive and not shared.videos:

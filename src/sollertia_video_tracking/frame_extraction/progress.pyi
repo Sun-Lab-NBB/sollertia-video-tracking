@@ -11,8 +11,8 @@ from ..reporting import (
     format_duration as format_duration,
 )
 
-_MAX_PROGRESS_UPDATES_PER_VIDEO: int
-_MAX_FRAMES_PER_UPDATE: int
+_MAXIMUM_PROGRESS_UPDATES_PER_VIDEO: int
+_MAXIMUM_FRAMES_PER_UPDATE: int
 
 def make_progress_reporter(progress_queue: Any, video_index: int, frame_total: int) -> Callable[..., Iterable[Any]]: ...
 

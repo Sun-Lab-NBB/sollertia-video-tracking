@@ -21,9 +21,15 @@ from ..hardware import (
     resolve_target_device,
 )
 
+_MIN_MULTI_GPU_COUNT: int = 2
+"""The minimum number of selected GPUs required to run any multi-GPU strategy rather than a single device."""
+
+_MAX_AUTO_DATALOADER_WORKERS: int = 8
+"""The upper bound on the automatically chosen number of dataloader workers per training process."""
+
 
 class MultiGpuStrategy(StrEnum):
-    """The multi-GPU execution strategy: automatic, DDP, DataParallel, or a single device."""
+    """Defines the multi-GPU execution strategy: automatic, DDP, DataParallel, or a single device."""
 
     AUTO = "auto"
     """Selects DistributedDataParallel when two or more GPUs are chosen, otherwise a single device. Request-only."""
@@ -33,13 +39,6 @@ class MultiGpuStrategy(StrEnum):
     """Trains with DataParallel in one process, which is slower and cannot combine with mixed precision."""
     SINGLE = "single"
     """Trains on a single device. This is the resolved outcome of selecting one GPU, not a user-selectable request."""
-
-
-_MIN_MULTI_GPU_COUNT: int = 2
-"""The minimum number of selected GPUs required to run any multi-GPU strategy rather than a single device."""
-
-_MAX_AUTO_DATALOADER_WORKERS: int = 8
-"""The upper bound on the automatically chosen number of dataloader workers per training process."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,7 +140,7 @@ def resolve_optimization_profile(
     MPS, float16 off CUDA) is disabled with a warning, while the CUDA-only toggles (``tf32``, ``cudnn_benchmark``,
     ``pin_memory``) are forced off on non-CUDA devices. Mixed precision is additionally disabled with a warning when
     the DataParallel (``"dp"``) strategy is selected, because autocast does not reach DataParallel's per-GPU replica
-    threads; use DDP to combine mixed precision with multi-GPU training.
+    threads. Use DDP to combine mixed precision with multi-GPU training.
 
     Args:
         device: The requested base device (``"auto"``, ``"cpu"``, ``"mps"``, or ``"cuda"``), or None to select
@@ -151,8 +150,8 @@ def resolve_optimization_profile(
         multi_gpu: The requested multi-GPU strategy applied when two or more GPUs are selected. Resolves to a single
             device when fewer than two GPUs are used.
         amp: The requested mixed-precision mode.
-        tf32: The requested TF32 setting (CUDA only; a no-op on other devices).
-        cudnn_benchmark: The requested cuDNN autotuner setting; its ``"auto"`` default follows ``fixed_input_size``,
+        tf32: The requested TF32 setting (CUDA only, a no-op on other devices).
+        cudnn_benchmark: The requested cuDNN autotuner setting. Its ``"auto"`` default follows ``fixed_input_size``,
             since the autotuner only pays off, and only stays deterministic-safe, when the input spatial size is fixed.
         torch_compile: The requested ``torch.compile`` setting. The default leaves it off because its warm-up cost
             may not amortize, and a CUDA run with no importable Triton falls back to eager execution with a warning.
@@ -213,7 +212,7 @@ def resolve_optimization_profile(
         workers = dataloader_workers
     elif base_device == "cpu":
         # Default CPU dataloader workers to 0: on CPU the main process performs the training compute, so worker
-        # processes mostly contend for the same cores. This is the base-config value; some shipped model configs
+        # processes mostly contend for the same cores. This is the base-config value. Some shipped model configs
         # (e.g. RTMPose) use 4, which the operator can restore with an explicit worker count.
         workers = 0
     else:

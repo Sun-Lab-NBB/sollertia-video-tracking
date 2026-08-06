@@ -25,7 +25,7 @@ _DEFAULT_GPU_PROCESSES: int = 1
 
 One process per device is the predictable default: each GPU processes one whole video at a time, which is correct for
 every DeepLabCut backend and needs no per-video coordination. Inference is GPU-compute-bound, so a lone process can
-still leave the device idle in the gaps between and within videos; raising this runs several videos concurrently on
+still leave the device idle in the gaps between and within videos. Raising this runs several videos concurrently on
 one device so one worker's forward pass fills the compute gaps another worker leaves. The useful factor is
 workload-dependent and is best found by measurement rather than assumed."""
 
@@ -97,7 +97,7 @@ class InferenceProfile:
 
     @property
     def total_workers(self) -> int:
-        """Returns the configured maximum number of worker processes; the run spawns fewer when videos are scarce."""
+        """Returns the configured maximum number of worker processes. The run spawns fewer when videos are scarce."""
         if self.on_cuda:
             return len(self.gpus) * self.gpu_processes * self.chunks
         if self.device == "cpu":
@@ -161,13 +161,13 @@ def resolve_inference_profile(
         device: The requested base device (``"auto"``, ``"cpu"``, ``"mps"``, or ``"cuda"``), or None to select
             automatically.
         gpus: The explicitly requested CUDA device indices, or None to use every visible device.
-        amp: The requested mixed-precision mode; ``"auto"`` enables bfloat16 only where it is natively fast.
-        tf32: The requested TF32 setting (CUDA only; a no-op on other devices).
-        cudnn_benchmark: The requested cuDNN autotuner setting; its ``"auto"`` default follows ``fixed_input_size``,
+        amp: The requested mixed-precision mode. ``"auto"`` enables bfloat16 only where it is natively fast.
+        tf32: The requested TF32 setting, which is CUDA only and a no-op on other devices.
+        cudnn_benchmark: The requested cuDNN autotuner setting. Its ``"auto"`` default follows ``fixed_input_size``,
             since the autotuner only pays off when the input spatial size is fixed.
         channels_last: The requested channels-last memory-format setting.
-        torch_compile: The requested ``torch.compile`` setting; disabled by default because of its warm-up cost, which
-            may not amortize over short videos.
+        torch_compile: The requested ``torch.compile`` setting. It is disabled by default because of its warm-up cost,
+            which may not amortize over short videos.
         gpu_processes: The number of worker processes per CUDA device, or -1 to use the default of one video per GPU.
         chunks: The number of contiguous frame-range pieces to split each concurrently analyzed video into, each run in
             parallel by its own worker. One disables intra-video chunking, and values above one raise per-video
@@ -197,7 +197,7 @@ def resolve_inference_profile(
         )
 
     # channels-last helps convolutions on tensor-core GPUs (and oneDNN on CPU) but is only turned on automatically on
-    # CUDA, where the benefit is largest and most reliable; CPU users can still opt in explicitly.
+    # CUDA, where the benefit is largest and most reliable. CPU users can still opt in explicitly.
     resolved_channels_last = resolve_toggle(value=channels_last, auto=on_cuda)
 
     resolved_gpu_processes = _resolve_gpu_processes(gpu_processes=gpu_processes) if on_cuda else 0
@@ -226,7 +226,7 @@ def apply_runtime_optimizations(profile: InferenceProfile) -> None:
     """Applies the process-global optimization flags described by the profile inside an inference worker.
 
     This must run inside each worker process before inference begins. TF32 and the cuDNN autotuner are process-global
-    CUDA backend flags; the CPU thread count restores intra-op parallelism for the worker (the package pins
+    CUDA backend flags. The CPU thread count restores intra-op parallelism for the worker (the package pins
     ``OMP_NUM_THREADS=1`` at import for the extraction workers, so CPU inference must raise it deliberately).
 
     Args:

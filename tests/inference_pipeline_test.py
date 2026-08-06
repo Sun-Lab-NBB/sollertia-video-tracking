@@ -22,7 +22,7 @@ from sollertia_video_tracking.inference import pipeline
 from sollertia_video_tracking.inference.optimization import InferenceProfile
 
 
-def make_profile(**overrides):
+def _make_profile(**overrides):
     """Builds an InferenceProfile with sensible CPU defaults, overriding only the fields a test cares about."""
     defaults = {
         "device": "cpu",
@@ -39,132 +39,6 @@ def make_profile(**overrides):
     }
     defaults.update(overrides)
     return InferenceProfile(**defaults)
-
-
-class _FakeCapture:
-    """A minimal stand-in for cv2.VideoCapture that reports fixed header values without opening a file."""
-
-    def __init__(self, *, opened=True, width=100, height=80, frames=50):
-        self._opened = opened
-        self._width = width
-        self._height = height
-        self._frames = frames
-        self.released = False
-        # cv2.VideoCapture exposes a camelCase ``isOpened``; bind it as an attribute so the fake matches the real
-        # interface the pipeline calls without a snake_case method-name rename.
-        self.isOpened = self._is_opened
-
-    def _is_opened(self):
-        return self._opened
-
-    def get(self, prop):
-        return {
-            cv2.CAP_PROP_FRAME_WIDTH: self._width,
-            cv2.CAP_PROP_FRAME_HEIGHT: self._height,
-            cv2.CAP_PROP_FRAME_COUNT: self._frames,
-        }.get(prop, 0)
-
-    def release(self):
-        self.released = True
-
-
-def _install_capture(monkeypatch, capture_for):
-    """Replaces cv2.VideoCapture with a factory that maps a path string to a preconfigured fake capture."""
-    monkeypatch.setattr(cv2, "VideoCapture", lambda path: capture_for(str(path)))
-
-
-class _FakeQueue:
-    """A single-process queue backed by a deque; ``get`` raises queue.Empty instead of blocking when drained."""
-
-    def __init__(self):
-        self._items = deque()
-
-    def put(self, item):
-        self._items.append(item)
-
-    def get(self, **_kwargs):
-        if not self._items:
-            raise queue.Empty
-        return self._items.popleft()
-
-
-class _FakeManager:
-    """Hands out fresh in-process queues and records whether it was shut down."""
-
-    def __init__(self):
-        self.shutdown_called = False
-
-    def Queue(self):  # noqa: N802 - mirrors multiprocessing.Manager.Queue
-        return _FakeQueue()
-
-    def shutdown(self):
-        self.shutdown_called = True
-
-
-class _FakeProcess:
-    """Runs the simulated worker synchronously on start so no real process is spawned."""
-
-    def __init__(self, target, args, worker_fn):
-        self.target = target
-        self.args = args
-        self._worker_fn = worker_fn
-
-    def start(self):
-        self._worker_fn(*self.args)
-
-    def join(self, timeout=None):
-        pass
-
-
-class _FakeContext:
-    """A spawn-context stand-in whose Process drives the provided simulated worker."""
-
-    def __init__(self, worker_fn):
-        self._worker_fn = worker_fn
-
-    def Process(self, target, args):  # noqa: N802 - mirrors multiprocessing context Process
-        return _FakeProcess(target, args, self._worker_fn)
-
-
-class _FakeMp:
-    """Replaces the torch.multiprocessing module reference used by run_inference."""
-
-    def __init__(self, manager, worker_fn):
-        self._manager = manager
-        self._worker_fn = worker_fn
-
-    def Manager(self):  # noqa: N802 - mirrors multiprocessing.Manager
-        return self._manager
-
-    def get_context(self, method):
-        assert method == "spawn"
-        return _FakeContext(self._worker_fn)
-
-
-def _install_fake_mp(monkeypatch, worker_fn):
-    """Swaps the pipeline's multiprocessing reference for an in-process fake and returns its manager."""
-    manager = _FakeManager()
-    monkeypatch.setattr(pipeline, "mp", _FakeMp(manager, worker_fn))
-    return manager
-
-
-def _make_launch(**overrides):
-    """Builds an _InferenceLaunch with fake queues, overriding only the fields a test needs."""
-    defaults = {
-        "config": Path("/proj/config.yaml"),
-        "shuffle": 1,
-        "snapshot_index": None,
-        "detector_snapshot_index": None,
-        "profile": make_profile(),
-        "batch_size": None,
-        "detector_batch_size": None,
-        "display_progress": False,
-        "video_queue": _FakeQueue(),
-        "progress_queue": _FakeQueue(),
-        "results_queue": _FakeQueue(),
-    }
-    defaults.update(overrides)
-    return pipeline._InferenceLaunch(**defaults)
 
 
 # InferenceSummary.describe
@@ -253,7 +127,10 @@ def test_detect_fixed_crop_override_uniform():
 
 def test_detect_fixed_crop_override_mixed():
     """Verifies that detect_fixed_input_size reports not-fixed when the per-video crop overrides differ in size."""
-    assert pipeline.detect_fixed_input_size("x", ["a", "b"], crop_override=[(0, 10, 0, 20), (0, 30, 0, 20)]) is False
+    assert (
+        pipeline.detect_fixed_input_size(config="x", videos=["a", "b"], crop_override=[(0, 10, 0, 20), (0, 30, 0, 20)])
+        is False
+    )
 
 
 def test_detect_fixed_from_config_uniform(monkeypatch, tmp_path):
@@ -270,7 +147,7 @@ def test_detect_fixed_from_config_mixed(monkeypatch, tmp_path):
     widths = {str(tmp_path / "a.mp4"): 100, str(tmp_path / "b.mp4"): 200}
     _install_capture(monkeypatch, lambda p: _FakeCapture(width=widths[p], height=80))
     videos = [tmp_path / "a.mp4", tmp_path / "b.mp4"]
-    assert pipeline.detect_fixed_input_size(str(tmp_path / "cfg.yaml"), videos) is False
+    assert pipeline.detect_fixed_input_size(config=str(tmp_path / "cfg.yaml"), videos=videos) is False
 
 
 def test_detect_fixed_from_config_unknown_size(monkeypatch, tmp_path):
@@ -280,7 +157,7 @@ def test_detect_fixed_from_config_unknown_size(monkeypatch, tmp_path):
     _install_capture(monkeypatch, lambda p: _FakeCapture(opened=opened[p], width=100, height=80))
     videos = [tmp_path / "a.mp4", tmp_path / "b.mp4"]
     # One video's dimensions cannot be resolved (None), so the run is conservatively reported as not fixed.
-    assert pipeline.detect_fixed_input_size(str(tmp_path / "cfg.yaml"), videos) is False
+    assert pipeline.detect_fixed_input_size(config=str(tmp_path / "cfg.yaml"), videos=videos) is False
 
 
 def test_detect_fixed_read_config_raises(monkeypatch):
@@ -291,7 +168,7 @@ def test_detect_fixed_read_config_raises(monkeypatch):
         raise RuntimeError(message)
 
     monkeypatch.setattr(pipeline, "read_config", boom)
-    assert pipeline.detect_fixed_input_size("cfg", ["a"]) is False
+    assert pipeline.detect_fixed_input_size(config="cfg", videos=["a"]) is False
 
 
 # _resolve_input_size / _probe_frame_size / _probe_frame_count
@@ -403,18 +280,18 @@ def test_resolve_video_cropping_missing_corner_returns_none():
 # _describe_precision
 def test_describe_precision_fp32():
     """Verifies that _describe_precision labels a profile with no autocast dtype as fp32."""
-    assert pipeline._describe_precision(make_profile(amp_dtype=None)) == "fp32"
+    assert pipeline._describe_precision(_make_profile(amp_dtype=None)) == "fp32"
 
 
 def test_describe_precision_bfloat16():
     """Verifies that _describe_precision labels a bfloat16 autocast profile as bfloat16."""
-    assert pipeline._describe_precision(make_profile(amp_dtype=torch.bfloat16)) == "bfloat16"
+    assert pipeline._describe_precision(_make_profile(amp_dtype=torch.bfloat16)) == "bfloat16"
 
 
 # _build_slots / _usable_cpu_cores
 def test_build_slots_cuda_round_robin():
     """Verifies that _build_slots round-robins the CUDA worker slots across the available GPUs."""
-    profile = make_profile(device="cuda", gpus=(0, 1), gpu_processes=2)
+    profile = _make_profile(device="cuda", gpus=(0, 1), gpu_processes=2)
     slots = pipeline._build_slots(profile=profile, video_count=10)
     assert [slot.device for slot in slots] == ["cuda:0", "cuda:1", "cuda:0", "cuda:1"]
     assert all(slot.cores is None for slot in slots)
@@ -422,7 +299,7 @@ def test_build_slots_cuda_round_robin():
 
 def test_build_slots_cuda_truncated_to_video_count():
     """Verifies that _build_slots truncates the CUDA slot list to the video count."""
-    profile = make_profile(device="cuda", gpus=(0, 1), gpu_processes=2)
+    profile = _make_profile(device="cuda", gpus=(0, 1), gpu_processes=2)
     slots = pipeline._build_slots(profile=profile, video_count=1)
     assert len(slots) == 1
     assert slots[0].device == "cuda:0"
@@ -430,14 +307,14 @@ def test_build_slots_cuda_truncated_to_video_count():
 
 def test_build_slots_cuda_no_gpus_raises():
     """Verifies that _build_slots raises when CUDA is selected but no GPU indices are resolved."""
-    profile = make_profile(device="cuda", gpus=(), gpu_processes=1)
+    profile = _make_profile(device="cuda", gpus=(), gpu_processes=1)
     with pytest.raises(ValueError, match="no GPU indices"):
         pipeline._build_slots(profile=profile, video_count=3)
 
 
 def test_build_slots_mps_single_slot():
     """Verifies that _build_slots builds a single unpinned slot for the MPS device."""
-    profile = make_profile(device="mps")
+    profile = _make_profile(device="mps")
     slots = pipeline._build_slots(profile=profile, video_count=5)
     assert len(slots) == 1
     assert slots[0].device == "mps"
@@ -446,11 +323,11 @@ def test_build_slots_mps_single_slot():
 
 def test_build_slots_cpu(monkeypatch):
     """Verifies that _build_slots pins the sole CPU worker to its planned two-core block."""
-    # Pin the topology so a single worker with a definite two-core block is planned deterministically. With 16 cores
+    # Pins the topology so a single worker with a definite two-core block is planned deterministically. With 16 cores
     # (logical and physical), one worker, and two threads/worker, _usable_cpu_cores is 2, so 14 cores are reserved and
     # exactly two usable cores (0 and 1) are pinned to the sole worker.
     monkeypatch.setattr(pipeline.psutil, "cpu_count", lambda **_kwargs: 16)
-    profile = make_profile(device="cpu", cpu_workers=1, cpu_threads_per_worker=2)
+    profile = _make_profile(device="cpu", cpu_workers=1, cpu_threads_per_worker=2)
     slots = pipeline._build_slots(profile=profile, video_count=1)
     assert len(slots) == 1
     assert slots[0].device == "cpu"
@@ -462,14 +339,14 @@ def test_usable_cpu_cores_with_threads(monkeypatch):
     """Verifies that _usable_cpu_cores bounds the worker-thread product by the physical core count."""
     monkeypatch.setattr(pipeline.psutil, "cpu_count", lambda **_kwargs: 16)
     # min(16 physical, 2 workers * 4 threads) = 8.
-    assert pipeline._usable_cpu_cores(make_profile(cpu_workers=2, cpu_threads_per_worker=4)) == 8
+    assert pipeline._usable_cpu_cores(_make_profile(cpu_workers=2, cpu_threads_per_worker=4)) == 8
 
 
 def test_usable_cpu_cores_threads_none_and_zero_workers(monkeypatch):
     """Verifies that _usable_cpu_cores clamps None threads and zero workers to a product of one."""
     monkeypatch.setattr(pipeline.psutil, "cpu_count", lambda **_kwargs: 16)
     # None threads -> 1, zero workers -> max(1, 0) = 1, so the product is 1.
-    assert pipeline._usable_cpu_cores(make_profile(cpu_workers=0, cpu_threads_per_worker=None)) == 1
+    assert pipeline._usable_cpu_cores(_make_profile(cpu_workers=0, cpu_threads_per_worker=None)) == 1
 
 
 # _collect_results
@@ -523,7 +400,7 @@ def test_resolve_output_exact(tmp_path):
 
 def test_resolve_output_glob_suffixed(tmp_path):
     """Verifies that _resolve_output picks the last tracker-suffixed prediction file when no plain file exists."""
-    # No plain per-frame file exists; a tracker-suffixed file is picked as the last lexicographic match.
+    # No plain per-frame file exists, so a tracker-suffixed file is picked as the last lexicographic match.
     (tmp_path / "clipScorer_bx.h5").write_bytes(b"")
     (tmp_path / "clipScorer_el.h5").write_bytes(b"")
     out = pipeline._resolve_output(video=str(tmp_path / "clip.mp4"), scorer="Scorer", destination=tmp_path)
@@ -559,10 +436,10 @@ def test_run_inference_worker_drains_queue_and_pins_cores(monkeypatch):
     video_queue.put((0, "/v0.mp4", 10, None, None))
     video_queue.put((1, "/v1.mp4", 10, None, None))
     video_queue.put(None)
-    launch = _make_launch(video_queue=video_queue, profile=make_profile())
+    launch = _make_launch(video_queue=video_queue, profile=_make_profile())
     slot = pipeline._Slot(device="cpu", cores=(0, 1))
 
-    pipeline._run_inference_worker(slot, launch)
+    pipeline._run_inference_worker(slot=slot, launch=launch)
 
     assert affinity_calls == ([] if sys.platform == "darwin" else [[0, 1]])
     assert len(applied) == 1
@@ -587,7 +464,7 @@ def test_run_inference_worker_no_cores_skips_affinity(monkeypatch):
     launch = _make_launch(video_queue=video_queue)
     slot = pipeline._Slot(device="mps", cores=None)
 
-    pipeline._run_inference_worker(slot, launch)
+    pipeline._run_inference_worker(slot=slot, launch=launch)
 
     assert affinity_calls == []
 
@@ -613,7 +490,7 @@ def test_run_inference_worker_tolerates_affinity_failure(monkeypatch):
     launch = _make_launch(video_queue=video_queue)
     slot = pipeline._Slot(device="cpu", cores=(0,))
 
-    pipeline._run_inference_worker(slot, launch)
+    pipeline._run_inference_worker(slot=slot, launch=launch)
 
     # A failing cpu_affinity is suppressed, so the worker still applies runtime optimizations and drains the real
     # work item rather than aborting when pinning fails. Asserting the drained item catches a swallowed break.
@@ -720,19 +597,19 @@ def test_analyze_one_video_success_without_output_file(monkeypatch, tmp_path):
 def test_run_inference_empty_videos_raises():
     """Verifies that run_inference raises when given an empty video list."""
     with pytest.raises(ValueError, match="at least one video"):
-        pipeline.run_inference(config="cfg", videos=[], profile=make_profile())
+        pipeline.run_inference(config="cfg", videos=[], profile=_make_profile())
 
 
 def test_run_inference_crop_override_length_mismatch_raises():
     """Verifies that run_inference raises when the crop override length does not match the video count."""
     with pytest.raises(ValueError, match="one crop rectangle per video"):
-        pipeline.run_inference(config="cfg", videos=["a", "b"], profile=make_profile(), crop_override=[(0, 10, 0, 20)])
+        pipeline.run_inference(config="cfg", videos=["a", "b"], profile=_make_profile(), crop_override=[(0, 10, 0, 20)])
 
 
 def test_run_inference_destination_override_length_mismatch_raises():
     """Verifies that run_inference raises when the destination override length does not match the video count."""
     with pytest.raises(ValueError, match="one output directory per video"):
-        pipeline.run_inference(config="cfg", videos=["a", "b"], profile=make_profile(), destination_override=["d1"])
+        pipeline.run_inference(config="cfg", videos=["a", "b"], profile=_make_profile(), destination_override=["d1"])
 
 
 # run_inference orchestration
@@ -779,7 +656,7 @@ def test_run_inference_full_success_with_overrides(monkeypatch, tmp_path):
 
     manager = _install_fake_mp(monkeypatch, worker)
 
-    profile = make_profile(device="cuda", gpus=(0, 1), gpu_processes=1, amp_dtype=torch.bfloat16)
+    profile = _make_profile(device="cuda", gpus=(0, 1), gpu_processes=1, amp_dtype=torch.bfloat16)
     summary = pipeline.run_inference(
         config=str(tmp_path / "cfg.yaml"),
         videos=videos,
@@ -832,7 +709,7 @@ def test_run_inference_partial_failure_no_overrides(monkeypatch, tmp_path):
 
     manager = _install_fake_mp(monkeypatch, worker)
 
-    profile = make_profile(device="cpu", amp_dtype=None)
+    profile = _make_profile(device="cpu", amp_dtype=None)
     summary = pipeline.run_inference(
         config=str(tmp_path / "cfg.yaml"),
         videos=videos,
@@ -896,6 +773,215 @@ def test_partition_single_frame_video():
 
 
 # _BoundedVideoIterator
+def test_bounded_iterator_reads_only_its_range(tmp_path):
+    """Verifies that a bounded iterator seeks to its start and emits exactly the frames a sequential read gives."""
+    clip = tmp_path / "clip.avi"
+    _write_identifiable_clip(clip, frames=50)
+    reference = _sequential_frame_levels(clip)
+    iterator = pipeline._BoundedVideoIterator(str(clip), frame_start=20, frame_end=35)
+    levels = [int(frame[0, 0, 0]) for frame in iterator]
+    assert levels == reference[20:35]
+    assert iterator.get_n_frames() == 15
+
+
+def test_bounded_iterator_partition_reassembles_whole_video(tmp_path):
+    """Verifies that reading every partition range by seek reproduces the whole-video frame sequence exactly."""
+    clip = tmp_path / "clip.avi"
+    total = 50
+    _write_identifiable_clip(clip, frames=total)
+    reference = _sequential_frame_levels(clip)
+    ranges = pipeline._partition_frame_ranges(total_frames=total, chunks=5)
+    stitched = [
+        int(frame[0, 0, 0])
+        for start, end in ranges
+        for frame in pipeline._BoundedVideoIterator(str(clip), frame_start=start, frame_end=end)
+    ]
+    assert stitched == reference[:total]
+
+
+# _collect_chunk_results
+def test_collect_chunk_results_stitches_chunks_in_frame_order(monkeypatch):
+    """Verifies that per-chunk predictions are concatenated in ascending chunk order and written once per video."""
+    work_items = [
+        _chunk_item(task_id=0, video_index=0, chunk_index=0, video="a.mp4", frame_start=0, frame_end=2),
+        _chunk_item(task_id=1, video_index=0, chunk_index=1, video="a.mp4", frame_start=2, frame_end=4),
+        _chunk_item(task_id=2, video_index=1, chunk_index=0, video="b.mp4", frame_start=0, frame_end=3),
+    ]
+    results_queue = _FakeQueue()
+    # Report out of arrival order to prove the collector orders by chunk index, not by which worker finished first.
+    results_queue.put((1, 0, 1, ["a2", "a3"], None))
+    results_queue.put((2, 1, 0, ["b0", "b1", "b2"], None))
+    results_queue.put((0, 0, 0, ["a0", "a1"], None))
+
+    stitched: dict[str, list] = {}
+
+    def fake_stitch(*, video, predictions, **_kwargs):
+        stitched[video] = list(predictions)
+        return Path(video).with_suffix(".h5")
+
+    monkeypatch.setattr(pipeline, "_stitch_and_write", fake_stitch)
+    outputs, failures = pipeline._collect_chunk_results(
+        results_queue=results_queue,
+        video_paths=[Path("a.mp4"), Path("b.mp4")],
+        work_items=work_items,
+        plan=None,
+    )
+    assert failures == []
+    assert stitched["a.mp4"] == ["a0", "a1", "a2", "a3"]
+    assert stitched["b.mp4"] == ["b0", "b1", "b2"]
+    assert outputs == {0: Path("a.h5"), 1: Path("b.h5")}
+
+
+def test_collect_chunk_results_reports_failed_chunk(monkeypatch):
+    """Verifies that a video with any errored chunk is failed and never stitched, while other videos still write."""
+    work_items = [
+        _chunk_item(task_id=0, video_index=0, chunk_index=0, video="a.mp4", frame_start=0, frame_end=2),
+        _chunk_item(task_id=1, video_index=0, chunk_index=1, video="a.mp4", frame_start=2, frame_end=4),
+        _chunk_item(task_id=2, video_index=1, chunk_index=0, video="b.mp4", frame_start=0, frame_end=2),
+    ]
+    results_queue = _FakeQueue()
+    results_queue.put((0, 0, 0, ["a0", "a1"], None))
+    results_queue.put((1, 0, 1, None, "RuntimeError: boom"))
+    results_queue.put((2, 1, 0, ["b0", "b1"], None))
+
+    monkeypatch.setattr(pipeline, "_stitch_and_write", lambda **kwargs: Path(kwargs["video"]).with_suffix(".h5"))
+    outputs, failures = pipeline._collect_chunk_results(
+        results_queue=results_queue,
+        video_paths=[Path("a.mp4"), Path("b.mp4")],
+        work_items=work_items,
+        plan=None,
+    )
+    assert outputs == {1: Path("b.h5")}
+    assert failures == [("a.mp4", "RuntimeError: boom")]
+
+
+# Shared fakes and helpers
+class _FakeCapture:
+    """Stands in for cv2.VideoCapture, reporting fixed header values without opening a file."""
+
+    def __init__(self, *, opened=True, width=100, height=80, frames=50):
+        self._opened = opened
+        self._width = width
+        self._height = height
+        self._frames = frames
+        self.released = False
+        # cv2.VideoCapture exposes a camelCase ``isOpened``. Binds it as an attribute so the fake matches the real
+        # interface the pipeline calls without a snake_case method-name rename.
+        self.isOpened = self._is_opened
+
+    def _is_opened(self):
+        return self._opened
+
+    def get(self, prop):
+        return {
+            cv2.CAP_PROP_FRAME_WIDTH: self._width,
+            cv2.CAP_PROP_FRAME_HEIGHT: self._height,
+            cv2.CAP_PROP_FRAME_COUNT: self._frames,
+        }.get(prop, 0)
+
+    def release(self):
+        self.released = True
+
+
+def _install_capture(monkeypatch, capture_for):
+    """Replaces cv2.VideoCapture with a factory that maps a path string to a preconfigured fake capture."""
+    monkeypatch.setattr(cv2, "VideoCapture", lambda path: capture_for(str(path)))
+
+
+class _FakeQueue:
+    """Provides a single-process queue backed by a deque. ``get`` raises queue.Empty when the deque is drained."""
+
+    def __init__(self):
+        self._items = deque()
+
+    def put(self, item):
+        self._items.append(item)
+
+    def get(self, **_kwargs):
+        if not self._items:
+            raise queue.Empty
+        return self._items.popleft()
+
+
+class _FakeManager:
+    """Hands out fresh in-process queues and records whether it was shut down."""
+
+    def __init__(self):
+        self.shutdown_called = False
+
+    def Queue(self):  # noqa: N802 - mirrors multiprocessing.Manager.Queue
+        return _FakeQueue()
+
+    def shutdown(self):
+        self.shutdown_called = True
+
+
+class _FakeProcess:
+    """Runs the simulated worker synchronously on start so no real process is spawned."""
+
+    def __init__(self, target, args, worker_fn):
+        self.target = target
+        self.args = args
+        self._worker_fn = worker_fn
+
+    def start(self):
+        self._worker_fn(*self.args)
+
+    def join(self, timeout=None):
+        pass
+
+
+class _FakeContext:
+    """Provides a spawn-context stand-in whose Process drives the supplied simulated worker."""
+
+    def __init__(self, worker_fn):
+        self._worker_fn = worker_fn
+
+    def Process(self, target, args):  # noqa: N802 - mirrors multiprocessing context Process
+        return _FakeProcess(target, args, self._worker_fn)
+
+
+class _FakeMp:
+    """Replaces the torch.multiprocessing module reference used by run_inference."""
+
+    def __init__(self, manager, worker_fn):
+        self._manager = manager
+        self._worker_fn = worker_fn
+
+    def Manager(self):  # noqa: N802 - mirrors multiprocessing.Manager
+        return self._manager
+
+    def get_context(self, method):
+        assert method == "spawn"
+        return _FakeContext(self._worker_fn)
+
+
+def _install_fake_mp(monkeypatch, worker_fn):
+    """Swaps the pipeline's multiprocessing reference for an in-process fake and returns its manager."""
+    manager = _FakeManager()
+    monkeypatch.setattr(pipeline, "mp", _FakeMp(manager, worker_fn))
+    return manager
+
+
+def _make_launch(**overrides):
+    """Builds an _InferenceLaunch with fake queues, overriding only the fields a test needs."""
+    defaults = {
+        "config": Path("/proj/config.yaml"),
+        "shuffle": 1,
+        "snapshot_index": None,
+        "detector_snapshot_index": None,
+        "profile": _make_profile(),
+        "batch_size": None,
+        "detector_batch_size": None,
+        "display_progress": False,
+        "video_queue": _FakeQueue(),
+        "progress_queue": _FakeQueue(),
+        "results_queue": _FakeQueue(),
+    }
+    defaults.update(overrides)
+    return pipeline._InferenceLaunch(**defaults)
+
+
 def _write_identifiable_clip(path, *, frames, width=64, height=48):
     """Writes a short clip whose every frame is a distinct solid gray level, for seek-accuracy checks.
 
@@ -931,33 +1017,6 @@ def _sequential_frame_levels(clip) -> list[int]:
     return levels
 
 
-def test_bounded_iterator_reads_only_its_range(tmp_path):
-    """Verifies that a bounded iterator seeks to its start and emits exactly the frames a sequential read gives."""
-    clip = tmp_path / "clip.avi"
-    _write_identifiable_clip(clip, frames=50)
-    reference = _sequential_frame_levels(clip)
-    iterator = pipeline._BoundedVideoIterator(str(clip), frame_start=20, frame_end=35)
-    levels = [int(frame[0, 0, 0]) for frame in iterator]
-    assert levels == reference[20:35]
-    assert iterator.get_n_frames() == 15
-
-
-def test_bounded_iterator_partition_reassembles_whole_video(tmp_path):
-    """Verifies that reading every partition range by seek reproduces the whole-video frame sequence exactly."""
-    clip = tmp_path / "clip.avi"
-    total = 50
-    _write_identifiable_clip(clip, frames=total)
-    reference = _sequential_frame_levels(clip)
-    ranges = pipeline._partition_frame_ranges(total_frames=total, chunks=5)
-    stitched = [
-        int(frame[0, 0, 0])
-        for start, end in ranges
-        for frame in pipeline._BoundedVideoIterator(str(clip), frame_start=start, frame_end=end)
-    ]
-    assert stitched == reference[:total]
-
-
-# _collect_chunk_results
 def _chunk_item(task_id, video_index, chunk_index, video, frame_start, frame_end):
     """Builds a _ChunkItem for the collector tests with the crop and destination left unset."""
     return pipeline._ChunkItem(
@@ -970,58 +1029,3 @@ def _chunk_item(task_id, video_index, chunk_index, video, frame_start, frame_end
         crop=None,
         destination=None,
     )
-
-
-def test_collect_chunk_results_stitches_chunks_in_frame_order(monkeypatch):
-    """Verifies that per-chunk predictions are concatenated in ascending chunk order and written once per video."""
-    work_items = [
-        _chunk_item(0, 0, 0, "a.mp4", 0, 2),
-        _chunk_item(1, 0, 1, "a.mp4", 2, 4),
-        _chunk_item(2, 1, 0, "b.mp4", 0, 3),
-    ]
-    results_queue = _FakeQueue()
-    # Report out of arrival order to prove the collector orders by chunk index, not by which worker finished first.
-    results_queue.put((1, 0, 1, ["a2", "a3"], None))
-    results_queue.put((2, 1, 0, ["b0", "b1", "b2"], None))
-    results_queue.put((0, 0, 0, ["a0", "a1"], None))
-
-    stitched: dict[str, list] = {}
-
-    def fake_stitch(*, video, predictions, **_kwargs):
-        stitched[video] = list(predictions)
-        return Path(video).with_suffix(".h5")
-
-    monkeypatch.setattr(pipeline, "_stitch_and_write", fake_stitch)
-    outputs, failures = pipeline._collect_chunk_results(
-        results_queue=results_queue,
-        video_paths=[Path("a.mp4"), Path("b.mp4")],
-        work_items=work_items,
-        plan=None,
-    )
-    assert failures == []
-    assert stitched["a.mp4"] == ["a0", "a1", "a2", "a3"]
-    assert stitched["b.mp4"] == ["b0", "b1", "b2"]
-    assert outputs == {0: Path("a.h5"), 1: Path("b.h5")}
-
-
-def test_collect_chunk_results_reports_failed_chunk(monkeypatch):
-    """Verifies that a video with any errored chunk is failed and never stitched, while other videos still write."""
-    work_items = [
-        _chunk_item(0, 0, 0, "a.mp4", 0, 2),
-        _chunk_item(1, 0, 1, "a.mp4", 2, 4),
-        _chunk_item(2, 1, 0, "b.mp4", 0, 2),
-    ]
-    results_queue = _FakeQueue()
-    results_queue.put((0, 0, 0, ["a0", "a1"], None))
-    results_queue.put((1, 0, 1, None, "RuntimeError: boom"))
-    results_queue.put((2, 1, 0, ["b0", "b1"], None))
-
-    monkeypatch.setattr(pipeline, "_stitch_and_write", lambda **kwargs: Path(kwargs["video"]).with_suffix(".h5"))
-    outputs, failures = pipeline._collect_chunk_results(
-        results_queue=results_queue,
-        video_paths=[Path("a.mp4"), Path("b.mp4")],
-        work_items=work_items,
-        plan=None,
-    )
-    assert outputs == {1: Path("b.h5")}
-    assert failures == [("a.mp4", "RuntimeError: boom")]

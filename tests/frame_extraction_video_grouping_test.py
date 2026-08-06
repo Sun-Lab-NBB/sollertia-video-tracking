@@ -59,7 +59,7 @@ def test_group_videos_undatable_name_becomes_its_own_group() -> None:
 # group_videos: caller-supplied pattern override
 def test_group_videos_pattern_with_capturing_group() -> None:
     """Verifies that a pattern whose first capturing group participates keys the video by that group's text."""
-    groups = group_videos(["M01_run1.mp4", "M01_run2.mp4", "M02_run1.mp4"], group_by_pattern=r"(M\d+)")
+    groups = group_videos(videos=["M01_run1.mp4", "M01_run2.mp4", "M02_run1.mp4"], group_by_pattern=r"(M\d+)")
     assert groups == {
         "M01": ["M01_run1.mp4", "M01_run2.mp4"],
         "M02": ["M02_run1.mp4"],
@@ -68,34 +68,34 @@ def test_group_videos_pattern_with_capturing_group() -> None:
 
 def test_group_videos_pattern_without_capturing_group_uses_whole_match() -> None:
     """Verifies that a pattern with no capturing groups keys the video by the whole matched text (group 0)."""
-    groups = group_videos(["M01_run1.mp4", "M02_run1.mp4"], group_by_pattern=r"M\d+")
+    groups = group_videos(videos=["M01_run1.mp4", "M02_run1.mp4"], group_by_pattern=r"M\d+")
     assert groups == {"M01": ["M01_run1.mp4"], "M02": ["M02_run1.mp4"]}
 
 
 def test_group_videos_pattern_non_participating_optional_group_falls_through_to_whole_match() -> None:
     """Verifies that a non-participating optional group yields None, so the key uses the whole match (group 0)."""
     # "M(\d+)?" matches "M" in "Mouse" with group 1 not participating -> key falls back to group 0 == "M".
-    groups = group_videos(["Mouse.mp4"], group_by_pattern=r"M(\d+)?")
+    groups = group_videos(videos=["Mouse.mp4"], group_by_pattern=r"M(\d+)?")
     assert groups == {"M": ["Mouse.mp4"]}
 
 
 def test_group_videos_pattern_no_match_keys_by_full_stem() -> None:
     """Verifies that a stem the pattern fails to match is keyed by its full stem, forming its own group."""
-    groups = group_videos(["control.mp4"], group_by_pattern=r"(M\d+)")
+    groups = group_videos(videos=["control.mp4"], group_by_pattern=r"(M\d+)")
     assert groups == {"control": ["control.mp4"]}
 
 
 def test_group_videos_pattern_empty_whole_match_falls_back_to_stem() -> None:
     """Verifies that when the pattern matches an empty span (group 0 is empty), the key falls back to the full stem."""
-    # "x*" matches the empty string at position 0 of "abc"; group 0 is "" -> "" or stem -> "abc".
-    groups = group_videos(["abc.mp4"], group_by_pattern=r"x*")
+    # "x*" matches the empty string at position 0 of "abc". Group 0 is "" -> "" or stem -> "abc".
+    groups = group_videos(videos=["abc.mp4"], group_by_pattern=r"x*")
     assert groups == {"abc": ["abc.mp4"]}
 
 
 def test_group_videos_invalid_pattern_raises_value_error() -> None:
     """Verifies that an invalid regular expression is reported as a ValueError chained from the underlying re.error."""
     with pytest.raises(ValueError, match="not a valid regular expression"):
-        group_videos(["a.mp4"], group_by_pattern="(")
+        group_videos(videos=["a.mp4"], group_by_pattern="(")
 
 
 # _infer_group_key
@@ -192,86 +192,86 @@ def test_find_date_span_none_when_no_date() -> None:
 # _is_month_day_pair
 def test_is_month_day_pair_month_then_day() -> None:
     """Verifies that a month followed by a day is a valid month-day pair."""
-    assert _is_month_day_pair("01", "15") is True
+    assert _is_month_day_pair(first="01", second="15") is True
 
 
 def test_is_month_day_pair_day_then_month() -> None:
     """Verifies that a day followed by a month is a valid month-day pair (reversed order)."""
-    assert _is_month_day_pair("15", "01") is True
+    assert _is_month_day_pair(first="15", second="01") is True
 
 
 def test_is_month_day_pair_invalid() -> None:
     """Verifies that two components that cannot both be a month/day are not a pair."""
-    assert _is_month_day_pair("13", "40") is False
+    assert _is_month_day_pair(first="13", second="40") is False
 
 
 # _is_numeric_date_triple
 def test_is_numeric_date_triple_non_digit_rejected() -> None:
     """Verifies that a triple containing a non-digit component is not a numeric date."""
-    assert _is_numeric_date_triple(("M01", "01", "15")) is False
+    assert _is_numeric_date_triple(trio=("M01", "01", "15")) is False
 
 
 def test_is_numeric_date_triple_year_first() -> None:
     """Verifies that a YYYY MM DD triple is a numeric date."""
-    assert _is_numeric_date_triple(("2024", "01", "15")) is True
+    assert _is_numeric_date_triple(trio=("2024", "01", "15")) is True
 
 
 def test_is_numeric_date_triple_year_last() -> None:
     """Verifies that a DD MM YYYY triple is a numeric date."""
-    assert _is_numeric_date_triple(("15", "01", "2024")) is True
+    assert _is_numeric_date_triple(trio=("15", "01", "2024")) is True
 
 
 def test_is_numeric_date_triple_no_year_rejected() -> None:
     """Verifies that an all-digit triple with no four-digit year at either end is not a numeric date."""
-    assert _is_numeric_date_triple(("12", "01", "15")) is False
+    assert _is_numeric_date_triple(trio=("12", "01", "15")) is False
 
 
 # _is_named_date_triple
 def test_is_named_date_triple_no_month_name_rejected() -> None:
     """Verifies that a triple with no month name is not a named-month date."""
-    assert _is_named_date_triple(("2024", "01", "15")) is False
+    assert _is_named_date_triple(trio=("2024", "01", "15")) is False
 
 
 def test_is_named_date_triple_two_month_names_rejected() -> None:
     """Verifies that a triple with two month names is not a named-month date."""
-    assert _is_named_date_triple(("Jan", "Feb", "2024")) is False
+    assert _is_named_date_triple(trio=("Jan", "Feb", "2024")) is False
 
 
 def test_is_named_date_triple_non_digit_others_rejected() -> None:
     """Verifies that a named triple whose non-name components are not both digits is rejected."""
-    assert _is_named_date_triple(("Jan", "M0", "2024")) is False
+    assert _is_named_date_triple(trio=("Jan", "M0", "2024")) is False
 
 
 def test_is_named_date_triple_day_then_year() -> None:
     """Verifies that a month name with a day-then-year pairing is a named-month date."""
-    assert _is_named_date_triple(("Jan", "15", "2024")) is True
+    assert _is_named_date_triple(trio=("Jan", "15", "2024")) is True
 
 
 def test_is_named_date_triple_year_then_day() -> None:
     """Verifies that a month name with a year-then-day pairing is a named-month date (reversed order)."""
-    assert _is_named_date_triple(("Jan", "2024", "15")) is True
+    assert _is_named_date_triple(trio=("Jan", "2024", "15")) is True
 
 
 def test_is_named_date_triple_two_digit_year_trusted() -> None:
     """Verifies that the month name anchors the span, so a two-digit year is trusted alongside a day."""
-    assert _is_named_date_triple(("Jan", "15", "24")) is True
+    assert _is_named_date_triple(trio=("Jan", "15", "24")) is True
 
 
 def test_is_named_date_triple_neither_day_nor_year_rejected() -> None:
     """Verifies that digit components that are neither a valid day nor a plausible year are rejected."""
-    assert _is_named_date_triple(("Jan", "40", "99")) is False
+    assert _is_named_date_triple(trio=("Jan", "40", "99")) is False
 
 
 # _is_day_piece / _is_year_piece
 def test_is_day_piece() -> None:
-    """Verifies that a one- or two-digit day of month is recognized; an out-of-range value is not."""
+    """Verifies that a one- or two-digit day of month is recognized. An out-of-range value is not."""
     assert _is_day_piece("5") is True
     assert _is_day_piece("31") is True
     assert _is_day_piece("32") is False
 
 
 def test_is_year_piece() -> None:
-    """Verifies that a four-digit year and a bare two-digit year are recognized; a three-digit value is not."""
+    """Verifies that a four-digit year and a bare two-digit year are recognized. A three-digit value is not."""
     assert _is_year_piece("2024") is True
     assert _is_year_piece("24") is True
     assert _is_year_piece("204") is False
@@ -280,25 +280,25 @@ def test_is_year_piece() -> None:
 # _is_named_month_year_pair
 def test_is_named_month_year_pair_name_then_year() -> None:
     """Verifies that a month name followed by a four-digit year is a valid pair."""
-    assert _is_named_month_year_pair("January", "2024") is True
+    assert _is_named_month_year_pair(first="January", second="2024") is True
 
 
 def test_is_named_month_year_pair_year_then_name() -> None:
     """Verifies that a four-digit year followed by a month name is a valid pair (reversed order)."""
-    assert _is_named_month_year_pair("2024", "January") is True
+    assert _is_named_month_year_pair(first="2024", second="January") is True
 
 
 def test_is_named_month_year_pair_invalid() -> None:
     """Verifies that a component that is neither a month name nor a four-digit year is not part of a pair."""
-    assert _is_named_month_year_pair("M01", "2024") is False
+    assert _is_named_month_year_pair(first="M01", second="2024") is False
 
 
 def test_is_named_month_year_pair_two_digit_year_rejected() -> None:
-    """Verifies that only a full four-digit year is trusted beside a lone month name; a two-digit year is not a pair."""
+    """Verifies that only a full four-digit year is trusted beside a lone month name. A two-digit year is not a pair."""
     # With no day to reinforce the span, "Jan_23" must not read as a date (unlike the month-anchored named triple,
     # where a two-digit year is trusted). Guards against the pair mistakenly using the looser year predicate.
-    assert _is_named_month_year_pair("Jan", "23") is False
-    assert _is_named_month_year_pair("23", "Jan") is False
+    assert _is_named_month_year_pair(first="Jan", second="23") is False
+    assert _is_named_month_year_pair(first="23", second="Jan") is False
 
 
 # _is_compact_date_piece

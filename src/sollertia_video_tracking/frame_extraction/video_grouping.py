@@ -217,7 +217,7 @@ def _is_numeric_date_triple(trio: tuple[str, str, str]) -> bool:
 def _is_named_date_triple(trio: tuple[str, str, str]) -> bool:
     """Reports whether three components form a named-month date of a month name, a day, and a year.
 
-    Exactly one component must be a month name; the other two must be all-digit, one a day and the other a year (a full
+    Exactly one component must be a month name. The other two must be all-digit, one a day and the other a year (a full
     four-digit year or a two-digit year, trusted because the month name already anchors the span). The month name and
     year may sit in any position, so ``2024 January 15``, ``15 Jan 2024``, and ``Jan 15 24`` all qualify.
 

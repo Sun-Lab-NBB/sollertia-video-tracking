@@ -111,7 +111,7 @@ def pin_worker_to_cores(core_set_queue: Any) -> None:
     """Pins the calling pool worker to the next free core block, called once per worker at start.
 
     Each worker claims one core set from the shared queue and binds its CPU affinity to it, so the worker and every
-    thread its decoder spawns stay within a disjoint block of cores. CPU affinity is supported on Linux and Windows;
+    thread its decoder spawns stay within a disjoint block of cores. CPU affinity is supported on Linux and Windows.
     macOS exposes no affinity API, so its workers run unpinned. The binding is best-effort, so a missing slot or an
     unsupported platform degrades to an unpinned worker rather than aborting the run.
 

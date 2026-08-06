@@ -31,12 +31,12 @@ Four project-specific deviations are deliberate. You MUST NOT report them as vio
 - **Errors use standard `raise`, `click.ClickException`, `click.UsageError`, and the local `warn()` helper** in
   `hardware/detection.py`. This project does not depend on `ataraxis-base-utilities`, so there is no `console`.
 
-Deferred or inline imports are forbidden without exception. Never add a `# noqa: PLC0415`; CLI startup cost is not a
+Deferred or inline imports are forbidden without exception. Never add a `# noqa: PLC0415`. CLI startup cost is not a
 justification, since `__init__.py` already imports DeepLabCut eagerly.
 
 ## Cross-referenced library verification
 
-This project has no `ataraxis-*` or `sollertia-*` runtime dependencies; `ataraxis-automation` supplies the
+This project has no `ataraxis-*` or `sollertia-*` runtime dependencies. `ataraxis-automation` supplies the
 development toolchain through the `dev` dependency group and `tox.ini`. The only substantial runtime dependency is
 DeepLabCut, and the other Sollertia libraries consume this library exclusively through the `slvt` CLI.
 
@@ -44,9 +44,9 @@ DeepLabCut, and the other Sollertia libraries consume this library exclusively t
 |--------------------------|------------------------------------------------------------------------------|
 | `deeplabcut[gui]`        | Pinned to exactly 3.0.1. Provides the pose models, project format, and GUI   |
 | `numpy`                  | Pinned to the 1.x series required by DeepLabCut                              |
-| `torch`                  | Training and inference backend; DDP from `training/`, AMP from `hardware/`   |
+| `torch`                  | Training and inference backend. DDP from `training/`, AMP from `hardware/`   |
 | `triton-windows`         | `torch.compile` inductor kernels, Windows only                               |
-| `opencv-python-headless` | Video decode (headless variant only; never add `opencv-python` alongside)    |
+| `opencv-python-headless` | Video decode (headless variant only, never add `opencv-python` alongside)    |
 | `polars`, `psutil`       | Evaluation feather output, and cross-platform worker core affinity           |
 | `click`                  | The `slvt` command tree, where every command and option is a Click decorator |
 | `ruamel.yaml`            | Reads and round-trips `config.yaml`, writes `<snapshot>_evaluation.yaml`     |
@@ -59,8 +59,8 @@ from another Sollertia project, nor relax the Python or numpy bounds to "align" 
 **Before writing code that touches a DeepLabCut override site, you MUST** read the corresponding source in the
 installed DeepLabCut 3.0.1 and confirm the override still matches it. The overrides depend on private internals with
 no stability guarantee: `training/runners.py` subclasses DeepLabCut's training runners and relies on their MRO,
-`inference/runners.py` patches `get_pose_inference_runner` and `get_detector_inference_runner`, and
-`frame_extraction/` replaces `KmeansbasedFrameselectioncv2` and `attempt_to_add_video` inside its workers.
+`inference/runners.py` patches `get_pose_inference_runner` and `get_detector_inference_runner`, and `frame_extraction/`
+replaces `KmeansbasedFrameselectioncv2` and `attempt_to_add_video` inside its workers.
 
 ## Available skills
 
@@ -137,7 +137,7 @@ missing step first rather than letting the command fail.
 | 7    | `slvt gui`, tracked by `slvt extract pending` | Outlier frames extracted                                |
 | 8    | Back to step 3                                | The GUI's merge advanced the project's `iteration`      |
 
-Steps 0-2 bootstrap once; steps 3-8 cycle. Deploying a finished model needs only step 5.
+Steps 0-2 bootstrap once, and steps 3-8 cycle. Deploying a finished model needs only step 5.
 
 Step 6 goes wrong most often: the outlier detectors read the model's **stored predictions** and do not re-run the
 model, so `slvt extract outliers` on a video never passed through `slvt infer` finds nothing. Outlier extraction is
@@ -148,14 +148,14 @@ placeholder row the GUI wrote for an opened-but-untouched frame still reads as p
 
 ### Invocation rules
 
-- **Every input is an option. No command takes positional arguments.** `slvt infer CFG video.mp4` is always wrong; it
+- **Every input is an option. No command takes positional arguments.** `slvt infer CFG video.mp4` is always wrong. It
   is `slvt infer --config-path CFG --videos video.mp4`.
 - **`extract` group options go BEFORE the subcommand name.** The group owns `--config-path`, `--workers`, `--cores`,
   `--frames-per-video`, `--clustering-stride`, `--clustering-resize-width`, `--color/--grayscale`,
-  `--progress/--no-progress`, `--videos`, `--overwrite`, and `--reset`; the subcommand carries its own. Correct:
+  `--progress/--no-progress`, `--videos`, `--overwrite`, and `--reset`. The subcommand carries its own. Correct:
   `slvt extract --config-path CFG --workers 4 --videos a.mp4 outliers --outlier-algorithm uncertain`. Every other
   command is flat.
-- **`--gpus` is one comma-separated value; `--videos` repeats.** Use `--gpus 0,1`, never `--gpus 0 --gpus 1`.
+- **`--gpus` is one comma-separated value, and `--videos` repeats.** Use `--gpus 0,1`, never `--gpus 0 --gpus 1`.
   Conversely `--videos a.mp4 --videos b.mp4`, never `--videos a.mp4,b.mp4`. The `infer` command's `--output` and
   `--crop` follow `--videos`: one value applies to every video, or give one per `--videos` file. Multiple values
   without an explicit `--videos` is a `UsageError`, because whole-project video order is not user-controlled.
@@ -166,9 +166,9 @@ placeholder row the GUI wrote for an opened-but-untouched frame still reads as p
   registered video still present on disk. There is no additive "do everything" flag, and an omitted `--videos` on
   `purge` is a project-wide deletion.
 - **Prefer long forms in every command shown to the user.** Short forms may be multi-letter (`-cfg`, `-ctpw`), and the
-  same short flag means different things across commands: `-o` is `--overwrite` on `extract`/`prepare` but `--output`
-  on `infer`; `-cb` is `--comparison-bodyparts` on `outliers` but `--cudnn-benchmark` on `train`/`infer`; `-d` is
-  `--device` on `train`/`infer` but `--detector` on `prepare`; `-e` is `--epochs` on `train` but `--exclusive` on
+  same short flag means different things across commands. `-o` is `--overwrite` on `extract`/`prepare` but `--output`
+  on `infer`. `-cb` is `--comparison-bodyparts` on `outliers` but `--cudnn-benchmark` on `train`/`infer`. `-d` is
+  `--device` on `train`/`infer` but `--detector` on `prepare`. `-e` is `--epochs` on `train` but `--exclusive` on
   `extract frames`.
 - `slvt infer` accepts videos that are **not** registered in the project, which is what makes de-novo analysis and
   deployment work. `extract outliers` and `extract purge` do not: unregistered paths are skipped with a warning.
@@ -183,7 +183,7 @@ output (it marks which directories `[has labels]`), and stop.
 The `--overwrite` and `--reset` options on the `extract` group re-roll rather than top up. They always preserve human
 labels, so they are recoverable, but they still throw away extraction work. They diverge in scope on both subcommands:
 on `frames` `--reset` clears every non-refined project video before the selection runs, while `--overwrite` clears only
-the videos that selection picked, and on `outliers` `--reset` clears the current iteration's machine frames for every
+the videos that selection picked. On `outliers` `--reset` clears the current iteration's machine frames for every
 project video, while `--overwrite` clears them only for the videos the run re-extracts. Neither re-extracts a video
 already in refinement, and they part ways on a refined video named explicitly through `--videos`: `--reset` skips it
 with a warning, while `--overwrite` aborts the whole run. The two are mutually exclusive, and `--reset` cannot combine
@@ -244,7 +244,7 @@ for the Sollertia platform through the single `slvt` command-line interface.
 
 | Directory                                        | Purpose                                                           |
 |--------------------------------------------------|-------------------------------------------------------------------|
-| `src/sollertia_video_tracking/interfaces/`       | The `slvt` Click command tree; parses options, calls one function |
+| `src/sollertia_video_tracking/interfaces/`       | The `slvt` Click command tree. Parses options, calls one function |
 | `src/sollertia_video_tracking/frame_extraction/` | Parallel k-means and outlier frame extraction, core planning      |
 | `src/sollertia_video_tracking/training/`         | Shuffle creation, the DDP/AMP training pipeline, evaluation       |
 | `src/sollertia_video_tracking/inference/`        | Multi-device analysis orchestration and the runner-builder patch  |
@@ -268,7 +268,7 @@ The package `__init__.py` is a side-effecting preamble, not just re-exports. Its
 and spawned workers inherit the environment.
 
 Extraction and inference both use `multiprocessing.get_context("spawn")` pools. Extraction pins one video per worker
-to a disjoint core block from `plan_core_allocation`; inference spawns processes that drain a shared video queue one
+to a disjoint core block from `plan_core_allocation`. Inference spawns processes that drain a shared video queue one
 whole video at a time, so work balances without ever splitting a video. Workers never render: they push throttled
 progress messages through a queue to a single parent-side `LiveBar` subclass, and dropped messages are non-fatal.
 
@@ -284,7 +284,7 @@ progress messages through a queue to a single parent-side `LiveBar` subclass, an
   (`to_numpy(dtype=np.float64)`, `NDArray[np.float64]`) and use `math.floor`/`math.ceil` on Python scalars.
 - **No Sphinx cross-reference roles in docstrings.** Reference symbols as double-backtick literals.
 - **Deployment is driven by the acquisition stack**, not by this library. Experiment preprocessing launches
-  `slvt infer` over each session's camera recordings; omitting `--output` writes the `.h5` beside the video, where the
+  `slvt infer` over each session's camera recordings. Omitting `--output` writes the `.h5` beside the video, where the
   session ships it as raw data and `slvt extract outliers` later reads it. Preserve that default.
 
 ### Code standards

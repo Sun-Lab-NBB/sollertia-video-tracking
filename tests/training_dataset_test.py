@@ -215,27 +215,6 @@ def test_ctd_conditions_unsupported_suffix_raises() -> None:
 
 
 # create_training_dataset
-def _patch_dlc(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    models: tuple[str, ...] = ("resnet50",),
-    detectors: tuple[str, ...] = ("ssdlite",),
-    existing: tuple[int, ...] = (1,),
-) -> dict[str, list[dict[str, object]]]:
-    """Patches every DLC boundary create_training_dataset touches and records the two create calls."""
-    monkeypatch.setattr(dataset, "available_models", lambda: list(models))
-    monkeypatch.setattr(dataset, "available_detectors", lambda: list(detectors))
-    calls: dict[str, list[dict[str, object]]] = {"fresh": [], "existing_split": []}
-    monkeypatch.setattr(dataset, "dlc_create_training_dataset", lambda **kwargs: calls["fresh"].append(kwargs))
-    monkeypatch.setattr(
-        dataset,
-        "dlc_create_training_dataset_from_existing_split",
-        lambda **kwargs: calls["existing_split"].append(kwargs),
-    )
-    monkeypatch.setattr(dataset, "get_existing_shuffle_indices", lambda _cfg: list(existing))
-    return calls
-
-
 def test_create_training_dataset_fresh_split_imagenet(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies that a default run draws a fresh split, uses ImageNet weights, and returns a matching summary."""
     calls = _patch_dlc(monkeypatch, existing=(1,))
@@ -366,22 +345,6 @@ def test_create_training_dataset_missing_shuffle_raises(monkeypatch: pytest.Monk
 
 
 # _UnannotatedNoticeFilter
-class _RecordingStream:
-    """A minimal text stream that records writes and flush calls for filter assertions."""
-
-    def __init__(self) -> None:
-        self.written: list[str] = []
-        self.flush_count = 0
-        self.encoding = "utf-8"
-
-    def write(self, text: str) -> int:
-        self.written.append(text)
-        return len(text)
-
-    def flush(self) -> None:
-        self.flush_count += 1
-
-
 def test_filter_write_buffers_until_newline() -> None:
     """Verifies that text without a line break is buffered and only forwarded once the line completes."""
     target = _RecordingStream()
@@ -394,7 +357,9 @@ def test_filter_write_buffers_until_newline() -> None:
 
 
 def test_filter_write_drops_marker_lines_forwards_others() -> None:
-    """Verifies that completed lines containing the marker are dropped; other completed lines are forwarded verbatim."""
+    """Verifies that completed lines containing the marker are dropped, while other completed lines are forwarded
+    verbatim.
+    """
     target = _RecordingStream()
     stream_filter = _UnannotatedNoticeFilter(target=target, marker="DROP")
     stream_filter.write("keep me\nplease DROP this\nkeep two\n")
@@ -453,3 +418,41 @@ def test_suppress_unannotated_notices_filters_marker_lines(monkeypatch: pytest.M
     assert "visible line" in output
     assert _UNANNOTATED_VIDEO_NOTICE not in output  # the noticed line was filtered out
     assert "trailing partial" in output  # drained on exit
+
+
+# Helpers
+def _patch_dlc(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    models: tuple[str, ...] = ("resnet50",),
+    detectors: tuple[str, ...] = ("ssdlite",),
+    existing: tuple[int, ...] = (1,),
+) -> dict[str, list[dict[str, object]]]:
+    """Patches every DLC boundary create_training_dataset touches and records the two create calls."""
+    monkeypatch.setattr(dataset, "available_models", lambda: list(models))
+    monkeypatch.setattr(dataset, "available_detectors", lambda: list(detectors))
+    calls: dict[str, list[dict[str, object]]] = {"fresh": [], "existing_split": []}
+    monkeypatch.setattr(dataset, "dlc_create_training_dataset", lambda **kwargs: calls["fresh"].append(kwargs))
+    monkeypatch.setattr(
+        dataset,
+        "dlc_create_training_dataset_from_existing_split",
+        lambda **kwargs: calls["existing_split"].append(kwargs),
+    )
+    monkeypatch.setattr(dataset, "get_existing_shuffle_indices", lambda _cfg: list(existing))
+    return calls
+
+
+class _RecordingStream:
+    """Records writes and flush calls made against a text stream, for filter assertions."""
+
+    def __init__(self) -> None:
+        self.written: list[str] = []
+        self.flush_count = 0
+        self.encoding = "utf-8"
+
+    def write(self, text: str) -> int:
+        self.written.append(text)
+        return len(text)
+
+    def flush(self) -> None:
+        self.flush_count += 1

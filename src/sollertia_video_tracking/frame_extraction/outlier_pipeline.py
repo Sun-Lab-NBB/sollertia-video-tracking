@@ -101,7 +101,7 @@ class OutlierExtractionSummary:
     extracted_frame_count: int
     """The total number of frames freshly written into the project's labeled-data tree across all videos."""
     unanalyzed_videos: tuple[str, ...] = ()
-    """The videos skipped because no matching predictions were found; they must be analyzed before refinement."""
+    """The videos skipped because no matching predictions were found. They must be analyzed before refinement."""
     errors: tuple[tuple[str, str], ...] = ()
     """The ``(video_path, detail)`` pairs for every video that raised during detection or extraction."""
 
@@ -196,7 +196,7 @@ def extract_outlier_frames_parallel(
         training_set_index: The training-set fraction index.
         outlier_algorithm: The detection algorithm: ``"jump"``, ``"uncertain"``, ``"fitting"``, or ``"list"``.
         explicit_frame_indices: The explicit frame indices to extract when ``outlier_algorithm`` is ``"list"``.
-        comparison_bodyparts: The bodyparts the detectors consider; an empty tuple considers every bodypart.
+        comparison_bodyparts: The bodyparts the detectors consider. An empty tuple considers every bodypart.
         pixel_distance_threshold: The pixel bound for the ``jump`` and ``fitting`` algorithms.
         minimum_confidence: The likelihood bound for the ``uncertain`` algorithm and the ``fitting`` model's
             missing-data mask.
@@ -392,7 +392,7 @@ def extract_outlier_frames_parallel(
         )
     else:
         # Every extraction video is already registered in config.yaml (they were matched against video_sets above), so
-        # the workers only read the configuration file; the per-worker DeepLabCut video-add is neutralized inside
+        # the workers only read the configuration file. The per-worker DeepLabCut video-add is neutralized inside
         # _extract_one_video to keep it that way.
         summary = _extract_all_videos(
             config_path=config_path,
@@ -414,7 +414,7 @@ def extract_outlier_frames_parallel(
             detection_errors=errors,
         )
 
-    prune_empty_labeled_data_directories(config_path.parent, display_progress=display_progress)
+    prune_empty_labeled_data_directories(project_directory=config_path.parent, display_progress=display_progress)
     return summary
 
 
@@ -423,7 +423,7 @@ def _discover_analyzed_videos(*, registered_videos: list[str], scorer: str, trac
 
     A video counts as analyzed when DeepLabCut can locate a prediction file named by ``scorer`` in the video's own
     directory. This is a filename probe rather than a full prediction-table load, so resolving the default refinement
-    set — every video the current model processed — stays cheap even for a project with many large videos.
+    set, every video the current model processed, stays cheap even for a project with many large videos.
 
     Args:
         registered_videos: The project's registered video paths, in configuration order.
@@ -528,9 +528,9 @@ def _detect_all_videos(
             continue
 
     if keypoint_series_by_video:
-        # The fitting reduction needs a valid numframes2pick to size its fallback selection. Guard it here (the
-        # k-means budgeted path guards the identical value) so a config that is missing or nulls the key fails with
-        # a clean ValueError the CLI reports, rather than an uncaught KeyError/TypeError escaping as a raw traceback.
+        # The fitting reduction needs a valid numframes2pick to size its fallback selection. Guards it here (the k-means
+        # budgeted path guards the identical value) so a config that is missing or nulls the key fails with a clean
+        # ValueError the CLI reports, rather than an uncaught KeyError/TypeError escaping as a raw traceback.
         frames_per_video_count = configuration.get("numframes2pick")
         if not isinstance(frames_per_video_count, int) or frames_per_video_count < 1:
             message = (
@@ -873,7 +873,7 @@ def _clear_iteration_outliers(
     """Discards this refinement iteration's extracted outlier frames before re-extraction, preserving labeled frames.
 
     Outlier frames are written into the same ``labeled-data/<stem>`` directories as the human-labeled training frames,
-    so clearing cannot simply delete the images: only the frames this iteration extracted as outliers, recorded in the
+    so clearing cannot simply delete the images. Only the frames this iteration extracted as outliers, recorded in the
     iteration's ``machinelabels-iter<N>`` bookkeeping, are removed, and any of those that already appear in the human
     ``CollectedData`` labels are kept. ``reset`` wipes every project video's outlier set for the iteration, whereas
     ``overwrite`` (``reset`` False) wipes only the videos this run re-extracts, leaving the rest intact.
@@ -962,7 +962,7 @@ def _clear_video_iteration_outliers(*, directory: Path, iteration: int, scorer: 
         if frame_path.is_file():
             frame_path.unlink()
             removed_count += 1
-        # Drop the prediction overlay saved beside the frame when --save-labeled was used, so it never orphans.
+        # Drops the prediction overlay saved beside the frame when --save-labeled was used, so it never orphans.
         (directory / f"{Path(frame_name).stem}labeled.png").unlink(missing_ok=True)
 
     machine_labels_path.unlink(missing_ok=True)
@@ -978,7 +978,7 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
     """Selects and writes the flagged frames for a single video, reusing DeepLabCut's own frame writer.
 
     DeepLabCut's console output is silenced and exceptions are captured, so one bad video cannot kill the worker pool.
-    DeepLabCut's frame writer re-registers the video in config.yaml; that add is neutralized here because every refined
+    DeepLabCut's frame writer re-registers the video in config.yaml. That add is neutralized here because every refined
     video is already registered in the project, so the concurrent workers never write the configuration file.
 
     Args:
@@ -1017,7 +1017,7 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
         output_directory = Path(configuration["project_path"]) / "labeled-data" / Path(video).stem
         frame_count_before = _count_directory_frames(output_directory)
 
-        # Swap DeepLabCut's random-seek k-means reader for the streaming one, routing its per-candidate progress to the
+        # Swaps DeepLabCut's random-seek k-means reader for the streaming one, routing its per-candidate progress to the
         # parent's aggregate bar. The queue is None when progress is disabled, leaving a plain (stream-suppressed) bar.
         # DeepLabCut's per-worker config write is neutralized because every refined video is already registered.
         progress_reporter = (
@@ -1070,7 +1070,7 @@ def _count_directory_frames(output_directory: Path) -> int:
 
 
 def _skip_video_registration(**_kwargs: Any) -> bool:
-    """Neutralizes DeepLabCut's per-video config.yaml registration inside a worker; the videos are pre-registered.
+    """Neutralizes DeepLabCut's per-video config.yaml registration inside a worker. The videos are pre-registered.
 
     Returns:
         True, reporting a successful registration so DeepLabCut's frame writer proceeds unchanged.

@@ -18,7 +18,7 @@ type KeypointSeries = tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np
 
 _DISCARDED_INTERVAL_ALPHA: float = 0.01
 """The significance level passed to DeepLabCut's ``FitSARIMAXModel``. Only the fitted mean trajectory is used to measure
-each frame's deviation; the confidence interval, the sole output this value influences, is discarded. It is a fixed
+each frame's deviation. The confidence interval, the sole output this value influences, is discarded. It is a fixed
 constant rather than a parameter because it cannot change which frames are flagged, matching DeepLabCut's own
 ``fitting`` selection, which thresholds the mean deviation and ignores the interval."""
 
@@ -26,8 +26,8 @@ constant rather than a parameter because it cannot change which frames are flagg
 class OutlierAlgorithm(StrEnum):
     """Defines the supported frame-selection modes.
 
-    ``jump``, ``uncertain``, and ``fitting`` flag likely-wrong frames from a trained model's predictions; ``list``
-    extracts an explicit, caller-supplied index list instead.
+    ``jump``, ``uncertain``, and ``fitting`` flag likely-wrong frames from a trained model's predictions. The ``list``
+    mode extracts an explicit, caller-supplied index list instead.
     """
 
     JUMP = "jump"
@@ -53,7 +53,7 @@ def uncertain_outlier_indices(predictions: pd.DataFrame, minimum_confidence: flo
     """
     likelihoods = predictions.xs(key="likelihood", level="coords", axis=1)
     # pandas-stubs types the DataFrame.xs(axis=1) cross-section as DataFrame | Series, so the boolean reduction is
-    # seen as a Series that rejects axis=1; the runtime object is always a DataFrame.
+    # seen as a Series that rejects axis=1. The runtime object is always a DataFrame.
     return predictions.index[(likelihoods < minimum_confidence).any(axis=1)].tolist()  # type: ignore[arg-type]
 
 
@@ -140,7 +140,7 @@ def fit_keypoint_distance(
         The per-frame Euclidean distance between the observed position and the model's fitted position.
     """
     with warnings.catch_warnings():
-        # SARIMAX routinely reports non-convergence on noisy keypoint trajectories; the deviation is still usable, and
+        # SARIMAX routinely reports non-convergence on noisy keypoint trajectories. The deviation is still usable, and
         # these fits run in pool workers that do not redirect their streams, so the warnings are silenced at the source.
         warnings.simplefilter("ignore")
         try:
@@ -172,7 +172,7 @@ def fitting_outlier_indices(
 
     Notes:
         The per-frame deviation is the keypoint-averaged distance to the fitted trajectory, ignoring keypoints whose
-        fit was skipped. Frames deviating by more than ``pixel_distance_threshold`` are flagged; when too few qualify,
+        fit was skipped. Frames deviating by more than ``pixel_distance_threshold`` are flagged. When too few qualify,
         the most deviant frames are taken instead, matching DeepLabCut's fallback. The returned indices are positional
         within the supplied window, as in DeepLabCut.
 
@@ -186,7 +186,7 @@ def fitting_outlier_indices(
     """
     stacked_deviations = np.vstack(keypoint_deviations)
     with warnings.catch_warnings():
-        # A frame whose keypoints were all skipped averages over an empty slice; NaN is the intended, unflagged result.
+        # A frame whose keypoints were all skipped averages over an empty slice. NaN is the intended, unflagged result.
         warnings.simplefilter("ignore", category=RuntimeWarning)
         mean_deviation = np.nanmean(stacked_deviations, axis=0)
     candidate_indices = np.flatnonzero(mean_deviation > pixel_distance_threshold)

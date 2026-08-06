@@ -84,11 +84,12 @@ dependencies = [
     # Command-Line Interface
     "click>=8,<9",
 
-    # Columnar Output (the training evaluation step writes its per-snapshot metrics as a Sollertia polars feather;
-    # pandas and pytables, used elsewhere to read DeepLabCut's HDF5 files, are provided transitively by DeepLabCut)
+    # Columnar Output (the training evaluation step writes its per-snapshot metrics as a Sollertia polars feather.
+    # Pandas and pytables, used elsewhere to read DeepLabCut's HDF5 files, are provided transitively by DeepLabCut)
     "polars>=1,<2",
 ]
 
+# Project URLs section. Provides the links to the project repository and the hosted API documentation.
 [project.urls]
 Homepage = "https://github.com/Sun-Lab-NBB/sollertia-video-tracking"
 Documentation = "https://sollertia-video-tracking-api-docs.netlify.app/"
@@ -108,7 +109,7 @@ dev = [
     # Development Automation
     "ataraxis-automation>=9,<10",
 
-    # Type Stubs (checked at development time only for dependencies that do not ship inline type information; pandas
+    # Type Stubs (checked at development time only for dependencies that do not ship inline type information. Pandas
     # is pulled in transitively by DeepLabCut)
     "pandas-stubs>=2,<3",
     "types-psutil>=7,<8",
@@ -127,7 +128,7 @@ packages = ["src/sollertia_video_tracking"]
 line-length = 120         # Deviates from the commonly used '80' standard.
 indent-width = 4          # Same as black, indents are 4 spaces
 target-version = "py312"  # Targets the lowest supported version of python
-src = ["src"]             # The name of the root source code directory
+src = ["src"]
 
 # Excludes 'service' .py files, such as the sphinx configuration file, from linting.
 extend-exclude = ["conf.py"]
@@ -160,9 +161,9 @@ lint.ignore = [
 
 # Additional formatting configurations
 [tool.ruff.format]
-quote-style = "double"             # Uses double quotes for strings
-indent-style = "space"             # Uses space for indents
-skip-magic-trailing-comma = false  # Like black, ignores trailing commas
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false  # Like black, honors magic trailing commas
 line-ending = "auto"               # Automatically detects and standardizes line-ending character
 
 # Docstrings and comments' line length
@@ -178,6 +179,9 @@ convention = "google"
 "**/__init__.py" = [
     "F401", # Imported but unused
     "F403", # Wildcard imports
+]
+"**/*.pyi" = [
+    "PYI029", # Stubgen emits __repr__ for every class whose source defines one, and the stubs are never hand-edited
 ]
 "tests/**/*.py" = [
     # Shared test corpus. These entries are present in every Ataraxis framework and Sollertia platform project.
@@ -198,7 +202,7 @@ convention = "google"
 
 # Import sorting configurations
 [tool.ruff.lint.isort]
-case-sensitive = true              # Takes case into account when sorting imports
+case-sensitive = true
 combine-as-imports = true          # Combines multiple "as" imports for the same package
 force-wrap-aliases = true          # Wraps "as" imports so that each uses a separate line
 force-sort-within-sections = true  # Forces "as" and "from" imports for the same package to be close
@@ -225,10 +229,10 @@ exclude = [
 ]
 
 # DeepLabCut, and the sklearn and tqdm packages it pulls in, ship no type information, so their imports remain exempt
-# from the missing-stub error. Neither DeepLabCut nor sklearn has a stub package on PyPI; tqdm does (types-tqdm), but
+# from the missing-stub error. Neither DeepLabCut nor sklearn has a stub package on PyPI. Tqdm does (types-tqdm), but
 # this project does not carry it. Types for pandas (also pulled in transitively by DeepLabCut) and psutil are supplied
-# by the pandas-stubs and types-psutil dev dependencies, while OpenCV, ruamel.yaml, and skimage ship a py.typed marker,
-# which takes their imports out of that error whether or not the functions behind them carry annotations. All five are
+# by the pandas-stubs and types-psutil dev dependencies. OpenCV, ruamel.yaml, and skimage ship a py.typed marker, which
+# takes their imports out of that error whether or not the functions behind them carry annotations. All five are
 # therefore resolved rather than ignored. The project's own code remains fully type-checked.
 [[tool.mypy.overrides]]
 module = [

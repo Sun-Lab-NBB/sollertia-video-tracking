@@ -1,12 +1,12 @@
 # Configuration file for the Sphinx documentation builder.
-import importlib_metadata
+import importlib.metadata
 
 # -- Project information -----------------------------------------------------
 project = 'sollertia-video-tracking'
 copyright = '2026, Sun (NeuroAI) lab'
 author = 'Ivan Kondratyev'
 # Extracts the project version from the metadata .toml file.
-release = importlib_metadata.version("sollertia-video-tracking")
+release = importlib.metadata.version("sollertia-video-tracking")
 
 # -- General configuration ---------------------------------------------------
 # The sphinx_click entry must load before sphinx_autodoc_typehints. With the two swapped, the click directive fails to

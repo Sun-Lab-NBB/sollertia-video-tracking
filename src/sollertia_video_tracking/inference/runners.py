@@ -46,7 +46,7 @@ def patch_dlc_runner_builders(profile: InferenceProfile) -> Iterator[None]:
     original_detector = dlc_apis_utils.get_detector_inference_runner
 
     # Reentrancy guard: only the outermost runner build is optimized. A conditional-top-down build recursively
-    # constructs its own bottom-up conditioning runner through this same patched function; that nested runner must stay
+    # constructs its own bottom-up conditioning runner through this same patched function. That nested runner must stay
     # stock so the conditional-top-down path runs entirely at stock precision, as documented. A worker analyzes one
     # video at a time on a single thread, so a plain flag is sufficient here.
     building = {"active": False}
@@ -97,7 +97,7 @@ def _optimize_inference_runner(runner: InferenceRunner, profile: InferenceProfil
         )
         return runner
 
-    # DeepLabCut's own autocast is disabled through the inference config passed to analyze_videos; the disable is
+    # DeepLabCut's own autocast is disabled through the inference config passed to analyze_videos. The disable is
     # reasserted here so the stock forward path never double-applies autocast on top of the injected one even if a
     # runner was built differently.
     runner.inference_cfg.autocast.enabled = False
@@ -105,7 +105,7 @@ def _optimize_inference_runner(runner: InferenceRunner, profile: InferenceProfil
     if profile.channels_last:
         runner.model = runner.model.to(memory_format=torch.channels_last)
     if profile.torch_compile:
-        # torch.compile can raise a range of backend errors; the wrapper falls back to eager execution when it does.
+        # torch.compile can raise a range of backend errors. The wrapper falls back to eager execution when it does.
         try:
             runner.model = torch.compile(runner.model)
         except Exception as error:

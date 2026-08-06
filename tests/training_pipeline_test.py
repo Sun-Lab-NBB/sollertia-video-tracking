@@ -46,27 +46,8 @@ from sollertia_video_tracking.training.optimization import MultiGpuStrategy, Opt
 # Shared helpers and fakes
 
 
-def _profile(**overrides) -> OptimizationProfile:
-    """Builds an OptimizationProfile from a CPU single-device baseline, overriding only the named fields."""
-    defaults = {
-        "device": "cpu",
-        "gpus": (),
-        "multi_gpu_strategy": MultiGpuStrategy.SINGLE,
-        "amp_dtype": None,
-        "use_gradient_scaler": False,
-        "tf32": False,
-        "cudnn_benchmark": False,
-        "torch_compile": False,
-        "dataloader_workers": 0,
-        "pin_memory": False,
-        "cpu_threads": None,
-    }
-    defaults.update(overrides)
-    return OptimizationProfile(**defaults)
-
-
-class FakeLoader:
-    """A stand-in for DeepLabCut's DLCLoader exposing only the attributes the pipeline reads."""
+class _FakeLoader:
+    """Stands in for DeepLabCut's DLCLoader, exposing only the attributes the pipeline reads."""
 
     def __init__(self, model_cfg, pose_task, model_folder):
         self.model_cfg = model_cfg
@@ -79,33 +60,6 @@ class FakeLoader:
 
     def create_dataset(self, transform, mode, task):
         return ("dataset", mode, task, transform)
-
-
-class _FakeEval:
-    """A stand-in evaluation summary that only needs to be describable."""
-
-    def describe(self) -> str:
-        return "eval-line"
-
-
-def _make_launch(profile, **overrides) -> _TrainingLaunch:
-    """Builds a _TrainingLaunch with sensible single-process defaults, overriding only the named fields."""
-    defaults = {
-        "config": Path("config.yaml"),
-        "shuffle": 1,
-        "training_set_index": 0,
-        "profile": profile,
-        "snapshot_path": None,
-        "detector_path": None,
-        "load_head_weights": True,
-        "maximum_snapshots_to_keep": None,
-        "progress_queue": None,
-        "preserve_console": False,
-        "port": 12345,
-        "world_size": 1,
-    }
-    defaults.update(overrides)
-    return _TrainingLaunch(**defaults)
 
 
 # TrainingSummary.describe
@@ -193,25 +147,20 @@ def test_augmentation_is_fixed_size_empty_is_not_fixed():
 # detect_fixed_input_size
 
 
-def _patch_loader(monkeypatch, loader):
-    """Points the pipeline's DLCLoader binding at the given fake loader."""
-    monkeypatch.setattr(pipeline, "DLCLoader", lambda **_kwargs: loader)
-
-
 def test_detect_fixed_input_size_true_without_detector(monkeypatch):
     """Verifies that a bottom-up shuffle whose pose transform is fixed reports fixed size."""
-    loader = FakeLoader(
+    loader = _FakeLoader(
         model_cfg={"data": {"train": {"crop_sampling": {"width": 100, "height": 100}}}},
         pose_task=Task.BOTTOM_UP,
         model_folder=Path("/m"),
     )
-    _patch_loader(monkeypatch, loader)
+    _patch_loader(monkeypatch=monkeypatch, loader=loader)
     assert detect_fixed_input_size("cfg", shuffle=1, training_set_index=0) is True
 
 
 def test_detect_fixed_input_size_false_when_detector_variable_size(monkeypatch):
     """Verifies that a trained detector with a non-fixed transform forces the whole run to report not-fixed."""
-    loader = FakeLoader(
+    loader = _FakeLoader(
         model_cfg={
             "detector": {"train_settings": {"epochs": 2}, "data": {"train": {}}},
             "data": {"train": {"crop_sampling": {"width": 100, "height": 100}}},
@@ -219,13 +168,13 @@ def test_detect_fixed_input_size_false_when_detector_variable_size(monkeypatch):
         pose_task=Task.TOP_DOWN,
         model_folder=Path("/m"),
     )
-    _patch_loader(monkeypatch, loader)
+    _patch_loader(monkeypatch=monkeypatch, loader=loader)
     assert detect_fixed_input_size("cfg") is False
 
 
 def test_detect_fixed_input_size_true_when_detector_and_pose_fixed(monkeypatch):
     """Verifies that a trained detector whose transform is fixed, with a fixed pose transform, reports fixed size."""
-    loader = FakeLoader(
+    loader = _FakeLoader(
         model_cfg={
             "detector": {"train_settings": {"epochs": 2}, "data": {"train": {"resize": {"width": 50, "height": 50}}}},
             "data": {"train": {"crop_sampling": {"width": 100, "height": 100}}},
@@ -233,13 +182,13 @@ def test_detect_fixed_input_size_true_when_detector_and_pose_fixed(monkeypatch):
         pose_task=Task.TOP_DOWN,
         model_folder=Path("/m"),
     )
-    _patch_loader(monkeypatch, loader)
+    _patch_loader(monkeypatch=monkeypatch, loader=loader)
     assert detect_fixed_input_size("cfg") is True
 
 
 def test_detect_fixed_input_size_untrained_detector_defers_to_pose(monkeypatch):
     """Verifies that a zero-epoch detector is not trained, so only the pose transform decides the result."""
-    loader = FakeLoader(
+    loader = _FakeLoader(
         model_cfg={
             "detector": {"train_settings": {"epochs": 0}, "data": {"train": {}}},
             "data": {"train": {}},
@@ -247,7 +196,7 @@ def test_detect_fixed_input_size_untrained_detector_defers_to_pose(monkeypatch):
         pose_task=Task.TOP_DOWN,
         model_folder=Path("/m"),
     )
-    _patch_loader(monkeypatch, loader)
+    _patch_loader(monkeypatch=monkeypatch, loader=loader)
     assert detect_fixed_input_size("cfg") is False
 
 
@@ -267,7 +216,7 @@ def test_detect_fixed_input_size_swallows_loader_errors(monkeypatch):
 
 def test_plan_training_tasks_top_down_trains_detector_then_pose():
     """Verifies that a top-down shuffle with a trained detector plans the detector before the pose model."""
-    loader = FakeLoader(
+    loader = _FakeLoader(
         model_cfg={"detector": {"train_settings": {"epochs": 3}}, "train_settings": {"epochs": 10}},
         pose_task=Task.TOP_DOWN,
         model_folder=Path("/m"),
@@ -277,7 +226,7 @@ def test_plan_training_tasks_top_down_trains_detector_then_pose():
 
 def test_plan_training_tasks_top_down_untrained_detector_is_pose_only():
     """Verifies that a top-down shuffle whose detector has zero epochs plans only the pose model."""
-    loader = FakeLoader(
+    loader = _FakeLoader(
         model_cfg={"detector": {"train_settings": {"epochs": 0}}, "train_settings": {"epochs": 10}},
         pose_task=Task.TOP_DOWN,
         model_folder=Path("/m"),
@@ -287,7 +236,7 @@ def test_plan_training_tasks_top_down_untrained_detector_is_pose_only():
 
 def test_plan_training_tasks_bottom_up_is_pose_only():
     """Verifies that a bottom-up shuffle without a detector plans only the pose model."""
-    loader = FakeLoader(
+    loader = _FakeLoader(
         model_cfg={"train_settings": {"epochs": 10}},
         pose_task=Task.BOTTOM_UP,
         model_folder=Path("/m"),
@@ -297,7 +246,7 @@ def test_plan_training_tasks_bottom_up_is_pose_only():
 
 def test_plan_training_tasks_detector_only_when_pose_epochs_zero():
     """Verifies that a top-down shuffle with a trained detector but zero pose epochs plans only the detector."""
-    loader = FakeLoader(
+    loader = _FakeLoader(
         model_cfg={"detector": {"train_settings": {"epochs": 3}}, "train_settings": {"epochs": 0}},
         pose_task=Task.TOP_DOWN,
         model_folder=Path("/m"),
@@ -344,25 +293,6 @@ def test_resolve_process_placement_cuda_single_uses_first_gpu():
 # _build_pose_or_detector_model
 
 
-class _FakeBuilder:
-    """Records model-build calls and returns a sentinel instead of a real network."""
-
-    def __init__(self):
-        self.calls = []
-
-    def build(self, model, **kwargs):
-        self.calls.append((model, kwargs))
-        return "built-model"
-
-
-class _FakeWeightInit:
-    """A stand-in for WeightInitialization exposing only from_dict."""
-
-    @staticmethod
-    def from_dict(config):
-        return ("weight-init", config)
-
-
 def test_build_model_detector_with_transfer_weights(monkeypatch):
     """Verifies that a weight-init config disables pretrained and routes a detector task through DETECTORS.build."""
     detectors = _FakeBuilder()
@@ -372,7 +302,7 @@ def test_build_model_detector_with_transfer_weights(monkeypatch):
     monkeypatch.setattr(pipeline, "WeightInitialization", _FakeWeightInit)
 
     run_config = {"train_settings": {"weight_init": {"dataset": "superanimal"}}, "model": {"backbone": "hrnet"}}
-    result = _build_pose_or_detector_model(run_config, Task.DETECT, snapshot_path=None)
+    result = _build_pose_or_detector_model(run_config=run_config, task=Task.DETECT, snapshot_path=None)
 
     assert result == "built-model"
     assert detectors.calls == [
@@ -388,7 +318,7 @@ def test_build_model_pose_resumed_disables_pretrained_backbone(monkeypatch):
     monkeypatch.setattr(pipeline, "DETECTORS", _FakeBuilder())
 
     run_config = {"train_settings": {}, "model": {"backbone": "resnet"}}
-    _build_pose_or_detector_model(run_config, Task.BOTTOM_UP, snapshot_path="snap.pt")
+    _build_pose_or_detector_model(run_config=run_config, task=Task.BOTTOM_UP, snapshot_path="snap.pt")
 
     assert pose.calls == [({"backbone": "resnet"}, {"weight_init": None, "pretrained_backbone": False})]
 
@@ -400,7 +330,7 @@ def test_build_model_pose_from_scratch_uses_pretrained_backbone(monkeypatch):
     monkeypatch.setattr(pipeline, "DETECTORS", _FakeBuilder())
 
     run_config = {"train_settings": {}, "model": {"backbone": "resnet"}}
-    _build_pose_or_detector_model(run_config, Task.BOTTOM_UP, snapshot_path=None)
+    _build_pose_or_detector_model(run_config=run_config, task=Task.BOTTOM_UP, snapshot_path=None)
 
     assert pose.calls == [({"backbone": "resnet"}, {"weight_init": None, "pretrained_backbone": True})]
 
@@ -408,45 +338,23 @@ def test_build_model_pose_from_scratch_uses_pretrained_backbone(monkeypatch):
 # _build_dataloaders
 
 
-def _patch_dataloader_factories(monkeypatch):
-    """Replaces the DataLoader, DistributedSampler, transform, and collate builders with recorders."""
-    dataloader_calls = []
-    sampler_calls = []
-
-    def fake_dataloader(**kwargs):
-        dataloader_calls.append(kwargs)
-        return ("dataloader", len(dataloader_calls))
-
-    def fake_sampler(**kwargs):
-        sampler_calls.append(kwargs)
-        return "sampler"
-
-    class FakeCollate:
-        def __init__(self):
-            self.calls = []
-
-        def build(self, config):
-            self.calls.append(config)
-            return "collate-fn"
-
-    collate = FakeCollate()
-    monkeypatch.setattr(pipeline, "DataLoader", fake_dataloader)
-    monkeypatch.setattr(pipeline, "DistributedSampler", fake_sampler)
-    monkeypatch.setattr(pipeline, "COLLATE_FUNCTIONS", collate)
-    monkeypatch.setattr(pipeline, "build_transforms", lambda config: ("transform", config))
-    return dataloader_calls, sampler_calls, collate
-
-
 def test_build_dataloaders_ddp_injects_distributed_sampler(monkeypatch):
     """Verifies that the DDP path builds a DistributedSampler, applies collate, and enables persistent workers."""
     dataloader_calls, sampler_calls, collate = _patch_dataloader_factories(monkeypatch)
-    loader = FakeLoader(model_cfg={}, pose_task=Task.BOTTOM_UP, model_folder=Path("/m"))
+    loader = _FakeLoader(model_cfg={}, pose_task=Task.BOTTOM_UP, model_folder=Path("/m"))
     run_config = {
         "data": {"train": {"collate": {"type": "resize"}}, "inference": {}},
         "train_settings": {"batch_size": 4, "dataloader_workers": 2, "dataloader_pin_memory": True},
     }
 
-    train_loader, valid_loader = _build_dataloaders(loader, run_config, Task.BOTTOM_UP, ddp=True, rank=1, world_size=2)
+    train_loader, valid_loader = _build_dataloaders(
+        loader=loader,
+        run_config=run_config,
+        task=Task.BOTTOM_UP,
+        ddp=True,
+        rank=1,
+        world_size=2,
+    )
 
     assert sampler_calls == [
         {
@@ -478,13 +386,13 @@ def test_build_dataloaders_ddp_injects_distributed_sampler(monkeypatch):
 def test_build_dataloaders_single_process_shuffles_without_collate(monkeypatch):
     """Verifies that without DDP the loader shuffles itself, no sampler is built, and a missing collate stays None."""
     dataloader_calls, sampler_calls, collate = _patch_dataloader_factories(monkeypatch)
-    loader = FakeLoader(model_cfg={}, pose_task=Task.BOTTOM_UP, model_folder=Path("/m"))
+    loader = _FakeLoader(model_cfg={}, pose_task=Task.BOTTOM_UP, model_folder=Path("/m"))
     run_config = {
         "data": {"train": {}, "inference": {}},
         "train_settings": {"batch_size": 8, "dataloader_workers": 0, "dataloader_pin_memory": False},
     }
 
-    _build_dataloaders(loader, run_config, Task.BOTTOM_UP, ddp=False, rank=0, world_size=1)
+    _build_dataloaders(loader=loader, run_config=run_config, task=Task.BOTTOM_UP, ddp=False, rank=0, world_size=1)
 
     assert sampler_calls == []
     assert collate.calls == []
@@ -503,69 +411,10 @@ def test_build_dataloaders_single_process_shuffles_without_collate(monkeypatch):
 # _train_single_model
 
 
-class _FakeModel:
-    """A stand-in model recording the device it is moved to."""
-
-    def __init__(self):
-        self.moved_to = None
-
-    def to(self, device):
-        self.moved_to = device
-        return self
-
-
-class _FakeRunner:
-    """A stand-in training runner recording its fit call."""
-
-    def __init__(self, starting_epoch=0):
-        self.starting_epoch = starting_epoch
-        self.fit_kwargs = None
-
-    def fit(self, **kwargs):
-        self.fit_kwargs = kwargs
-
-
-class _FakeQueueLogger:
-    """A stand-in QueueTrainingLogger recording the config it is handed."""
-
-    def __init__(self, progress_queue, task_name="pose"):
-        self.progress_queue = progress_queue
-        self.task_name = task_name
-        self.logged_config = None
-
-    def log_config(self, config):
-        self.logged_config = config
-
-
-def _patch_train_single_model_deps(monkeypatch, *, starting_epoch=0):
-    """Replaces the model builder, logger, runner builder, and dataloader builder with recorders."""
-    model = _FakeModel()
-    runner = _FakeRunner(starting_epoch=starting_epoch)
-    runner_calls = []
-    logger_holder = {}
-
-    monkeypatch.setattr(pipeline, "_build_pose_or_detector_model", lambda **_kwargs: model)
-
-    def fake_logger(progress_queue, task_name="pose"):
-        logger = _FakeQueueLogger(progress_queue, task_name=task_name)
-        logger_holder["logger"] = logger
-        return logger
-
-    monkeypatch.setattr(pipeline, "QueueTrainingLogger", fake_logger)
-
-    def fake_runner_builder(**kwargs):
-        runner_calls.append(kwargs)
-        return runner
-
-    monkeypatch.setattr(pipeline, "build_optimized_training_runner", fake_runner_builder)
-    monkeypatch.setattr(pipeline, "_build_dataloaders", lambda **_kwargs: ("train-loader", "valid-loader"))
-    return model, runner, runner_calls, logger_holder
-
-
 def test_train_single_model_rank0_builds_logger_and_fits(monkeypatch):
     """Verifies that rank 0 with a queue caps snapshots, resumes from the snapshot, logs the total budget, and fits."""
     model, runner, runner_calls, logger_holder = _patch_train_single_model_deps(monkeypatch, starting_epoch=2)
-    loader = FakeLoader(model_cfg={}, pose_task=Task.BOTTOM_UP, model_folder=Path("/m"))
+    loader = _FakeLoader(model_cfg={}, pose_task=Task.BOTTOM_UP, model_folder=Path("/m"))
     run_config = {
         "runner": {"snapshots": {"max_snapshots": 1}},
         "train_settings": {"epochs": 10, "display_iters": 50},
@@ -573,10 +422,10 @@ def test_train_single_model_rank0_builds_logger_and_fits(monkeypatch):
     }
 
     _train_single_model(
-        loader,
-        run_config,
-        Task.BOTTOM_UP,
-        _profile(device="cpu"),
+        loader=loader,
+        run_config=run_config,
+        task=Task.BOTTOM_UP,
+        profile=_profile(device="cpu"),
         rank=0,
         world_size=1,
         snapshot_path=None,
@@ -603,7 +452,7 @@ def test_train_single_model_rank0_builds_logger_and_fits(monkeypatch):
 def test_train_single_model_detector_logger_uses_detector_label(monkeypatch):
     """Verifies that an explicit-snapshot detector skips the cap and resume fallback, labeling its logger 'detector'."""
     _model, _runner, runner_calls, logger_holder = _patch_train_single_model_deps(monkeypatch)
-    loader = FakeLoader(model_cfg={}, pose_task=Task.TOP_DOWN, model_folder=Path("/m"))
+    loader = _FakeLoader(model_cfg={}, pose_task=Task.TOP_DOWN, model_folder=Path("/m"))
     run_config = {
         "runner": {"snapshots": {"max_snapshots": 1}},
         "train_settings": {"epochs": 4, "display_iters": 20},
@@ -611,10 +460,10 @@ def test_train_single_model_detector_logger_uses_detector_label(monkeypatch):
     }
 
     _train_single_model(
-        loader,
-        run_config,
-        Task.DETECT,
-        _profile(device="cpu"),
+        loader=loader,
+        run_config=run_config,
+        task=Task.DETECT,
+        profile=_profile(device="cpu"),
         rank=0,
         world_size=1,
         snapshot_path="explicit.pt",
@@ -632,14 +481,14 @@ def test_train_single_model_detector_logger_uses_detector_label(monkeypatch):
 def test_train_single_model_non_rank0_has_no_logger(monkeypatch):
     """Verifies that a non-rank-0 process attaches no logger and reports no epoch budget."""
     _model, runner, runner_calls, logger_holder = _patch_train_single_model_deps(monkeypatch)
-    loader = FakeLoader(model_cfg={}, pose_task=Task.BOTTOM_UP, model_folder=Path("/m"))
+    loader = _FakeLoader(model_cfg={}, pose_task=Task.BOTTOM_UP, model_folder=Path("/m"))
     run_config = {"runner": {"snapshots": {"max_snapshots": 1}}, "train_settings": {"epochs": 4, "display_iters": 20}}
 
     _train_single_model(
-        loader,
-        run_config,
-        Task.BOTTOM_UP,
-        _profile(device="cpu"),
+        loader=loader,
+        run_config=run_config,
+        task=Task.BOTTOM_UP,
+        profile=_profile(device="cpu"),
         rank=1,
         world_size=2,
         snapshot_path="explicit.pt",
@@ -656,25 +505,9 @@ def test_train_single_model_non_rank0_has_no_logger(monkeypatch):
 # _run_training_worker
 
 
-def _patch_worker_deps(monkeypatch, loader):
-    """Replaces the worker's DLC handoffs (loader, seeding, optimizations, logging, per-model training) with stubs."""
-    records = types.SimpleNamespace(seeds=[], optimizations=[], routes=[], train=[], destroy_file=[])
-    monkeypatch.setattr(pipeline, "DLCLoader", lambda **_kwargs: loader)
-    monkeypatch.setattr(pipeline, "fix_seeds", records.seeds.append)
-    monkeypatch.setattr(pipeline, "apply_runtime_optimizations", records.optimizations.append)
-    monkeypatch.setattr(
-        pipeline,
-        "_route_logging_to_file",
-        lambda folder, *, quiet_console: records.routes.append((folder, quiet_console)),
-    )
-    monkeypatch.setattr(pipeline, "_train_single_model", lambda **kwargs: records.train.append(kwargs))
-    monkeypatch.setattr(pipeline, "destroy_file_logging", lambda: records.destroy_file.append(True))
-    return records
-
-
 def test_run_training_worker_single_process_top_down(monkeypatch, tmp_path):
     """Verifies that the single-process top-down worker seeds, optimizes, routes logs, and trains detector then pose."""
-    loader = FakeLoader(
+    loader = _FakeLoader(
         model_cfg={
             "device": "cpu",
             "train_settings": {"epochs": 5, "seed": 7, "weight_init": None},
@@ -683,7 +516,7 @@ def test_run_training_worker_single_process_top_down(monkeypatch, tmp_path):
         pose_task=Task.TOP_DOWN,
         model_folder=tmp_path,
     )
-    records = _patch_worker_deps(monkeypatch, loader)
+    records = _patch_worker_deps(monkeypatch=monkeypatch, loader=loader)
     launch = _make_launch(_profile(device="cpu"), progress_queue=None)
 
     _run_training_worker(rank=0, launch=launch)
@@ -701,7 +534,7 @@ def test_run_training_worker_single_process_top_down(monkeypatch, tmp_path):
 
 def test_run_training_worker_ddp_initializes_and_tears_down_process_group(monkeypatch, tmp_path):
     """Verifies that a DDP worker inits the process group, sets its device, barriers models, and tears it down."""
-    loader = FakeLoader(
+    loader = _FakeLoader(
         model_cfg={
             "device": "cuda",
             "train_settings": {"epochs": 5, "seed": 1, "weight_init": None},
@@ -710,7 +543,7 @@ def test_run_training_worker_ddp_initializes_and_tears_down_process_group(monkey
         pose_task=Task.TOP_DOWN,
         model_folder=tmp_path,
     )
-    records = _patch_worker_deps(monkeypatch, loader)
+    records = _patch_worker_deps(monkeypatch=monkeypatch, loader=loader)
 
     init_calls, barrier_calls, destroy_group_calls, set_device_calls = [], [], [], []
     fake_dist = types.SimpleNamespace(
@@ -739,96 +572,23 @@ def test_run_training_worker_ddp_initializes_and_tears_down_process_group(monkey
 # train_model
 
 
-class _FakeMonitor:
-    """A stand-in TrainingMonitor recording its lifecycle."""
-
-    instances: ClassVar[list] = []
-
-    def __init__(self, progress_queue, stream=None):
-        self.progress_queue = progress_queue
-        self.stream = stream
-        self.started = False
-        self.stopped = False
-        self.joined = None
-        self.alive = False
-        _FakeMonitor.instances.append(self)
-
-    def start(self):
-        self.started = True
-
-    def stop(self):
-        self.stopped = True
-
-    def join(self, timeout=None):
-        self.joined = timeout
-
-    def is_alive(self):
-        return self.alive
-
-
-class _FakeManager:
-    """A stand-in multiprocessing manager returning a placeholder queue."""
-
-    def __init__(self):
-        self.shutdown_called = False
-
-    def Queue(self):  # noqa: N802 - mirrors multiprocessing.Manager's Queue factory name.
-        return "progress-queue"
-
-    def shutdown(self):
-        self.shutdown_called = True
-
-
-class _FakeStream:
-    """A stand-in preserved-stderr duplicate recording that it was closed."""
-
-    def __init__(self):
-        self.closed = False
-
-    def close(self):
-        self.closed = True
-
-
-def _patch_train_model_deps(monkeypatch, loader, *, dup_stream, worker=None, evaluation=None):
-    """Replaces train_model's process management, monitor, stderr duplicate, worker, and evaluation with recorders."""
-    _FakeMonitor.instances = []
-    records = types.SimpleNamespace(spawn=[], worker=[], evaluate=[], manager=_FakeManager())
-    monkeypatch.setattr(pipeline, "DLCLoader", lambda **_kwargs: loader)
-    monkeypatch.setattr(pipeline, "_find_free_port", lambda: 45000)
-    monkeypatch.setattr(pipeline, "_duplicate_stderr", lambda: dup_stream)
-    monkeypatch.setattr(pipeline, "TrainingMonitor", _FakeMonitor)
-
-    fake_mp = types.SimpleNamespace(
-        Manager=lambda: records.manager,
-        spawn=lambda fn, args, nprocs, join: records.spawn.append((fn, args, nprocs, join)),
-    )
-    monkeypatch.setattr(pipeline, "mp", fake_mp)
-
-    def default_worker(rank, launch):
-        records.worker.append((rank, launch))
-
-    monkeypatch.setattr(pipeline, "_run_training_worker", worker or default_worker)
-
-    def fake_evaluate(**kwargs):
-        records.evaluate.append(kwargs)
-        return evaluation
-
-    monkeypatch.setattr(pipeline, "_evaluate_after_training", fake_evaluate)
-    return records
-
-
 def test_train_model_single_process_with_monitor_and_evaluation(monkeypatch, tmp_path):
     """Verifies that a single-process run starts and stops the monitor, runs the rank-0 worker, and evaluates pose."""
-    loader = FakeLoader(
+    loader = _FakeLoader(
         model_cfg={"train_settings": {"epochs": 10}},
         pose_task=Task.BOTTOM_UP,
         model_folder=tmp_path,
     )
     dup_stream = _FakeStream()
     evaluation = _FakeEval()
-    records = _patch_train_model_deps(monkeypatch, loader, dup_stream=dup_stream, evaluation=evaluation)
+    records = _patch_train_model_deps(
+        monkeypatch=monkeypatch,
+        loader=loader,
+        dup_stream=dup_stream,
+        evaluation=evaluation,
+    )
 
-    summary = train_model(str(tmp_path / "config.yaml"), _profile(device="cpu"), shuffle=2, epochs=None)
+    summary = train_model(config=str(tmp_path / "config.yaml"), profile=_profile(device="cpu"), shuffle=2, epochs=None)
 
     # The worker ran once in-process; DDP spawn was not used.
     assert len(records.worker) == 1
@@ -855,7 +615,7 @@ def test_train_model_single_process_with_monitor_and_evaluation(monkeypatch, tmp
 
 def test_train_model_retains_monitor_resources_when_renderer_outlives_join(monkeypatch, tmp_path):
     """Verifies that a renderer still running after the join keeps its queue manager and preserved stream open."""
-    loader = FakeLoader(
+    loader = _FakeLoader(
         model_cfg={"train_settings": {"epochs": 10}},
         pose_task=Task.BOTTOM_UP,
         model_folder=tmp_path,
@@ -865,9 +625,14 @@ def test_train_model_retains_monitor_resources_when_renderer_outlives_join(monke
     def mark_monitor_alive(**_kwargs):
         _FakeMonitor.instances[0].alive = True
 
-    records = _patch_train_model_deps(monkeypatch, loader, dup_stream=dup_stream, worker=mark_monitor_alive)
+    records = _patch_train_model_deps(
+        monkeypatch=monkeypatch,
+        loader=loader,
+        dup_stream=dup_stream,
+        worker=mark_monitor_alive,
+    )
 
-    train_model(str(tmp_path / "config.yaml"), _profile(device="cpu"), shuffle=2, epochs=None)
+    train_model(config=str(tmp_path / "config.yaml"), profile=_profile(device="cpu"), shuffle=2, epochs=None)
 
     monitor = _FakeMonitor.instances[0]
     assert monitor.stopped
@@ -877,14 +642,19 @@ def test_train_model_retains_monitor_resources_when_renderer_outlives_join(monke
 
 def test_train_model_without_progress_skips_monitor(monkeypatch, tmp_path):
     """Verifies that disabling the progress display skips the monitor, manager, and stderr duplicate entirely."""
-    loader = FakeLoader(
+    loader = _FakeLoader(
         model_cfg={"train_settings": {"epochs": 3}},
         pose_task=Task.BOTTOM_UP,
         model_folder=tmp_path,
     )
-    records = _patch_train_model_deps(monkeypatch, loader, dup_stream=None)
+    records = _patch_train_model_deps(monkeypatch=monkeypatch, loader=loader, dup_stream=None)
 
-    summary = train_model(tmp_path / "config.yaml", _profile(device="cpu"), display_progress=False, evaluate=False)
+    summary = train_model(
+        config=tmp_path / "config.yaml",
+        profile=_profile(device="cpu"),
+        display_progress=False,
+        evaluate=False,
+    )
 
     assert _FakeMonitor.instances == []
     assert records.manager.shutdown_called is False
@@ -896,7 +666,7 @@ def test_train_model_without_progress_skips_monitor(monkeypatch, tmp_path):
 
 def test_train_model_ddp_spawns_workers(monkeypatch, tmp_path):
     """Verifies that a DDP profile spawns one worker per GPU and reports mixed-precision and strategy in the summary."""
-    loader = FakeLoader(
+    loader = _FakeLoader(
         model_cfg={"train_settings": {"epochs": 100}},
         pose_task=Task.BOTTOM_UP,
         model_folder=tmp_path,
@@ -904,9 +674,14 @@ def test_train_model_ddp_spawns_workers(monkeypatch, tmp_path):
     dup_stream = _FakeStream()
     evaluation = _FakeEval()
     profile = _profile(device="cuda", gpus=(0, 1), multi_gpu_strategy=MultiGpuStrategy.DDP, amp_dtype=torch.bfloat16)
-    records = _patch_train_model_deps(monkeypatch, loader, dup_stream=dup_stream, evaluation=evaluation)
+    records = _patch_train_model_deps(
+        monkeypatch=monkeypatch,
+        loader=loader,
+        dup_stream=dup_stream,
+        evaluation=evaluation,
+    )
 
-    summary = train_model(tmp_path / "config.yaml", profile)
+    summary = train_model(config=tmp_path / "config.yaml", profile=profile)
 
     assert len(records.spawn) == 1
     spawn_fn, spawn_args, nprocs, join = records.spawn[0]
@@ -924,7 +699,7 @@ def test_train_model_ddp_spawns_workers(monkeypatch, tmp_path):
 
 def test_train_model_applies_detector_and_all_overrides(monkeypatch, tmp_path):
     """Verifies that every override is threaded into the config, including the detector-specific keys for top-down."""
-    loader = FakeLoader(
+    loader = _FakeLoader(
         model_cfg={
             "train_settings": {"epochs": 5},
             "detector": {"train_settings": {"epochs": 3}},
@@ -932,11 +707,11 @@ def test_train_model_applies_detector_and_all_overrides(monkeypatch, tmp_path):
         pose_task=Task.TOP_DOWN,
         model_folder=tmp_path,
     )
-    _patch_train_model_deps(monkeypatch, loader, dup_stream=None)
+    _patch_train_model_deps(monkeypatch=monkeypatch, loader=loader, dup_stream=None)
 
     summary = train_model(
-        tmp_path / "config.yaml",
-        _profile(device="cpu", dataloader_workers=2, pin_memory=False),
+        config=tmp_path / "config.yaml",
+        profile=_profile(device="cpu", dataloader_workers=2, pin_memory=False),
         batch_size=16,
         epochs=20,
         save_epochs=5,
@@ -970,7 +745,7 @@ def test_train_model_applies_detector_and_all_overrides(monkeypatch, tmp_path):
 
 def test_train_model_skips_evaluation_without_pose(monkeypatch, tmp_path):
     """Verifies that a detector-only run skips the post-training pose evaluation even when evaluation is requested."""
-    loader = FakeLoader(
+    loader = _FakeLoader(
         model_cfg={
             "train_settings": {"epochs": 0},
             "detector": {"train_settings": {"epochs": 3}},
@@ -978,9 +753,14 @@ def test_train_model_skips_evaluation_without_pose(monkeypatch, tmp_path):
         pose_task=Task.TOP_DOWN,
         model_folder=tmp_path,
     )
-    records = _patch_train_model_deps(monkeypatch, loader, dup_stream=None)
+    records = _patch_train_model_deps(monkeypatch=monkeypatch, loader=loader, dup_stream=None)
 
-    summary = train_model(tmp_path / "config.yaml", _profile(device="cpu"), display_progress=False, evaluate=True)
+    summary = train_model(
+        config=tmp_path / "config.yaml",
+        profile=_profile(device="cpu"),
+        display_progress=False,
+        evaluate=True,
+    )
 
     assert records.evaluate == []
     assert summary.tasks_trained == ("detector",)
@@ -989,7 +769,7 @@ def test_train_model_skips_evaluation_without_pose(monkeypatch, tmp_path):
 
 def test_train_model_rejects_memory_replay(monkeypatch, tmp_path):
     """Verifies that a SuperAnimal memory-replay shuffle is rejected before any training begins."""
-    loader = FakeLoader(
+    loader = _FakeLoader(
         model_cfg={"train_settings": {"epochs": 10, "weight_init": {"memory_replay": True}}},
         pose_task=Task.BOTTOM_UP,
         model_folder=tmp_path,
@@ -1002,12 +782,12 @@ def test_train_model_rejects_memory_replay(monkeypatch, tmp_path):
     )
 
     with pytest.raises(ValueError, match="memory-replay"):
-        train_model(tmp_path / "config.yaml", _profile(device="cpu"))
+        train_model(config=tmp_path / "config.yaml", profile=_profile(device="cpu"))
 
 
 def test_train_model_reports_log_on_failure(monkeypatch, tmp_path):
     """Verifies that when the worker fails, the monitor is still cleaned up and the operator is pointed to the log."""
-    loader = FakeLoader(
+    loader = _FakeLoader(
         model_cfg={"train_settings": {"epochs": 10}},
         pose_task=Task.BOTTOM_UP,
         model_folder=tmp_path,
@@ -1018,14 +798,19 @@ def test_train_model_reports_log_on_failure(monkeypatch, tmp_path):
         message = "worker crashed"
         raise RuntimeError(message)
 
-    records = _patch_train_model_deps(monkeypatch, loader, dup_stream=dup_stream, worker=failing_worker)
+    records = _patch_train_model_deps(
+        monkeypatch=monkeypatch,
+        loader=loader,
+        dup_stream=dup_stream,
+        worker=failing_worker,
+    )
     reported = []
     monkeypatch.setattr(pipeline, "_report_training_log", reported.append)
     # The training log must already exist for the failure notice to be emitted.
     (tmp_path / "train.txt").write_text("worker output")
 
     with pytest.raises(RuntimeError, match="worker crashed"):
-        train_model(tmp_path / "config.yaml", _profile(device="cpu"))
+        train_model(config=tmp_path / "config.yaml", profile=_profile(device="cpu"))
 
     assert reported == [tmp_path / "train.txt"]
     # The finally block still tore down the monitor and manager despite the failure.
@@ -1168,19 +953,16 @@ def test_route_logging_to_file_keeps_console_when_not_quiet(monkeypatch, tmp_pat
 def test_duplicate_stderr_returns_stream(monkeypatch, tmp_path):
     """Verifies that a distinct writable duplicate of stderr's descriptor is returned, and writes reach its file."""
     backing_path = tmp_path / "stderr.txt"
-    backing = backing_path.open("w")
-    monkeypatch.setattr(pipeline.sys, "stderr", backing)
-    try:
+    with backing_path.open("w") as backing:
+        monkeypatch.setattr(pipeline.sys, "stderr", backing)
         stream = _duplicate_stderr()
         assert stream is not None
         # The duplicate is a distinct descriptor, not a handle onto stderr's own file object.
         assert stream.fileno() != backing.fileno()
-        # Because os.dup shares the underlying open file, output written through the duplicate lands in the same
-        # file the original stderr points at.
+        # Because os.dup shares the underlying open file, output written through the duplicate lands in the same file
+        # the original stderr points at.
         stream.write("duplicated-write\n")
         stream.close()
-    finally:
-        backing.close()
     assert "duplicated-write" in backing_path.read_text()
 
 
@@ -1234,3 +1016,258 @@ def test_report_training_log_writes_notice(capsys):
     err = capsys.readouterr().err
     assert "Training did not complete" in err
     assert str(Path("/models/run/train.txt")) in err
+
+
+# Private helpers and fakes
+
+
+def _profile(**overrides) -> OptimizationProfile:
+    """Builds an OptimizationProfile from a CPU single-device baseline, overriding only the named fields."""
+    defaults = {
+        "device": "cpu",
+        "gpus": (),
+        "multi_gpu_strategy": MultiGpuStrategy.SINGLE,
+        "amp_dtype": None,
+        "use_gradient_scaler": False,
+        "tf32": False,
+        "cudnn_benchmark": False,
+        "torch_compile": False,
+        "dataloader_workers": 0,
+        "pin_memory": False,
+        "cpu_threads": None,
+    }
+    defaults.update(overrides)
+    return OptimizationProfile(**defaults)
+
+
+class _FakeEval:
+    """Stands in for an evaluation summary that only needs to be describable."""
+
+    def describe(self) -> str:
+        return "eval-line"
+
+
+def _make_launch(profile, **overrides) -> _TrainingLaunch:
+    """Builds a _TrainingLaunch with sensible single-process defaults, overriding only the named fields."""
+    defaults = {
+        "config": Path("config.yaml"),
+        "shuffle": 1,
+        "training_set_index": 0,
+        "profile": profile,
+        "snapshot_path": None,
+        "detector_path": None,
+        "load_head_weights": True,
+        "maximum_snapshots_to_keep": None,
+        "progress_queue": None,
+        "preserve_console": False,
+        "port": 12345,
+        "world_size": 1,
+    }
+    defaults.update(overrides)
+    return _TrainingLaunch(**defaults)
+
+
+def _patch_loader(monkeypatch, loader):
+    """Points the pipeline's DLCLoader binding at the given fake loader."""
+    monkeypatch.setattr(pipeline, "DLCLoader", lambda **_kwargs: loader)
+
+
+class _FakeBuilder:
+    """Records model-build calls and returns a sentinel instead of a real network."""
+
+    def __init__(self):
+        self.calls = []
+
+    def build(self, model, **kwargs):
+        self.calls.append((model, kwargs))
+        return "built-model"
+
+
+class _FakeWeightInit:
+    """Stands in for WeightInitialization, exposing only from_dict."""
+
+    @staticmethod
+    def from_dict(config):
+        return ("weight-init", config)
+
+
+def _patch_dataloader_factories(monkeypatch):
+    """Replaces the DataLoader, DistributedSampler, transform, and collate builders with recorders."""
+    dataloader_calls = []
+    sampler_calls = []
+
+    def fake_dataloader(**kwargs):
+        dataloader_calls.append(kwargs)
+        return ("dataloader", len(dataloader_calls))
+
+    def fake_sampler(**kwargs):
+        sampler_calls.append(kwargs)
+        return "sampler"
+
+    class FakeCollate:
+        def __init__(self):
+            self.calls = []
+
+        def build(self, config):
+            self.calls.append(config)
+            return "collate-fn"
+
+    collate = FakeCollate()
+    monkeypatch.setattr(pipeline, "DataLoader", fake_dataloader)
+    monkeypatch.setattr(pipeline, "DistributedSampler", fake_sampler)
+    monkeypatch.setattr(pipeline, "COLLATE_FUNCTIONS", collate)
+    monkeypatch.setattr(pipeline, "build_transforms", lambda config: ("transform", config))
+    return dataloader_calls, sampler_calls, collate
+
+
+class _FakeModel:
+    """Records the device the model is moved to."""
+
+    def __init__(self):
+        self.moved_to = None
+
+    def to(self, device):
+        self.moved_to = device
+        return self
+
+
+class _FakeRunner:
+    """Stands in for a training runner, recording its fit call."""
+
+    def __init__(self, starting_epoch=0):
+        self.starting_epoch = starting_epoch
+        self.fit_kwargs = None
+
+    def fit(self, **kwargs):
+        self.fit_kwargs = kwargs
+
+
+class _FakeQueueLogger:
+    """Stands in for QueueTrainingLogger, recording the config it is handed."""
+
+    def __init__(self, progress_queue, task_name="pose"):
+        self.progress_queue = progress_queue
+        self.task_name = task_name
+        self.logged_config = None
+
+    def log_config(self, config):
+        self.logged_config = config
+
+
+def _patch_train_single_model_deps(monkeypatch, *, starting_epoch=0):
+    """Replaces the model builder, logger, runner builder, and dataloader builder with recorders."""
+    model = _FakeModel()
+    runner = _FakeRunner(starting_epoch=starting_epoch)
+    runner_calls = []
+    logger_holder = {}
+
+    monkeypatch.setattr(pipeline, "_build_pose_or_detector_model", lambda **_kwargs: model)
+
+    def fake_logger(progress_queue, task_name="pose"):
+        logger = _FakeQueueLogger(progress_queue, task_name=task_name)
+        logger_holder["logger"] = logger
+        return logger
+
+    monkeypatch.setattr(pipeline, "QueueTrainingLogger", fake_logger)
+
+    def fake_runner_builder(**kwargs):
+        runner_calls.append(kwargs)
+        return runner
+
+    monkeypatch.setattr(pipeline, "build_optimized_training_runner", fake_runner_builder)
+    monkeypatch.setattr(pipeline, "_build_dataloaders", lambda **_kwargs: ("train-loader", "valid-loader"))
+    return model, runner, runner_calls, logger_holder
+
+
+def _patch_worker_deps(monkeypatch, loader):
+    """Replaces the worker's DLC handoffs (loader, seeding, optimizations, logging, per-model training) with stubs."""
+    records = types.SimpleNamespace(seeds=[], optimizations=[], routes=[], train=[], destroy_file=[])
+    monkeypatch.setattr(pipeline, "DLCLoader", lambda **_kwargs: loader)
+    monkeypatch.setattr(pipeline, "fix_seeds", records.seeds.append)
+    monkeypatch.setattr(pipeline, "apply_runtime_optimizations", records.optimizations.append)
+    monkeypatch.setattr(
+        pipeline,
+        "_route_logging_to_file",
+        lambda folder, *, quiet_console: records.routes.append((folder, quiet_console)),
+    )
+    monkeypatch.setattr(pipeline, "_train_single_model", lambda **kwargs: records.train.append(kwargs))
+    monkeypatch.setattr(pipeline, "destroy_file_logging", lambda: records.destroy_file.append(True))
+    return records
+
+
+class _FakeMonitor:
+    """Stands in for TrainingMonitor, recording its lifecycle."""
+
+    instances: ClassVar[list] = []
+
+    def __init__(self, progress_queue, stream=None):
+        self.progress_queue = progress_queue
+        self.stream = stream
+        self.started = False
+        self.stopped = False
+        self.joined = None
+        self.alive = False
+        _FakeMonitor.instances.append(self)
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+    def join(self, timeout=None):
+        self.joined = timeout
+
+    def is_alive(self):
+        return self.alive
+
+
+class _FakeManager:
+    """Stands in for a multiprocessing manager, returning a placeholder queue."""
+
+    def __init__(self):
+        self.shutdown_called = False
+
+    def Queue(self):  # noqa: N802 - mirrors multiprocessing.Manager's Queue factory name.
+        return "progress-queue"
+
+    def shutdown(self):
+        self.shutdown_called = True
+
+
+class _FakeStream:
+    """Stands in for a preserved-stderr duplicate, recording that it was closed."""
+
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+def _patch_train_model_deps(monkeypatch, loader, *, dup_stream, worker=None, evaluation=None):
+    """Replaces train_model's process management, monitor, stderr duplicate, worker, and evaluation with recorders."""
+    _FakeMonitor.instances = []
+    records = types.SimpleNamespace(spawn=[], worker=[], evaluate=[], manager=_FakeManager())
+    monkeypatch.setattr(pipeline, "DLCLoader", lambda **_kwargs: loader)
+    monkeypatch.setattr(pipeline, "_find_free_port", lambda: 45000)
+    monkeypatch.setattr(pipeline, "_duplicate_stderr", lambda: dup_stream)
+    monkeypatch.setattr(pipeline, "TrainingMonitor", _FakeMonitor)
+
+    fake_mp = types.SimpleNamespace(
+        Manager=lambda: records.manager,
+        spawn=lambda fn, args, nprocs, join: records.spawn.append((fn, args, nprocs, join)),
+    )
+    monkeypatch.setattr(pipeline, "mp", fake_mp)
+
+    def default_worker(rank, launch):
+        records.worker.append((rank, launch))
+
+    monkeypatch.setattr(pipeline, "_run_training_worker", worker or default_worker)
+
+    def fake_evaluate(**kwargs):
+        records.evaluate.append(kwargs)
+        return evaluation
+
+    monkeypatch.setattr(pipeline, "_evaluate_after_training", fake_evaluate)
+    return records

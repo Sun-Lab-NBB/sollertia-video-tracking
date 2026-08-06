@@ -360,7 +360,7 @@ def _resolve_crop_override(
     """Resolves the ``--crop`` option values into one crop rectangle per analyzed video, or None when unset.
 
     A single ``--crop`` is applied uniformly to every video. Several ``--crop`` rectangles are matched to the videos in
-    order and must equal the video count; because the whole-project video order is not user-controlled, per-video crops
+    order and must equal the video count. Because the whole-project video order is not user-controlled, per-video crops
     cannot be combined with the whole-project default and require explicit ``--videos``.
 
     Args:
@@ -399,7 +399,7 @@ def _resolve_output_override(output: tuple[Path, ...], video_count: int, *, whol
     """Resolves the ``--output`` option values into one output directory per analyzed video, or None when unset.
 
     A single ``--output`` collects every video's predictions in one directory. Several ``--output`` directories are
-    matched to the videos in order and must equal the video count; because the whole-project video order is not
+    matched to the videos in order and must equal the video count. Because the whole-project video order is not
     user-controlled, per-video directories cannot be combined with the whole-project default and require explicit
     ``--videos``.
 
