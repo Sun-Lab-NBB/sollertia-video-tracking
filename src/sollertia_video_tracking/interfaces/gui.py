@@ -19,7 +19,7 @@ def gui_command() -> None:
     From its project-management window, a project's config.yaml is created or opened to label the frames that
     ``slvt extract`` selects, correct the outlier frames it flags, and merge the refined data into the next iteration.
     The frame labeler itself opens in napari, reached from that window. Manual labeling is the only part of the
-    refinement loop this library does not implement, so it is the reason to open the GUI: the extraction, training,
+    refinement loop this library does not implement, so it is the reason to open the GUI. The extraction, training,
     evaluation, and analysis tabs it also offers run stock DeepLabCut and are slower than the equivalent ``slvt``
     commands. The GUI needs a graphical session, so it is run on a workstation rather than a headless training or
     inference server, and the command blocks until the window is closed.

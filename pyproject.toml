@@ -48,11 +48,15 @@ dependencies = [
     # so this bridge runs in its own environment and communicates with the rest of the Sollertia stack across the CLI
     # boundary rather than by direct import. torchvision is resolved transitively to match the installed torch build.
     #
-    # This is pinned to an exact version rather than the usual major-version range because the training subpackage
-    # overrides DeepLabCut internals (it reimplements the PyTorch train()/fit() orchestration and subclasses the
-    # training runners to add mixed precision and DistributedDataParallel). Those internals are private APIs with no
-    # stability guarantee within the 3.x series, so an exact pin is required to keep the overrides valid. Bumping this
-    # version is a deliberate, tested action: re-verify the overridden internals against the new release first.
+    # This is pinned to an exact version rather than the usual major-version range because three subpackages override
+    # DeepLabCut internals. The training subpackage reimplements the PyTorch train()/fit() orchestration and subclasses
+    # the training runners to add mixed precision and DistributedDataParallel, the inference subpackage patches the
+    # get_pose_inference_runner and get_detector_inference_runner builders and replaces an inference runner's private
+    # _input_queue after a failed chunk, and the frame-extraction workers replace KmeansbasedFrameselectioncv2 and
+    # attempt_to_add_video. The frame-extraction patches are plain assignments, so a renamed upstream symbol silently
+    # no-ops. Those internals are private APIs with no stability guarantee within the 3.x series, so an exact pin is
+    # required to keep the overrides valid. Bumping this version is a deliberate, tested action: re-verify the
+    # overridden internals against the new release first.
     #
     # The [gui] extra is included because the refinement loop's manual labeling and label-refinement steps run in
     # DeepLabCut's napari-based GUI, which lives in this same isolated environment. It pulls in napari-deeplabcut and
@@ -81,11 +85,12 @@ dependencies = [
     # Command-Line Interface
     "click>=8,<9",
 
-    # Columnar Output (the training evaluation step writes its per-snapshot metrics as a Sollertia polars feather;
-    # pandas and pytables, used elsewhere to read DeepLabCut's HDF5 files, are provided transitively by DeepLabCut)
+    # Columnar Output (the training evaluation step writes its per-snapshot metrics as a Sollertia polars feather.
+    # Pandas and pytables, used elsewhere to read DeepLabCut's HDF5 files, are provided transitively by DeepLabCut)
     "polars>=1,<2",
 ]
 
+# Project URLs section. Provides the links to the project repository and the hosted API documentation.
 [project.urls]
 Homepage = "https://github.com/Sun-Lab-NBB/sollertia-video-tracking"
 Documentation = "https://sollertia-video-tracking-api-docs.netlify.app/"
@@ -105,7 +110,7 @@ dev = [
     # Development Automation
     "ataraxis-automation>=9,<10",
 
-    # Type Stubs (checked at development time only for dependencies that do not ship inline type information; pandas
+    # Type Stubs (checked at development time only for dependencies that do not ship inline type information. Pandas
     # is pulled in transitively by DeepLabCut)
     "pandas-stubs>=2,<3",
     "types-psutil>=7,<8",
@@ -124,7 +129,7 @@ packages = ["src/sollertia_video_tracking"]
 line-length = 120         # Deviates from the commonly used '80' standard.
 indent-width = 4          # Same as black, indents are 4 spaces
 target-version = "py312"  # Targets the lowest supported version of python
-src = ["src"]             # The name of the root source code directory
+src = ["src"]
 
 # Excludes 'service' .py files, such as the sphinx configuration file, from linting.
 extend-exclude = ["conf.py"]
@@ -157,9 +162,9 @@ lint.ignore = [
 
 # Additional formatting configurations
 [tool.ruff.format]
-quote-style = "double"             # Uses double quotes for strings
-indent-style = "space"             # Uses space for indents
-skip-magic-trailing-comma = false  # Like black, ignores trailing commas
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false  # Like black, honors magic trailing commas
 line-ending = "auto"               # Automatically detects and standardizes line-ending character
 
 # Docstrings and comments' line length
@@ -175,6 +180,9 @@ convention = "google"
 "**/__init__.py" = [
     "F401", # Imported but unused
     "F403", # Wildcard imports
+]
+"**/*.pyi" = [
+    "PYI029", # Stubgen emits __repr__ for every class whose source defines one, and the stubs are never hand-edited
 ]
 "tests/**/*.py" = [
     # Shared test corpus. These entries are present in every Ataraxis framework and Sollertia platform project.
@@ -195,7 +203,7 @@ convention = "google"
 
 # Import sorting configurations
 [tool.ruff.lint.isort]
-case-sensitive = true              # Takes case into account when sorting imports
+case-sensitive = true
 combine-as-imports = true          # Combines multiple "as" imports for the same package
 force-wrap-aliases = true          # Wraps "as" imports so that each uses a separate line
 force-sort-within-sections = true  # Forces "as" and "from" imports for the same package to be close
@@ -211,7 +219,7 @@ disallow_untyped_defs = true # Enforces function annotation
 warn_unused_ignores = true   # Warns against using 'type: ignore' for packages with type stubs
 
 exclude = [
-    "sollertia-video-tracking-\\d+",  # Ignores temporary directory created by setuptools when building the sdist
+    "sollertia-video-tracking-\\d+",  # Ignores the temporary directory created while building the sdist
     "venv.*/",                        # Ignores virtual environments
     "build/",                         # Ignores the sdist directory
     "dist/",                          # Ignores the wheel directory
@@ -221,16 +229,16 @@ exclude = [
     "tests/",                         # Ignores the test directory.
 ]
 
-# DeepLabCut, and the sklearn, skimage, and tqdm packages it pulls in, ship no type information and have no stub
-# packages on PyPI, so their imports remain exempt from the missing-stub error. Types for pandas (also pulled in
-# transitively by DeepLabCut) and psutil are supplied by the pandas-stubs and types-psutil dev dependencies, while
-# OpenCV and ruamel.yaml now ship inline type information; all four are therefore type-checked rather than ignored.
-# The project's own code remains fully type-checked.
+# DeepLabCut, and the sklearn and tqdm packages it pulls in, ship no type information, so their imports remain exempt
+# from the missing-stub error. Neither DeepLabCut nor sklearn has a stub package on PyPI. Tqdm does (types-tqdm), but
+# this project does not carry it. Types for pandas (also pulled in transitively by DeepLabCut) and psutil are supplied
+# by the pandas-stubs and types-psutil dev dependencies. OpenCV, ruamel.yaml, and skimage ship a py.typed marker, which
+# takes their imports out of that error whether or not the functions behind them carry annotations. All five are
+# therefore resolved rather than ignored. The project's own code remains fully type-checked.
 [[tool.mypy.overrides]]
 module = [
     "deeplabcut.*",
     "sklearn.*",
-    "skimage.*",
     "tqdm",
 ]
 ignore_missing_imports = true
@@ -240,8 +248,8 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 addopts = "--import-mode=importlib"
 
-# Enables parallel coverage collection across the frame-extraction worker processes and the renderer thread, and lists
-# the source files excluded from coverage measurement in full.
+# Enables parallel coverage collection across the frame-extraction, inference, and DDP training worker processes and the
+# renderer thread, and lists the source files excluded from coverage measurement in full.
 [tool.coverage.run]
 parallel = true
 concurrency = ["multiprocessing", "thread"]

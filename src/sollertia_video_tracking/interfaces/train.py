@@ -127,8 +127,9 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     type=click.Choice([device.value for device in DeviceType]),
     default=DeviceType.AUTO.value,
     show_default=True,
-    help="The base device to train on. 'auto' selects a CUDA GPU when one is visible and otherwise the CPU. 'cpu' and "
-    "'mps' (Apple Metal) force those devices. Choose specific GPUs with --gpus.",
+    help="The base device to train on. 'auto' selects a CUDA GPU when one is visible and otherwise the CPU. 'cuda' "
+    "does the same but warns before falling back to the CPU when none is present. 'cpu' and 'mps' (Apple Metal) force "
+    "those devices. Choose specific GPUs with --gpus.",
 )
 @click.option(
     "-g",
@@ -194,7 +195,8 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     default=-1,
     show_default=True,
     help="The number of worker processes each training process uses to load and augment data. More workers feed the "
-    "GPU faster until the CPU saturates. Set to -1 to derive it from the CPU count, capped at 8 per process.",
+    "GPU faster until the CPU saturates. Set to -1 to derive it from the CPU count, capped at 8 per process, when "
+    "training on a GPU. CPU training instead defaults to 0 workers, because the main process performs the compute.",
 )
 @click.option(
     "-pm",

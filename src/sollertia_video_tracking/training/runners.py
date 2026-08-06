@@ -24,7 +24,7 @@ from deeplabcut.pose_estimation_pytorch.runners.logger import BaseLogger, ImageL
 from deeplabcut.pose_estimation_pytorch.runners.snapshots import TorchSnapshotManager
 
 _logger = logging.getLogger(__name__)
-"""The module logger; its records propagate to DeepLabCut's root training-log handlers (``train.txt``)."""
+"""The module logger. Its records propagate to DeepLabCut's root training-log handlers (``train.txt``)."""
 
 
 def build_optimized_training_runner(
@@ -118,11 +118,11 @@ class _OptimizedTrainingRunnerMixin(TrainingRunner):
     """Adds mixed precision, ``torch.compile``, and DistributedDataParallel to a DeepLabCut training runner.
 
     The mixin is placed before a concrete DeepLabCut runner in the method resolution order so its ``fit``, ``_epoch``,
-    and ``state_dict`` overrides take precedence while ``super().__init__`` still builds the stock runner. Each
-    concrete subclass overrides ``step`` to wrap its forward pass and loss in autocast (the detector subclass also
-    overrides the ``_ddp_static_graph`` class attribute). It derives from the
-    (untyped) ``TrainingRunner`` base so the shared runner attributes and helpers it relies on resolve without stubs;
-    it is never instantiated directly, so its own ``step`` remains abstract.
+    and ``state_dict`` overrides take precedence while ``super().__init__`` still builds the stock runner. Each concrete
+    subclass overrides ``step`` to wrap its forward pass and loss in autocast (the detector subclass also overrides the
+    ``_ddp_static_graph`` class attribute). It derives from the (untyped) ``TrainingRunner`` base so the shared runner
+    attributes and helpers it relies on resolve without stubs. It is never instantiated directly, so its own ``step``
+    remains abstract.
 
     Notes:
         Under DistributedDataParallel every process passes a single GPU index, so the base-class ``_data_parallel``
@@ -133,22 +133,22 @@ class _OptimizedTrainingRunnerMixin(TrainingRunner):
     Attributes:
         _amp_dtype: The autocast compute dtype, or None when training in full float32 precision.
         _gradient_scaler: The gradient scaler used for float16 precision, or None for bfloat16/float32.
-        _torch_compile: Whether the model is wrapped with ``torch.compile`` before training.
-        _ddp: Whether this process trains as part of a DistributedDataParallel group.
+        _torch_compile: Determines whether the model is wrapped with ``torch.compile`` before training.
+        _ddp: Determines whether this process trains as part of a DistributedDataParallel group.
         _rank: The global rank of this process within the DistributedDataParallel group.
         _world_size: The number of processes in the DistributedDataParallel group.
         _local_rank: The local GPU index this process trains on.
     """
 
-    # Attributes reassigned within this mixin; DeepLabCut owns and initializes them but ships no stubs, so Any.
+    # Attributes reassigned within this mixin. DeepLabCut owns and initializes them but ships no stubs, so Any.
     model: Any
     _epoch_predictions: Any
     _epoch_ground_truth: Any
 
     _ddp_static_graph: bool = True
-    """Whether DDP may treat this runner's training graph as static, discovering the always-unused parameters once and
-    keeping gradient bucketing and computation/communication overlap. Pose models satisfy this; the detector runner
-    overrides it to False because its graph varies with the per-image proposal count."""
+    """Determines whether DDP may treat this runner's training graph as static, discovering the always-unused parameters
+    once and keeping gradient bucketing and computation/communication overlap. Pose models satisfy this. The detector
+    runner overrides it to False because its graph varies with the per-image proposal count."""
 
     def __init__(
         self,
@@ -214,8 +214,8 @@ class _OptimizedTrainingRunnerMixin(TrainingRunner):
         process alone over the small labeled set, so the mixed-precision speed-up would be immaterial there anyway.
 
         Args:
-            enabled: Determines whether mixed precision may be enabled; pass False to force a no-op context (e.g.
-                for evaluation).
+            enabled: Determines whether mixed precision may be enabled. Pass False to force a no-op context (e.g. for
+                evaluation).
 
         Returns:
             A context manager that enables mixed precision on the runner's device when configured and enabled.
@@ -248,7 +248,7 @@ class _OptimizedTrainingRunnerMixin(TrainingRunner):
             # broadcast_buffers=False avoids a per-forward buffer-sync NCCL collective. With it enabled, a rank-0-only
             # validation forward would issue a buffer broadcast that the other ranks (parked at the end-of-epoch
             # barrier) never join, deadlocking the group. Gradients are still all-reduced each step so weights stay in
-            # sync; only BatchNorm running statistics remain per-rank, which is the standard multi-GPU trade-off.
+            # sync. Only BatchNorm running statistics remain per-rank, which is the standard multi-GPU trade-off.
             ddp_options: dict[str, Any] = {"broadcast_buffers": False}
             if self._ddp_static_graph:
                 # Pretrained backbones (notably timm HRNet and ResNet) carry an ImageNet classification head whose
@@ -259,7 +259,7 @@ class _OptimizedTrainingRunnerMixin(TrainingRunner):
                 ddp_options["static_graph"] = True
             else:
                 # Detectors build a data-dependent graph (the proposal count varies per image), so the used-parameter
-                # set is not static; fall back to per-iteration unused-parameter detection.
+                # set is not static. Falls back to per-iteration unused-parameter detection.
                 ddp_options["find_unused_parameters"] = True
             self.model = DistributedDataParallel(
                 module=self.model,

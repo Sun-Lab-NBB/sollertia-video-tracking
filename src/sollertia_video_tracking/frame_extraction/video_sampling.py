@@ -10,9 +10,6 @@ class VideoSamplingPlan:
     """Describes which videos a budgeted extraction pass tops up and how the pass relates to the frame budget.
 
     Notes:
-        Each video contributes only up to its per-video ceiling (``frames_per_video_count``), so a partly-extracted
-        video is topped up to that ceiling rather than gaining another full batch. The pass prefers not-yet-extracted
-        videos and falls back to below-ceiling extracted ones, so coverage grows before existing videos are deepened.
         When the videos are grouped, ``per_group`` reports each group's coverage before and after the pass.
     """
 
@@ -25,9 +22,9 @@ class VideoSamplingPlan:
     projected_frame_count: int
     """The number of frames the project is expected to hold once the selected videos are topped up to the ceiling."""
     budget_already_met: bool
-    """Indicates whether the existing frames already meet the target, so the pass would extract nothing."""
+    """Determines whether the existing frames already meet the target, so the pass would extract nothing."""
     target_unreachable: bool
-    """Indicates whether even topping every eligible video up to its per-video ceiling would fall short of the target,
+    """Determines whether even topping every eligible video up to its per-video ceiling would fall short of the target,
     so the caller must report the shortfall rather than extract."""
     per_group: tuple[tuple[str, int, int, int, int], ...] = ()
     """The per-group breakdown when grouping is used, as ``(group, existing_frame_count, added_video_count,
@@ -35,7 +32,7 @@ class VideoSamplingPlan:
     not grouped or the budget was already met. ``available_video_count`` is how many below-ceiling videos the group had
     before this pass."""
     always_included_overshoot: bool = False
-    """Indicates whether the pinned videos alone contribute more than the remaining budget, so the projected total
+    """Determines whether the pinned videos alone contribute more than the remaining budget, so the projected total
     overshoots the target by the surplus pinned videos."""
 
 
@@ -53,7 +50,7 @@ def plan_video_sampling(
     Sums the frames already extracted across the candidate videos and selects just enough additional videos to reach
     ``total_frame_budget``, where each selected video contributes only its remaining capacity toward the per-video
     ceiling ``frames_per_video_count``. A not-yet-extracted video contributes a full ceiling's worth, while a
-    partly-extracted one contributes only the frames needed to top it up; videos already at the ceiling contribute
+    partly-extracted one contributes only the frames needed to top it up. Videos already at the ceiling contribute
     nothing and are skipped. The selection prefers not-yet-extracted videos and falls back to below-ceiling extracted
     ones, so repeated passes broaden coverage before deepening existing videos.
 
@@ -65,7 +62,7 @@ def plan_video_sampling(
     Args:
         videos: The ordered candidate video paths the pass may sample from.
         extracted_frame_counts: The number of frames already extracted for each candidate video, keyed by path.
-        frames_per_video_count: The per-video ceiling; each selected video is topped up to at most this many frames.
+        frames_per_video_count: The per-video ceiling. Each selected video is topped up to at most this many frames.
         total_frame_budget: The total number of frames the project should hold after extraction.
         groups: A mapping of group to that group's candidate videos, enabling balanced per-group selection. Set to None
             to draw uniformly across all candidates.
@@ -90,7 +87,7 @@ def plan_video_sampling(
             target_unreachable=False,
         )
 
-    # Each video can still contribute frames up to its per-video ceiling; a video already at the ceiling contributes 0.
+    # Each video can still contribute frames up to its per-video ceiling. A video already at the ceiling contributes 0.
     capacity_of = {video: max(0, frames_per_video_count - extracted_frame_counts.get(video, 0)) for video in videos}
     target_unreachable = sum(capacity_of.values()) < remaining_frame_count
 
@@ -153,7 +150,7 @@ def _select_uniform(
     Returns:
         The selected videos, with the pinned ones first.
     """
-    generator = Random()  # noqa: S311 -- video sampling is not security-sensitive.
+    generator = Random()  # noqa: S311 - video sampling is not security-sensitive.
     selected_videos = list(pinned_videos)
     seen = set(pinned_videos)
     accumulated_frame_count = sum(capacity_of[video] for video in pinned_videos)
@@ -203,7 +200,7 @@ def _select_balanced(
         ``(group, existing_frame_count, added_video_count, projected_frame_count, available_video_count)`` tuples in
         canonical group order. ``available_video_count`` is the group's below-ceiling video count before the pass.
     """
-    generator = Random()  # noqa: S311 -- video sampling is not security-sensitive.
+    generator = Random()  # noqa: S311 - video sampling is not security-sensitive.
     group_keys = sorted(groups)
 
     group_of: dict[str, str] = {}
@@ -236,7 +233,7 @@ def _select_balanced(
         selected_videos.append(video)
         seen.add(video)
         accumulated_frame_count += capacity_of[video]
-        # An eligible pin is always included; it only participates in balancing when it maps to a known group.
+        # An eligible pin is always included. It only participates in balancing when it maps to a known group.
         pin_group_key = group_of.get(video)
         if pin_group_key is not None:
             if video in available_videos_by_group[pin_group_key]:

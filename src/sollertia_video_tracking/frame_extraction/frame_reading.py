@@ -101,7 +101,7 @@ def _select_kmeans_frames(
     """Downsamples the candidate frames, clusters them, and returns one representative frame index per cluster.
 
     Mirrors DeepLabCut's ``KmeansbasedFrameselectioncv2`` apart from the frame reading. When the candidates are dense,
-    it streams the video once and downsamples only the flagged frames; when they are sparse, it seeks to each. With
+    it streams the video once and downsamples only the flagged frames. When they are sparse, it seeks to each. With
     fewer candidates than the cluster count, it returns them all without decoding, as upstream does.
 
     Args:
@@ -328,9 +328,9 @@ def _cluster_and_pick(
     """
     candidate_count = len(candidate_indices)
     effective_batch_size = batch_size if batch_size <= candidate_count else candidate_count // 2
-    # Center in place: thumbnails is a local buffer that is never read after this, so subtracting the column mean
-    # into it avoids allocating a second full-size copy. The reshape is a view. Bit-identical to DeepLabCut, which
-    # centers the same way (frameselectiontools.py) before discarding its own buffer.
+    # Centers in place: thumbnails is a local buffer that is never read after this, so subtracting the column mean into
+    # it avoids allocating a second full-size copy. The reshape is a view. Bit-identical to DeepLabCut, which centers
+    # the same way (frameselectiontools.py) before discarding its own buffer.
     thumbnails -= thumbnails.mean(axis=0)
     centered = thumbnails.reshape(candidate_count, -1)
 

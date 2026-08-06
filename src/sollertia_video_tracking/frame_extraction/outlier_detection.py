@@ -13,12 +13,12 @@ if TYPE_CHECKING:
     import pandas as pd
     from numpy.typing import NDArray
 
-type KeypointSeries = tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]
+type _KeypointSeries = tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]
 """One keypoint's per-frame horizontal positions, vertical positions, and confidences, as three float arrays."""
 
 _DISCARDED_INTERVAL_ALPHA: float = 0.01
 """The significance level passed to DeepLabCut's ``FitSARIMAXModel``. Only the fitted mean trajectory is used to measure
-each frame's deviation; the confidence interval, the sole output this value influences, is discarded. It is a fixed
+each frame's deviation. The confidence interval, the sole output this value influences, is discarded. It is a fixed
 constant rather than a parameter because it cannot change which frames are flagged, matching DeepLabCut's own
 ``fitting`` selection, which thresholds the mean deviation and ignores the interval."""
 
@@ -26,8 +26,8 @@ constant rather than a parameter because it cannot change which frames are flagg
 class OutlierAlgorithm(StrEnum):
     """Defines the supported frame-selection modes.
 
-    ``jump``, ``uncertain``, and ``fitting`` flag likely-wrong frames from a trained model's predictions; ``list``
-    extracts an explicit, caller-supplied index list instead.
+    ``jump``, ``uncertain``, and ``fitting`` flag likely-wrong frames from a trained model's predictions. The ``list``
+    mode extracts an explicit, caller-supplied index list instead.
     """
 
     JUMP = "jump"
@@ -53,7 +53,7 @@ def uncertain_outlier_indices(predictions: pd.DataFrame, minimum_confidence: flo
     """
     likelihoods = predictions.xs(key="likelihood", level="coords", axis=1)
     # pandas-stubs types the DataFrame.xs(axis=1) cross-section as DataFrame | Series, so the boolean reduction is
-    # seen as a Series that rejects axis=1; the runtime object is always a DataFrame.
+    # seen as a Series that rejects axis=1. The runtime object is always a DataFrame.
     return predictions.index[(likelihoods < minimum_confidence).any(axis=1)].tolist()  # type: ignore[arg-type]
 
 
@@ -74,45 +74,50 @@ def jump_outlier_indices(predictions: pd.DataFrame, pixel_distance_threshold: fl
     Returns:
         The frame indices, in the prediction table's own index, that hold at least one over-threshold jump.
     """
-    with warnings.catch_warnings():
-        # Mirrors DeepLabCut's own "jump" branch in extract_outlier_frames
-        # (deeplabcut/refine_training_dataset/outlier_frames.py), which uses the same axis=1 groupby; matching it keeps
-        # flagged frames identical to upstream. pandas 2.x deprecates axis=1 groupby but still evaluates it, and DLC
-        # 3.0 itself calls it, so the env stays on pandas 2.x regardless. Follow DLC if it migrates off axis=1 groupby.
-        warnings.simplefilter("ignore", category=FutureWarning)
-        warnings.simplefilter("ignore", category=DeprecationWarning)
-        squared_step = predictions.diff(axis=0) ** 2
-        squared_step = squared_step.drop(labels="likelihood", axis=1, level="coords")
-        per_bodypart = squared_step.groupby(level="bodyparts", axis=1).sum()  # type: ignore[call-overload]
+    # Mirrors DeepLabCut's own "jump" branch in extract_outlier_frames
+    # (deeplabcut/refine_training_dataset/outlier_frames.py:405), which computes the per-bodypart sums as
+    # temp_dt.T.groupby(level="bodyparts").sum().T. Matching that form keeps the flagged frames identical to upstream
+    # and avoids the axis=1 groupby pandas deprecates.
+    squared_step = predictions.diff(axis=0) ** 2
+    squared_step = squared_step.drop(labels="likelihood", axis=1, level="coords")
+    per_bodypart = squared_step.T.groupby(level="bodyparts").sum().T
     return predictions.index[(per_bodypart > pixel_distance_threshold**2).any(axis=1)].tolist()
 
 
-def fitting_keypoint_series(predictions: pd.DataFrame) -> list[KeypointSeries]:
-    """Splits a prediction table into per-keypoint position-and-confidence trajectories for SARIMAX fitting.
+def fitting_keypoint_count(predictions: pd.DataFrame) -> int:
+    """Counts the keypoints a prediction table's columns encode.
 
     Notes:
-        The columns are reshaped into ``(frames, keypoints, 3)`` exactly as DeepLabCut does before fitting, so every
-        ``(individual, bodypart)`` keypoint becomes one work item regardless of whether the project is single- or
+        The columns are grouped into ``(x, y, likelihood)`` triples exactly as DeepLabCut groups them before fitting,
+        so every ``(individual, bodypart)`` keypoint counts once regardless of whether the project is single- or
         multi-animal.
+
+    Args:
+        predictions: The prediction table for one video, restricted to the comparison bodyparts.
+
+    Returns:
+        The number of keypoints the table holds.
+    """
+    return predictions.shape[1] // 3
+
+
+def fitting_keypoint_series(predictions: pd.DataFrame, keypoint_index: int) -> _KeypointSeries:
+    """Extracts one keypoint's position-and-confidence trajectory for SARIMAX fitting.
 
     Args:
         predictions: The prediction table for one video, restricted to the comparison bodyparts and sliced to the
             configured start/stop window.
+        keypoint_index: The position of the keypoint among the table's ``(x, y, likelihood)`` column triples.
 
     Returns:
-        One ``(horizontal_positions, vertical_positions, confidences)`` tuple of per-frame arrays for each keypoint,
-        in column order.
+        The keypoint's per-frame horizontal positions, vertical positions, and confidences.
     """
-    channels = predictions.to_numpy(dtype=np.float64).reshape((predictions.shape[0], -1, 3))
-    horizontal_positions, vertical_positions, confidences = channels.T
-    return [
-        (
-            np.ascontiguousarray(horizontal_positions[keypoint]),
-            np.ascontiguousarray(vertical_positions[keypoint]),
-            np.ascontiguousarray(confidences[keypoint]),
-        )
-        for keypoint in range(horizontal_positions.shape[0])
-    ]
+    channels = predictions.iloc[:, keypoint_index * 3 : (keypoint_index + 1) * 3].to_numpy(dtype=np.float64)
+    return (
+        np.ascontiguousarray(channels[:, 0]),
+        np.ascontiguousarray(channels[:, 1]),
+        np.ascontiguousarray(channels[:, 2]),
+    )
 
 
 def fit_keypoint_distance(
@@ -143,7 +148,7 @@ def fit_keypoint_distance(
         The per-frame Euclidean distance between the observed position and the model's fitted position.
     """
     with warnings.catch_warnings():
-        # SARIMAX routinely reports non-convergence on noisy keypoint trajectories; the deviation is still usable, and
+        # SARIMAX routinely reports non-convergence on noisy keypoint trajectories. The deviation is still usable, and
         # these fits run in pool workers that do not redirect their streams, so the warnings are silenced at the source.
         warnings.simplefilter("ignore")
         try:
@@ -175,7 +180,7 @@ def fitting_outlier_indices(
 
     Notes:
         The per-frame deviation is the keypoint-averaged distance to the fitted trajectory, ignoring keypoints whose
-        fit was skipped. Frames deviating by more than ``pixel_distance_threshold`` are flagged; when too few qualify,
+        fit was skipped. Frames deviating by more than ``pixel_distance_threshold`` are flagged. When too few qualify,
         the most deviant frames are taken instead, matching DeepLabCut's fallback. The returned indices are positional
         within the supplied window, as in DeepLabCut.
 
@@ -189,7 +194,7 @@ def fitting_outlier_indices(
     """
     stacked_deviations = np.vstack(keypoint_deviations)
     with warnings.catch_warnings():
-        # A frame whose keypoints were all skipped averages over an empty slice; NaN is the intended, unflagged result.
+        # A frame whose keypoints were all skipped averages over an empty slice. NaN is the intended, unflagged result.
         warnings.simplefilter("ignore", category=RuntimeWarning)
         mean_deviation = np.nanmean(stacked_deviations, axis=0)
     candidate_indices = np.flatnonzero(mean_deviation > pixel_distance_threshold)

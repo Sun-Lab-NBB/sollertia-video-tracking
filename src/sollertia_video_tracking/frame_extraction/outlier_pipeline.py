@@ -14,7 +14,6 @@ from dataclasses import dataclass
 import multiprocessing
 
 import cv2
-import numpy as np
 import pandas as pd
 from deeplabcut.utils import auxfun_multianimal, auxiliaryfunctions, frameselectiontools
 from deeplabcut.refine_training_dataset import outlier_frames as dlc_outlier_frames
@@ -24,24 +23,27 @@ from .utilities import (
     extracted_frame_paths,
     frame_names_from_index,
     iter_pinned_extraction,
+    drop_collected_data_rows,
     normalize_project_config,
     select_registered_videos,
     ensure_unique_video_stems,
+    finite_labeled_frame_names,
     prune_empty_labeled_data_directories,
 )
 from .frame_reading import make_fast_kmeans_selector
 from .cpu_allocation import DEFAULT_RESERVED_CORE_COUNT, plan_core_allocation
 from .outlier_detection import (
-    KeypointSeries,
     OutlierAlgorithm,
     jump_outlier_indices,
     fit_keypoint_distance,
+    fitting_keypoint_count,
     fitting_keypoint_series,
     fitting_outlier_indices,
     uncertain_outlier_indices,
 )
 
 if TYPE_CHECKING:
+    import numpy as np
     from numpy.typing import NDArray
 
 _CROP_FIELD_COUNT: int = 4
@@ -101,7 +103,7 @@ class OutlierExtractionSummary:
     extracted_frame_count: int
     """The total number of frames freshly written into the project's labeled-data tree across all videos."""
     unanalyzed_videos: tuple[str, ...] = ()
-    """The videos skipped because no matching predictions were found; they must be analyzed before refinement."""
+    """The videos skipped because no matching predictions were found. They must be analyzed before refinement."""
     errors: tuple[tuple[str, str], ...] = ()
     """The ``(video_path, detail)`` pairs for every video that raised during detection or extraction."""
 
@@ -182,7 +184,9 @@ def extract_outlier_frames_parallel(
         refinement iteration's already-extracted outlier frames for the selected videos so they are replaced instead of
         added to, and ``reset`` discards the iteration's outlier frames across every project video for a clean slate.
         Both clear only this iteration's freshly extracted outlier frames (those recorded in the iteration's machine
-        labels) and preserve every frame already carried in the human ``CollectedData`` labels.
+        labels) and preserve every frame the human has annotated with a finite ``CollectedData`` coordinate. A frame the
+        labeling GUI only reindexed, leaving an all-NaN placeholder row, holds no annotation and is cleared with the
+        rest, matching how ``summarize_refinement_status`` decides whether a machine frame has been refined.
 
         Empty ``labeled-data`` directories left by videos that were registered but never extracted are removed after
         every run, so the labeling GUI shows only the videos that have frames.
@@ -196,7 +200,7 @@ def extract_outlier_frames_parallel(
         training_set_index: The training-set fraction index.
         outlier_algorithm: The detection algorithm: ``"jump"``, ``"uncertain"``, ``"fitting"``, or ``"list"``.
         explicit_frame_indices: The explicit frame indices to extract when ``outlier_algorithm`` is ``"list"``.
-        comparison_bodyparts: The bodyparts the detectors consider; an empty tuple considers every bodypart.
+        comparison_bodyparts: The bodyparts the detectors consider. An empty tuple considers every bodypart.
         pixel_distance_threshold: The pixel bound for the ``jump`` and ``fitting`` algorithms.
         minimum_confidence: The likelihood bound for the ``uncertain`` algorithm and the ``fitting`` model's
             missing-data mask.
@@ -217,19 +221,21 @@ def extract_outlier_frames_parallel(
         pose_snapshot_index: The pose snapshot index whose scorer named the prediction files, or None for the default.
         detector_snapshot_index: The detector snapshot index, for top-down models, or None for the default.
         worker_count: The number of videos to extract in parallel. Set to -1 to fill the usable cores automatically.
-        cores_per_worker: The number of CPU cores pinned to each extraction worker. Set to -1 to spread them evenly.
+        cores_per_worker: The number of CPU cores pinned to each extraction worker. Set to -1 to give each worker a
+            saturating core block when the worker count is automatic, or to split the usable cores evenly across an
+            explicit worker count.
         reserved_core_count: The number of CPU cores to leave free for other tasks.
         fitting_worker_count: The number of processes fitting SARIMAX models during ``fitting`` detection. Set to -1 to
             use every usable core.
         overwrite: Determines whether to re-extract the videos this run refines, first discarding this refinement
             iteration's already-extracted outlier frames for those videos, along with their machine labels and any
             manual refinement of them, so the frames are replaced rather than added to. Other videos' outlier frames are
-            left intact, and every frame already carried in the human ``CollectedData`` labels is preserved. Mutually
-            exclusive with ``reset``.
+            left intact, and every frame the human has annotated with a finite ``CollectedData`` coordinate is
+            preserved. Mutually exclusive with ``reset``.
         reset: Determines whether to discard this refinement iteration's extracted outlier frames across every project
             video, along with their machine labels and any manual refinement, before re-extracting the selected videos,
-            giving the whole iteration a clean slate. Every frame already carried in the human ``CollectedData`` labels
-            is preserved. Mutually exclusive with ``overwrite``.
+            giving the whole iteration a clean slate. Every frame the human has annotated with a finite
+            ``CollectedData`` coordinate is preserved. Mutually exclusive with ``overwrite``.
         display_progress: Determines whether to render the run header and the aggregate progress bar.
 
     Returns:
@@ -239,14 +245,16 @@ def extract_outlier_frames_parallel(
     Raises:
         FileNotFoundError: If ``config_path`` does not point to an existing file.
         ValueError: Raised when the options conflict: ``overwrite`` and ``reset`` are both set. Raised when an argument
-            is invalid: ``outlier_algorithm`` or
-            ``extraction_algorithm`` is unknown, ``frames_per_video`` (other than the -1 sentinel) or ``candidate_step``
-            is below one, or ``outlier_algorithm`` is ``"list"`` without ``explicit_frame_indices``. Raised when the
-            comparison bodyparts resolve to none. Raised when no videos can be refined: the project lists none in
-            ``video_sets``, no requested video matches a registered one, or no videos are named and the current model
-            has analyzed none. Raised when two selected videos share a file-name stem and would collide in the
-            labeled-data tree. Raised when the ``fitting`` algorithm is selected but the project's ``numframes2pick``
-            is missing or not a positive integer and no ``frames_per_video`` override is supplied.
+            is invalid: ``outlier_algorithm`` or ``extraction_algorithm`` is unknown, ``frames_per_video`` (other than
+            the -1 sentinel) or ``candidate_step`` is below one, or ``outlier_algorithm`` is ``"list"`` without
+            ``explicit_frame_indices``. Raised when the comparison bodyparts resolve to none. Raised when no videos can
+            be refined: the project lists none in ``video_sets``, no requested video matches a registered one, or no
+            videos are named and the current model has analyzed none. Raised when two selected videos share a file-name
+            stem and would collide in the labeled-data tree. Raised when the ``fitting`` algorithm is selected but the
+            project's ``numframes2pick`` is missing or not a positive integer and no ``frames_per_video`` override is
+            supplied. Raised when an explicit ``worker_count`` or ``cores_per_worker``, or their product, needs more
+            cores than remain usable after reserving ``reserved_core_count``. This check runs after detection completes,
+            so a ``fitting`` run has already spent its SARIMAX fits.
     """
     config_path = config_path.resolve()
     if not config_path.is_file():
@@ -388,7 +396,7 @@ def extract_outlier_frames_parallel(
         )
     else:
         # Every extraction video is already registered in config.yaml (they were matched against video_sets above), so
-        # the workers only read the configuration file; the per-worker DeepLabCut video-add is neutralized inside
+        # the workers only read the configuration file. The per-worker DeepLabCut video-add is neutralized inside
         # _extract_one_video to keep it that way.
         summary = _extract_all_videos(
             config_path=config_path,
@@ -410,7 +418,7 @@ def extract_outlier_frames_parallel(
             detection_errors=errors,
         )
 
-    prune_empty_labeled_data_directories(config_path.parent, display_progress=display_progress)
+    prune_empty_labeled_data_directories(project_directory=config_path.parent, display_progress=display_progress)
     return summary
 
 
@@ -419,7 +427,7 @@ def _discover_analyzed_videos(*, registered_videos: list[str], scorer: str, trac
 
     A video counts as analyzed when DeepLabCut can locate a prediction file named by ``scorer`` in the video's own
     directory. This is a filename probe rather than a full prediction-table load, so resolving the default refinement
-    set — every video the current model processed — stays cheap even for a project with many large videos.
+    set, every video the current model processed, stays cheap even for a project with many large videos.
 
     Args:
         registered_videos: The project's registered video paths, in configuration order.
@@ -484,7 +492,7 @@ def _detect_all_videos(
         ``(video, detail)`` detection failures.
     """
     candidates: dict[str, list[int]] = {}
-    keypoint_series_by_video: dict[str, list[KeypointSeries]] = {}
+    fitting_keypoint_counts: dict[str, int] = {}
     unanalyzed_videos: list[str] = []
     errors: list[tuple[str, str]] = []
 
@@ -515,7 +523,9 @@ def _detect_all_videos(
                     predictions=comparison_predictions, pixel_distance_threshold=pixel_distance_threshold
                 )
             else:
-                keypoint_series_by_video[video] = fitting_keypoint_series(comparison_predictions)
+                # Only the keypoint count is kept here. Each fit reloads its own keypoint inside the worker, so the
+                # parent never retains one trajectory set per video, and the pool receives paths instead of arrays.
+                fitting_keypoint_counts[video] = fitting_keypoint_count(comparison_predictions)
         except FileNotFoundError:
             unanalyzed_videos.append(video)
             continue
@@ -523,10 +533,10 @@ def _detect_all_videos(
             errors.append((video, "detection error:\n" + traceback.format_exc()))
             continue
 
-    if keypoint_series_by_video:
-        # The fitting reduction needs a valid numframes2pick to size its fallback selection. Guard it here (the
-        # k-means budgeted path guards the identical value) so a config that is missing or nulls the key fails with
-        # a clean ValueError the CLI reports, rather than an uncaught KeyError/TypeError escaping as a raw traceback.
+    if fitting_keypoint_counts:
+        # The fitting reduction needs a valid numframes2pick to size its fallback selection. Guards it here (the k-means
+        # budgeted path guards the identical value) so a config that is missing or nulls the key fails with a clean
+        # ValueError the CLI reports, rather than an uncaught KeyError/TypeError escaping as a raw traceback.
         frames_per_video_count = configuration.get("numframes2pick")
         if not isinstance(frames_per_video_count, int) or frames_per_video_count < 1:
             message = (
@@ -536,7 +546,11 @@ def _detect_all_videos(
             raise ValueError(message)
         candidates.update(
             _detect_fitting_outliers(
-                keypoint_series_by_video=keypoint_series_by_video,
+                fitting_keypoint_counts=fitting_keypoint_counts,
+                scorer=scorer,
+                configuration=configuration,
+                tracking_method=tracking_method,
+                resolved_comparison_bodyparts=resolved_comparison_bodyparts,
                 frames_per_video_count=frames_per_video_count,
                 pixel_distance_threshold=pixel_distance_threshold,
                 minimum_confidence=minimum_confidence,
@@ -555,7 +569,11 @@ def _detect_all_videos(
 
 def _detect_fitting_outliers(
     *,
-    keypoint_series_by_video: dict[str, list[KeypointSeries]],
+    fitting_keypoint_counts: dict[str, int],
+    scorer: str,
+    configuration: dict[str, Any],
+    tracking_method: str,
+    resolved_comparison_bodyparts: list[str],
     frames_per_video_count: int,
     pixel_distance_threshold: float,
     minimum_confidence: float,
@@ -570,9 +588,17 @@ def _detect_fitting_outliers(
     Flattening every video's keypoints into a single pool keeps all usable cores busy even when only a few videos are
     refined, which is the expensive path the fitting algorithm needs to scale on high-core machines.
 
+    Notes:
+        Each work item names a video and a keypoint rather than carrying its trajectory, so the parent holds no
+        trajectory at all and the pool ships paths instead of arrays. The worker reloads the video's prediction table,
+        which costs about a thousandth of the SARIMAX fit it then performs.
+
     Args:
-        keypoint_series_by_video: The per-keypoint ``(x, y, likelihood)`` trajectories for each video needing SARIMAX
-            fits.
+        fitting_keypoint_counts: The number of keypoints to fit for each video needing SARIMAX fits.
+        scorer: The DeepLabCut scorer string naming each video's prediction files.
+        configuration: The loaded project configuration, reused by each worker to reload its video's predictions.
+        tracking_method: The resolved multi-animal tracker method.
+        resolved_comparison_bodyparts: The comparison bodyparts each worker restricts its reloaded table to.
         frames_per_video_count: The project's ``numframes2pick``, used to size the fallback selection.
         pixel_distance_threshold: The averaged-deviation bound above which a frame is flagged.
         minimum_confidence: The likelihood below which a position is treated as missing while fitting.
@@ -585,15 +611,18 @@ def _detect_fitting_outliers(
     Returns:
         The outlier candidate frames keyed by video.
     """
-    tasks: list[tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], float, int, int]] = []
+    tasks: list[tuple[str, int, str, dict[str, Any], str, list[str], float, int, int]] = []
     owner_videos: list[str] = []
-    for video, keypoint_series in keypoint_series_by_video.items():
-        for horizontal_positions, vertical_positions, confidences in keypoint_series:
+    for video, keypoint_count in fitting_keypoint_counts.items():
+        for keypoint_index in range(keypoint_count):
             tasks.append(
                 (
-                    horizontal_positions,
-                    vertical_positions,
-                    confidences,
+                    video,
+                    keypoint_index,
+                    scorer,
+                    configuration,
+                    tracking_method,
+                    resolved_comparison_bodyparts,
                     minimum_confidence,
                     autoregressive_degree,
                     moving_average_degree,
@@ -607,16 +636,16 @@ def _detect_fitting_outliers(
     resolved_fitting_worker_count = max(1, min(resolved_fitting_worker_count, len(tasks)))
     if display_progress:
         sys.stderr.write(
-            f"fitting {len(tasks)} keypoint trajectories across {len(keypoint_series_by_video)} video(s) on "
+            f"fitting {len(tasks)} keypoint trajectories across {len(fitting_keypoint_counts)} video(s) on "
             f"{resolved_fitting_worker_count} processes\n"
         )
         sys.stderr.flush()
 
     context = multiprocessing.get_context("spawn")
     with context.Pool(processes=resolved_fitting_worker_count) as pool:
-        keypoint_deviations = pool.starmap(func=fit_keypoint_distance, iterable=tasks)
+        keypoint_deviations = pool.starmap(func=_fit_video_keypoint, iterable=tasks)
 
-    deviations_by_video: dict[str, list[NDArray[np.float64]]] = {video: [] for video in keypoint_series_by_video}
+    deviations_by_video: dict[str, list[NDArray[np.float64]]] = {video: [] for video in fitting_keypoint_counts}
     for video, deviation in zip(owner_videos, keypoint_deviations, strict=True):
         deviations_by_video[video].append(deviation)
 
@@ -628,6 +657,56 @@ def _detect_fitting_outliers(
         )
         for video, video_deviations in deviations_by_video.items()
     }
+
+
+def _fit_video_keypoint(
+    video: str,
+    keypoint_index: int,
+    scorer: str,
+    configuration: dict[str, Any],
+    tracking_method: str,
+    resolved_comparison_bodyparts: list[str],
+    minimum_confidence: float,
+    autoregressive_degree: int,
+    moving_average_degree: int,
+) -> NDArray[np.float64]:
+    """Reloads one keypoint's trajectory inside a fit worker and returns its per-frame deviation from a SARIMAX fit.
+
+    Args:
+        video: The analyzed video whose predictions the worker reloads.
+        keypoint_index: The position of the keypoint among the table's ``(x, y, likelihood)`` column triples.
+        scorer: The DeepLabCut scorer string naming the prediction files.
+        configuration: The loaded project configuration, read for the start/stop bounds and the video's crop margins.
+        tracking_method: The resolved multi-animal tracker method.
+        resolved_comparison_bodyparts: The comparison bodyparts the reloaded table is restricted to.
+        minimum_confidence: The likelihood below which a position is treated as missing while fitting.
+        autoregressive_degree: The autoregressive degree of the SARIMAX model.
+        moving_average_degree: The moving-average degree of the SARIMAX model.
+
+    Returns:
+        The keypoint's per-frame Euclidean distance between the observed position and the model's fitted position.
+    """
+    predictions = _load_sliced_predictions(
+        video=video,
+        video_predictions_directory=Path(video).parent,
+        scorer=scorer,
+        configuration=configuration,
+        tracking_method=tracking_method,
+    )
+    comparison_predictions = predictions.loc[
+        :, predictions.columns.get_level_values("bodyparts").isin(resolved_comparison_bodyparts)
+    ]
+    horizontal_positions, vertical_positions, confidences = fitting_keypoint_series(
+        predictions=comparison_predictions, keypoint_index=keypoint_index
+    )
+    return fit_keypoint_distance(
+        horizontal_positions=horizontal_positions,
+        vertical_positions=vertical_positions,
+        confidences=confidences,
+        minimum_confidence=minimum_confidence,
+        autoregressive_degree=autoregressive_degree,
+        moving_average_degree=moving_average_degree,
+    )
 
 
 def _extract_all_videos(
@@ -664,7 +743,8 @@ def _extract_all_videos(
         cluster_in_color: Determines whether k-means selection clusters on color channels.
         save_labeled_frames: Determines whether to also save each frame with the model's predictions drawn on it.
         worker_count: The requested extraction worker count, or -1 to resolve automatically.
-        cores_per_worker: The requested cores per worker, or -1 to spread them evenly.
+        cores_per_worker: The requested cores per worker, or -1 for a saturating block per worker when the worker count
+            is automatic and an even split of the usable cores across an explicit one.
         reserved_core_count: The number of cores to leave free.
         display_progress: Determines whether to render the run header and progress bar.
         total_video_count: The total number of videos considered, for the summary.
@@ -825,14 +905,15 @@ def _load_sliced_predictions(
     frame_count = len(predictions)
     start_index = max(math.floor(frame_count * configuration["start"]), 0)
     stop_index = min(math.ceil(frame_count * configuration["stop"]), frame_count)
-    window = np.arange(start_index, stop_index)
 
     output_crop_x, output_crop_y = _video_cropping_offset(configuration=configuration, video=video)
     if metadata.get("data", {}).get("cropping"):
         x1, _, y1, _ = metadata["data"]["cropping_parameters"]
         predictions.iloc[:, predictions.columns.get_level_values(level="coords") == "x"] += x1 - output_crop_x
         predictions.iloc[:, predictions.columns.get_level_values(level="coords") == "y"] += y1 - output_crop_y
-    return predictions.iloc[window]
+    # Slices rather than gathering through a positional index array, so the window is a view over the already-owned
+    # table instead of a second full copy of it.
+    return predictions.iloc[start_index:stop_index]
 
 
 def _video_cropping_offset(configuration: dict[str, Any], video: str) -> tuple[int, int]:
@@ -868,10 +949,10 @@ def _clear_iteration_outliers(
     """Discards this refinement iteration's extracted outlier frames before re-extraction, preserving labeled frames.
 
     Outlier frames are written into the same ``labeled-data/<stem>`` directories as the human-labeled training frames,
-    so clearing cannot simply delete the images: only the frames this iteration extracted as outliers, recorded in the
-    iteration's ``machinelabels-iter<N>`` bookkeeping, are removed, and any of those that already appear in the human
-    ``CollectedData`` labels are kept. ``reset`` wipes every project video's outlier set for the iteration, whereas
-    ``overwrite`` (``reset`` False) wipes only the videos this run re-extracts, leaving the rest intact.
+    so clearing cannot simply delete the images. Only the frames this iteration extracted as outliers, recorded in the
+    iteration's ``machinelabels-iter<N>`` bookkeeping, are removed, and any of those the human has annotated with a
+    finite ``CollectedData`` coordinate are kept. ``reset`` wipes every project video's outlier set for the iteration,
+    whereas ``overwrite`` (``reset`` False) wipes only the videos this run re-extracts, leaving the rest intact.
 
     Args:
         config_path: The resolved project config.yaml path, whose parent holds the ``labeled-data`` tree.
@@ -926,17 +1007,20 @@ def _clear_iteration_outliers(
 
 
 def _clear_video_iteration_outliers(*, directory: Path, iteration: int, scorer: str) -> tuple[int, bool]:
-    """Removes one video directory's outlier frames for a refinement iteration, keeping any already-labeled frames.
+    """Removes one video directory's outlier frames for a refinement iteration, keeping the human-annotated ones.
 
     The iteration's ``machinelabels-iter<N>.h5`` records exactly the frames extracted as outliers this iteration, keyed
-    by their ``imgNNNN.png`` names. Those frames are deleted, except any that also appear in the human
-    ``CollectedData`` labels, along with the iteration's machine-label bookkeeping and any manual refinement of it, so
-    re-extraction rebuilds the set from scratch without orphaning either images or labels.
+    by their ``imgNNNN.png`` names. Those frames are deleted, except any the human has annotated with a finite
+    ``CollectedData`` coordinate, along with the iteration's machine-label bookkeeping and any manual refinement of it,
+    so re-extraction rebuilds the set from scratch without orphaning either images or labels. A frame the labeling GUI
+    merely reindexed, leaving an all-NaN placeholder row, carries no annotation, so it is removed and its placeholder
+    row is dropped with it. This matches the finite-coordinate rule the bootstrap clearing and the refinement-status
+    scan already apply, so all three agree on which frames count as human work.
 
     Args:
         directory: The ``labeled-data/<stem>`` directory whose iteration outlier frames are cleared.
         iteration: The refinement iteration whose machine-label record names the frames to remove.
-        scorer: The human scorer naming the ``CollectedData`` labels whose frames are preserved.
+        scorer: The human scorer naming the ``CollectedData`` labels whose annotated frames are preserved.
 
     Returns:
         A tuple of the number of frames removed and whether a manual ``MachineLabelsRefine`` file was discarded.
@@ -946,19 +1030,21 @@ def _clear_video_iteration_outliers(*, directory: Path, iteration: int, scorer: 
         return 0, False
 
     outlier_frame_names = frame_names_from_index(pd.read_hdf(machine_labels_path, key="df_with_missing").index)
-    labeled_frame_names: set[str] = set()
     collected_data_path = directory / f"CollectedData_{scorer}.h5"
-    if scorer and collected_data_path.is_file():
-        labeled_frame_names = frame_names_from_index(pd.read_hdf(collected_data_path, key="df_with_missing").index)
+    labeled_frame_names: set[str] = finite_labeled_frame_names(collected_data_path) if scorer else set()
 
+    removed_frame_names = outlier_frame_names - labeled_frame_names
     removed_count = 0
-    for frame_name in outlier_frame_names - labeled_frame_names:
+    for frame_name in removed_frame_names:
         frame_path = directory / frame_name
         if frame_path.is_file():
             frame_path.unlink()
             removed_count += 1
-        # Drop the prediction overlay saved beside the frame when --save-labeled was used, so it never orphans.
+        # Drops the prediction overlay saved beside the frame when --save-labeled was used, so it never orphans.
         (directory / f"{Path(frame_name).stem}labeled.png").unlink(missing_ok=True)
+    # A removed frame the GUI had reindexed still holds an all-NaN row, which would otherwise reference an image that
+    # is no longer on disk.
+    drop_collected_data_rows(collected_data_path=collected_data_path, removed_frame_names=removed_frame_names)
 
     machine_labels_path.unlink(missing_ok=True)
     (directory / "machinelabels.csv").unlink(missing_ok=True)
@@ -973,7 +1059,7 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
     """Selects and writes the flagged frames for a single video, reusing DeepLabCut's own frame writer.
 
     DeepLabCut's console output is silenced and exceptions are captured, so one bad video cannot kill the worker pool.
-    DeepLabCut's frame writer re-registers the video in config.yaml; that add is neutralized here because every refined
+    DeepLabCut's frame writer re-registers the video in config.yaml. That add is neutralized here because every refined
     video is already registered in the project, so the concurrent workers never write the configuration file.
 
     Args:
@@ -1012,7 +1098,7 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
         output_directory = Path(configuration["project_path"]) / "labeled-data" / Path(video).stem
         frame_count_before = _count_directory_frames(output_directory)
 
-        # Swap DeepLabCut's random-seek k-means reader for the streaming one, routing its per-candidate progress to the
+        # Swaps DeepLabCut's random-seek k-means reader for the streaming one, routing its per-candidate progress to the
         # parent's aggregate bar. The queue is None when progress is disabled, leaving a plain (stream-suppressed) bar.
         # DeepLabCut's per-worker config write is neutralized because every refined video is already registered.
         progress_reporter = (
@@ -1065,7 +1151,7 @@ def _count_directory_frames(output_directory: Path) -> int:
 
 
 def _skip_video_registration(**_kwargs: Any) -> bool:
-    """Neutralizes DeepLabCut's per-video config.yaml registration inside a worker; the videos are pre-registered.
+    """Neutralizes DeepLabCut's per-video config.yaml registration inside a worker. The videos are pre-registered.
 
     Returns:
         True, reporting a successful registration so DeepLabCut's frame writer proceeds unchanged.

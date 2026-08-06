@@ -13,7 +13,7 @@ _AMPERE_CAPABILITY: tuple[int, int] = (8, 0)
 
 
 class Toggle(StrEnum):
-    """The tri-state control for one optimization: the capability-detected default, forced on, or forced off."""
+    """Defines the tri-state control for one optimization: the capability-detected default, forced on, or forced off."""
 
     AUTO = "auto"
     """Uses the capability-detected default chosen for the selected device."""
@@ -24,7 +24,7 @@ class Toggle(StrEnum):
 
 
 class AmpMode(StrEnum):
-    """The automatic-mixed-precision selection: the capability default, disabled, or a forced compute dtype."""
+    """Defines the automatic-mixed-precision selection: the capability default, disabled, or a forced compute dtype."""
 
     AUTO = "auto"
     """Enables bfloat16 only where it is natively fast, staying at full float32 otherwise."""
@@ -37,7 +37,7 @@ class AmpMode(StrEnum):
 
 
 class DeviceType(StrEnum):
-    """The base compute device to run on: automatic selection, the CPU, Apple MPS, or a CUDA GPU."""
+    """Defines the base compute device to run on: automatic selection, the CPU, Apple MPS, or a CUDA GPU."""
 
     AUTO = "auto"
     """Selects CUDA when a GPU is visible, otherwise the CPU."""
@@ -57,15 +57,6 @@ def warn(message: str) -> None:
     """
     sys.stderr.write(f"WARNING: {message}\n")
     sys.stderr.flush()
-
-
-def _cuda_device_count() -> int:
-    """Returns the number of visible CUDA devices, or zero when CUDA is unavailable.
-
-    Returns:
-        The count of CUDA devices reported by the active PyTorch build.
-    """
-    return torch.cuda.device_count() if torch.cuda.is_available() else 0
 
 
 def supports_ampere(gpus: tuple[int, ...]) -> bool:
@@ -167,9 +158,9 @@ def resolve_target_device(
 def resolve_amp_dtype(amp: AmpMode, device: str, gpus: tuple[int, ...]) -> torch.dtype | None:
     """Reconciles the requested mixed-precision mode with the device and its capabilities into an autocast dtype.
 
-    A forced dtype the device cannot support (bfloat16 on MPS, float16 off CUDA) is disabled with a warning rather
-    than a silent refusal. The ``"auto"`` default enables bfloat16 only where it is natively fast, so it stays close
-    to stock float32 behavior; on CPU the benefit is chip-dependent and left as an explicit opt-in.
+    A forced dtype the device cannot support (bfloat16 on MPS, float16 off CUDA) is disabled with a warning rather than
+    a silent refusal. The ``"auto"`` default enables bfloat16 only where it is natively fast, so it stays close to stock
+    float32 behavior. On CPU the benefit is chip-dependent and left as an explicit opt-in.
 
     Args:
         amp: The requested mixed-precision mode.
@@ -211,8 +202,8 @@ def apply_backend_flags(*, device: str, tf32: bool, cudnn_benchmark: bool) -> No
 
     Args:
         device: The resolved base device type the worker runs on.
-        tf32: Whether TF32 acceleration is enabled for float32 matmuls and convolutions.
-        cudnn_benchmark: Whether the cuDNN convolution autotuner is enabled.
+        tf32: Determines whether TF32 acceleration is enabled for float32 matmuls and convolutions.
+        cudnn_benchmark: Determines whether the cuDNN convolution autotuner is enabled.
     """
     if device != "cuda":
         return
@@ -235,3 +226,12 @@ def precision_label(amp_dtype: torch.dtype | None) -> str:
         The precision label (``"bfloat16"``, ``"float16"``, or ``"fp32"``).
     """
     return "fp32" if amp_dtype is None else str(amp_dtype).removeprefix("torch.")
+
+
+def _cuda_device_count() -> int:
+    """Returns the number of visible CUDA devices, or zero when CUDA is unavailable.
+
+    Returns:
+        The count of CUDA devices reported by the active PyTorch build.
+    """
+    return torch.cuda.device_count() if torch.cuda.is_available() else 0

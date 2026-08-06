@@ -26,11 +26,11 @@ from deeplabcut.pose_estimation_pytorch.runners.logger import setup_file_logging
 
 from .monitor import TrainingMonitor, QueueTrainingLogger
 from .runners import build_optimized_training_runner
-from .evaluation import EvaluationSummary, evaluate_trained_model
+from .evaluation import EvaluationSummary, evaluate_trained_model, resolve_evaluation_batch_size
 from .optimization import MultiGpuStrategy, OptimizationProfile, apply_runtime_optimizations
 
 _logger = logging.getLogger(__name__)
-"""The module logger; its records propagate to DeepLabCut's root training-log handlers (``train.txt``)."""
+"""The module logger. Its records propagate to DeepLabCut's root training-log handlers (``train.txt``)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,11 +136,11 @@ def train_model(
 ) -> TrainingSummary:
     """Trains a DeepLabCut shuffle with the resolved hardware optimizations and a clean progress monitor.
 
-    The training-dataset options (model architecture, split) are fixed when the shuffle is created; this function
-    fits the already-created shuffle. It applies the requested overrides and the optimization profile to the
-    configuration once, then launches training as either a DistributedDataParallel process group or a single process.
-    The single-process path covers one GPU, the CPU, MPS, and DataParallel across multiple GPUs. For top-down
-    shuffles the detector is trained before the pose model.
+    The training-dataset options (model architecture, split) are fixed when the shuffle is created. This function fits
+    the already-created shuffle. It applies the requested overrides and the optimization profile to the configuration
+    once, then launches training as either a DistributedDataParallel process group or a single process. The
+    single-process path covers one GPU, the CPU, MPS, and DataParallel across multiple GPUs. For top-down shuffles the
+    detector is trained before the pose model.
 
     Args:
         config: The path of the DeepLabCut project configuration file.
@@ -154,7 +154,7 @@ def train_model(
         snapshot_path: The pose snapshot to resume from, if any.
         detector_path: The detector snapshot to resume from, if any.
         detector_batch_size: The detector batch size (top-down only), or None to use the configured value.
-        detector_epochs: The maximum number of detector epochs (top-down only); zero skips detector training.
+        detector_epochs: The maximum number of detector epochs (top-down only). Zero skips detector training.
         detector_save_epochs: The epochs between detector snapshots (top-down only), or None for the configured value.
         maximum_snapshots_to_keep: The maximum number of snapshots to retain, or None to use the configured value.
         load_head_weights: Determines whether to load head weights when resuming a pose model from a snapshot.
@@ -415,7 +415,7 @@ def _evaluate_after_training(
         torch.cuda.empty_cache()
     try:
         return evaluate_trained_model(
-            config,
+            config=config,
             shuffle=shuffle,
             training_set_index=training_set_index,
             batch_size=batch_size,
@@ -483,7 +483,7 @@ def _redirect_worker_console(log_path: Path, *, active: bool) -> Iterator[None]:
 
     Args:
         log_path: The training-log file the diverted output is appended to.
-        active: Determines whether to redirect; when False the context does nothing, leaving raw output on the console.
+        active: Determines whether to redirect. When False the context does nothing, leaving raw output on the console.
 
     Yields:
         None, for the duration of the redirection.
@@ -502,8 +502,8 @@ def _redirect_worker_console(log_path: Path, *, active: bool) -> Iterator[None]:
         yield
     except BaseException:
         # Record the traceback while the descriptors still reach the log. Restoring them below sends the propagating
-        # exception to the console alone, which leaves no record once the terminal is closed or its scrollback rolls,
-        # and a worker that dies inside a spawned process writes only a bare object dump here to explain the run.
+        # exception to the console alone, which leaves no record once the terminal is closed or its scrollback rolls. A
+        # worker that dies inside a spawned process writes only a bare object dump here to explain the run.
         os.write(log_descriptor, traceback.format_exc().encode("utf-8", errors="replace"))
         raise
     finally:
@@ -667,12 +667,17 @@ def _build_dataloaders(
             pin_memory=pin_memory,
             persistent_workers=worker_count > 0,
         )
-    # Validation draws single-image batches over the held-out split, so worker processes add a second pool whose spawn
-    # cost is not repaid by the little decoding they do. Loading it in the training process keeps that pool off the
-    # platforms that spawn rather than fork, where each worker pays a full interpreter start.
+    # Validation batches only as far as the training batch size. Its forward pass runs under no-grad, so a batch the
+    # training step already holds cannot exhaust the device, which keeps the larger batch from turning a run that fits
+    # into one that runs out of memory mid-epoch. The size drops back to one whenever the labeled frames span several
+    # resolutions, which default collation cannot stack.
+    valid_batch_size = resolve_evaluation_batch_size(loader=loader, requested=batch_size)
+    # Validation decodes little, so worker processes add a second pool whose spawn cost is not repaid. Loading it in
+    # the training process keeps that pool off the platforms that spawn rather than fork, where each worker pays a
+    # full interpreter start.
     valid_dataloader = DataLoader(
         dataset=valid_dataset,
-        batch_size=1,
+        batch_size=valid_batch_size,
         shuffle=False,
         pin_memory=pin_memory,
     )
@@ -721,7 +726,10 @@ def _train_single_model(
 
     logger = None
     if rank == 0 and progress_queue is not None:
-        logger = QueueTrainingLogger(progress_queue, task_name=("detector" if task == Task.DETECT else "pose"))
+        logger = QueueTrainingLogger(
+            progress_queue=progress_queue,
+            task_name=("detector" if task == Task.DETECT else "pose"),
+        )
 
     runner = build_optimized_training_runner(
         runner_config=run_config["runner"],

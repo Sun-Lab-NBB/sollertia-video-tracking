@@ -3,6 +3,7 @@ from typing import Any
 from pathlib import Path
 from dataclasses import dataclass
 
+import numpy as np
 from numpy.typing import NDArray as NDArray
 
 from .progress import make_progress_reporter as make_progress_reporter
@@ -21,10 +22,10 @@ from .cpu_allocation import (
     plan_core_allocation as plan_core_allocation,
 )
 from .outlier_detection import (
-    KeypointSeries as KeypointSeries,
     OutlierAlgorithm as OutlierAlgorithm,
     jump_outlier_indices as jump_outlier_indices,
     fit_keypoint_distance as fit_keypoint_distance,
+    fitting_keypoint_count as fitting_keypoint_count,
     fitting_keypoint_series as fitting_keypoint_series,
     fitting_outlier_indices as fitting_outlier_indices,
     uncertain_outlier_indices as uncertain_outlier_indices,
@@ -111,7 +112,11 @@ def _detect_all_videos(
 ) -> tuple[dict[str, list[int]], list[str], list[tuple[str, str]]]: ...
 def _detect_fitting_outliers(
     *,
-    keypoint_series_by_video: dict[str, list[KeypointSeries]],
+    fitting_keypoint_counts: dict[str, int],
+    scorer: str,
+    configuration: dict[str, Any],
+    tracking_method: str,
+    resolved_comparison_bodyparts: list[str],
     frames_per_video_count: int,
     pixel_distance_threshold: float,
     minimum_confidence: float,
@@ -121,6 +126,17 @@ def _detect_fitting_outliers(
     reserved_core_count: int,
     display_progress: bool,
 ) -> dict[str, list[int]]: ...
+def _fit_video_keypoint(
+    video: str,
+    keypoint_index: int,
+    scorer: str,
+    configuration: dict[str, Any],
+    tracking_method: str,
+    resolved_comparison_bodyparts: list[str],
+    minimum_confidence: float,
+    autoregressive_degree: int,
+    moving_average_degree: int,
+) -> NDArray[np.float64]: ...
 def _extract_all_videos(
     *,
     config_path: Path,

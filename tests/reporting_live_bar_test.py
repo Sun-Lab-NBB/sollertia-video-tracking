@@ -15,66 +15,6 @@ from sollertia_video_tracking.reporting.live_bar import (
 )
 
 
-class _FakeStream:
-    """A minimal text stream that records writes and reports a configurable interactive-terminal status."""
-
-    def __init__(self, *, is_tty: bool) -> None:
-        self._is_tty = is_tty
-        self.chunks: list[str] = []
-        self.flush_count = 0
-
-    def isatty(self) -> bool:
-        return self._is_tty
-
-    def write(self, text: str) -> None:
-        self.chunks.append(text)
-
-    def flush(self) -> None:
-        self.flush_count += 1
-
-    @property
-    def text(self) -> str:
-        return "".join(self.chunks)
-
-
-class _ScriptedQueue:
-    """A fake progress queue whose ``get`` replays a scripted sequence, raising ``Empty`` where the script says so."""
-
-    def __init__(self, script: list) -> None:
-        # Each item is either a real message, the stop sentinel, or the ``Empty`` class to raise a timeout.
-        self._script = list(script)
-        self.put_items: list = []
-
-    def get(self, **_kwargs: object) -> object:
-        item = self._script.pop(0)
-        if item is Empty:
-            raise Empty
-        return item
-
-    def put(self, item: object) -> None:
-        self.put_items.append(item)
-
-
-class _FakeBar(LiveBar):
-    """A concrete ``LiveBar`` that supplies the three subclass hooks so the shared scaffolding can be exercised."""
-
-    def __init__(self, *args, preparing: bool = False, force_value: bool = False, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self._preparing = preparing
-        self._force_value = force_value
-        self.ingested: list = []
-
-    def _ingest(self, message) -> bool:
-        self.ingested.append(message)
-        return self._force_value
-
-    def _is_preparing(self) -> bool:
-        return self._preparing
-
-    def _compose_active(self, elapsed: float) -> str:
-        return f"active {format_duration(elapsed)}"
-
-
 def test_format_duration_minutes_and_seconds() -> None:
     """Verifies that under an hour, the duration is rendered as zero-padded MM:SS."""
     assert format_duration(65) == "01:05"
@@ -159,7 +99,7 @@ def test_eta_completed_shows_zero() -> None:
 def test_eta_projects_remaining_from_rate() -> None:
     """Verifies that with measurable throughput, the ETA projects the remaining time from the observed rate."""
     bar = _FakeBar(Queue(), stream=_FakeStream(is_tty=False))
-    # rate = 5 / 5 = 1 unit/sec; remaining = (10 - 5) / 1 = 5 seconds.
+    # rate = 5 / 5 = 1 unit/sec. remaining = (10 - 5) / 1 = 5 seconds.
     assert bar._eta(done=5, total=10, elapsed=5.0) == "00:05"
 
 
@@ -260,7 +200,7 @@ def test_run_non_tty_handles_empty_message_and_stop() -> None:
     bar.run()
     # The real message was ingested exactly once.
     assert bar.ingested == ["msg-1"]
-    # The idle-timeout render and the forced final render both wrote a non-terminal line; the in-loop unforced render
+    # The idle-timeout render and the forced final render both wrote a non-terminal line. The in-loop unforced render
     # after ingest fell inside the long non-tty interval and was suppressed, so exactly two lines were drawn.
     assert stream.text.count("\n") == 2
     # A non-terminal stream is never sent the trailing terminal newline sequence.
@@ -277,8 +217,8 @@ def test_run_tty_draws_final_frame_and_trailing_newline() -> None:
     # A terminal run ends by writing a bare newline after the final in-place frame.
     assert stream.chunks[-1] == "\n"
     # Exactly two in-place frames are drawn: the one triggered by ingesting the message and the forced final frame.
-    # Requiring both (rather than merely "some \\r chunk exists") is what actually pins the named final-frame render;
-    # a single frame would satisfy a weaker check even if the final forced render were dropped.
+    # Requiring both (rather than merely "some \\r chunk exists") is what actually pins the named final-frame render.
+    # A single frame would satisfy a weaker check even if the final forced render were dropped.
     render_frames = [chunk for chunk in stream.chunks if chunk.startswith("\r")]
     assert len(render_frames) == 2
     assert all(chunk.endswith("\033[K") for chunk in render_frames)
@@ -288,3 +228,63 @@ def test_non_tty_render_interval_constant_is_slow_cadence() -> None:
     """Verifies that the non-terminal render cadence is much slower than terminal, keeping redirected logs greppable."""
     # Guards the constant the non-tty suppression above relies on staying well above the in-loop poll cadence.
     assert _NON_TTY_RENDER_INTERVAL == 30.0
+
+
+class _FakeStream:
+    """Serves as a minimal text stream, recording writes and reporting a configurable interactive-terminal status."""
+
+    def __init__(self, *, is_tty: bool) -> None:
+        self._is_tty = is_tty
+        self.chunks: list[str] = []
+        self.flush_count = 0
+
+    def isatty(self) -> bool:
+        return self._is_tty
+
+    def write(self, text: str) -> None:
+        self.chunks.append(text)
+
+    def flush(self) -> None:
+        self.flush_count += 1
+
+    @property
+    def text(self) -> str:
+        return "".join(self.chunks)
+
+
+class _ScriptedQueue:
+    """Fakes a progress queue whose ``get`` replays a scripted sequence, raising ``Empty`` where the script says so."""
+
+    def __init__(self, script: list) -> None:
+        # Each item is either a real message, the stop sentinel, or the ``Empty`` class to raise a timeout.
+        self._script = list(script)
+        self.put_items: list = []
+
+    def get(self, **_kwargs: object) -> object:
+        item = self._script.pop(0)
+        if item is Empty:
+            raise Empty
+        return item
+
+    def put(self, item: object) -> None:
+        self.put_items.append(item)
+
+
+class _FakeBar(LiveBar):
+    """Supplies the three subclass hooks as a concrete ``LiveBar``, so the shared scaffolding can be exercised."""
+
+    def __init__(self, *args, preparing: bool = False, force_value: bool = False, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._preparing = preparing
+        self._force_value = force_value
+        self.ingested: list = []
+
+    def _ingest(self, message) -> bool:
+        self.ingested.append(message)
+        return self._force_value
+
+    def _is_preparing(self) -> bool:
+        return self._preparing
+
+    def _compose_active(self, elapsed: float) -> str:
+        return f"active {format_duration(elapsed)}"

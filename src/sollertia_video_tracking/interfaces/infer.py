@@ -134,7 +134,8 @@ _CROP_FIELD_COUNT: int = 4
     help="The number of contiguous frame-range pieces each running video is split into, all analyzed concurrently. "
     "Raise it to run several frame ranges of one video at once, filling decode gaps within a single video, so total "
     "per-GPU concurrency becomes gpu-processes x chunks. Set to 1 to analyze each video as a single unbroken frame "
-    "range.",
+    "range. Values above 1 are supported only for single-animal bottom-up models, and are rejected for multi-animal or "
+    "top-down models.",
 )
 @click.option(
     "-cw",
@@ -232,19 +233,20 @@ def infer_command(
     *,
     progress: bool,
 ) -> None:
-    """Analyzes videos with a trained DeepLabCut model, distributing whole videos across GPU or CPU worker slots.
+    """Analyzes videos with a trained DeepLabCut model, distributing the work across GPU or CPU worker slots.
 
     ``--config-path`` names the DeepLabCut project's config.yaml whose trained model runs. Provide the videos to analyze
     with ``--videos`` (given several times for several files), or omit ``--videos`` to analyze every existing video
     registered in the project configuration. Each worker pulls work from a shared queue, so the work is balanced across
     slots. By default a worker analyzes a whole video, and ``--chunks`` instead splits each running video into that many
     contiguous frame ranges analyzed concurrently, with the parent stitching each video's ranges back into one
-    prediction file. Each forward pass runs with the mixed precision and memory format chosen for the detected
-    hardware, except conditional-top-down models, which run at stock precision. Each video's
-    predictions are written as DeepLabCut's native ``.h5`` prediction file, beside the video or into an ``--output``
-    directory (one shared directory, or one per video). Pass ``--crop`` to analyze a chosen region rather than the
-    project's configured crop, which lets de-novo videos that are not registered in the project be analyzed. The same
-    command runs on multiple GPUs, one GPU, or a CPU-only machine.
+    prediction file. Chunking supports only single-animal bottom-up models, so a multi-animal or top-down model requires
+    ``--chunks 1``. Each forward pass runs with the mixed precision and memory format chosen for the detected hardware,
+    except conditional-top-down models, which run at stock precision. Each video's predictions are written as
+    DeepLabCut's native ``.h5`` prediction file, beside the video or into an ``--output`` directory (one shared
+    directory, or one per video). Pass ``--crop`` to analyze a chosen region rather than the project's configured crop,
+    which lets de-novo videos that are not registered in the project be analyzed. The same command runs on multiple
+    GPUs, one GPU, or a CPU-only machine.
     """
     try:
         gpu_indices = tuple(int(part) for part in gpus.split(",")) if gpus else None
@@ -358,7 +360,7 @@ def _resolve_crop_override(
     """Resolves the ``--crop`` option values into one crop rectangle per analyzed video, or None when unset.
 
     A single ``--crop`` is applied uniformly to every video. Several ``--crop`` rectangles are matched to the videos in
-    order and must equal the video count; because the whole-project video order is not user-controlled, per-video crops
+    order and must equal the video count. Because the whole-project video order is not user-controlled, per-video crops
     cannot be combined with the whole-project default and require explicit ``--videos``.
 
     Args:
@@ -397,7 +399,7 @@ def _resolve_output_override(output: tuple[Path, ...], video_count: int, *, whol
     """Resolves the ``--output`` option values into one output directory per analyzed video, or None when unset.
 
     A single ``--output`` collects every video's predictions in one directory. Several ``--output`` directories are
-    matched to the videos in order and must equal the video count; because the whole-project video order is not
+    matched to the videos in order and must equal the video count. Because the whole-project video order is not
     user-controlled, per-video directories cannot be combined with the whole-project default and require explicit
     ``--videos``.
 

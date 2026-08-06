@@ -25,7 +25,7 @@ at a fast live cadence."""
 _NON_TTY_RENDER_INTERVAL: float = 30.0
 """The minimum interval, in seconds, between rendered lines when the output is not an interactive terminal. A forced
 redraw, such as a completion, bypasses it. Redirected output cannot redraw a line in place, so each render appends a
-whole new line; this steady cadence keeps such logs greppable without flooding them."""
+whole new line. This steady cadence keeps such logs greppable without flooding them."""
 
 _NON_TTY_POLL_INTERVAL: float = 1.0
 """The interval, in seconds, the non-interactive run loop waits for a message before waking to re-check whether a
@@ -161,7 +161,7 @@ class LiveBar(Thread):
     def _compose_preparing(self, elapsed: float) -> str:
         """Builds the warm-up line body shown before the first unit of work is reported.
 
-        Subclasses may override to add context such as a video count; the default shows only the label and elapsed.
+        Subclasses may override to add context such as a video count. The default shows only the label and elapsed.
 
         Args:
             elapsed: The seconds elapsed since the renderer was constructed.
@@ -187,8 +187,8 @@ class LiveBar(Thread):
     def _eta(self, done: float, total: float, elapsed: float) -> str:
         """Formats an honest estimated time remaining from the work done so far.
 
-        Shows a placeholder until there is measurable throughput, so warm-up never reads as a finished ``00:00``; a
-        plain zero at completion; and the projected remaining time otherwise.
+        Shows a placeholder until there is measurable throughput, so warm-up never reads as a finished ``00:00``. Shows
+        a plain zero at completion. Shows the projected remaining time otherwise.
 
         Args:
             done: The units of work completed so far.
@@ -217,7 +217,7 @@ class LiveBar(Thread):
             return
         self._last_render_time = now
 
-        # Advance the spinner on every drawn line so the bar stays visibly alive through the count-static stretches of
+        # Advances the spinner on every drawn line so the bar stays visibly alive through the count-static stretches of
         # a run: warm-up before the first unit of work is reported, and the decode/cluster gaps between updates.
         spinner = _SPINNER_FRAMES[self._spinner_index % len(_SPINNER_FRAMES)]
         self._spinner_index += 1

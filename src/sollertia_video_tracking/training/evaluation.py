@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 _logger = logging.getLogger(__name__)
-"""The module logger; its records propagate to the root handlers configured for the training run."""
+"""The module logger. Its records propagate to the root handlers configured for the training run."""
 
 _SPLITS: tuple[str, ...] = ("train", "test")
 """The labeled-data partitions scored during evaluation, in report order."""
@@ -57,12 +57,13 @@ _FEATHER_SCHEMA: dict[str, Any] = {
 
 Notes:
     Each row is one predicted keypoint. ``individual`` is the ground-truth individual name for single-animal projects
-    and for matched multi-animal predictions; an unmatched multi-animal prediction (a false positive, ``matched`` is
+    and for matched multi-animal predictions. An unmatched multi-animal prediction (a false positive, ``matched`` is
     False) is labeled ``instance_<order>`` by its per-image match order and carries no stable identity across images.
-    ``error_px`` is the Euclidean pixel distance to the matched label, and is NaN when the keypoint is unmatched or its
-    label is occluded. ``oks`` is NaN for an unmatched prediction and otherwise holds the match's OKS; for matched
-    single-animal and unique-bodypart rows, which DeepLabCut scores by direct correspondence rather than OKS, that
-    value is the matcher's default rather than a computed OKS.
+    A unique-bodypart row's ``individual`` is the literal ``unique``. ``error_px`` is the Euclidean pixel distance to
+    the matched label, and is NaN when the keypoint is unmatched or its label is occluded. ``oks`` is NaN for an
+    unmatched multi-animal prediction and for every matched single-animal and unique-bodypart row, which DeepLabCut
+    scores by direct correspondence rather than OKS. Only a matched multi-animal row carries a computed OKS, so use
+    ``matched`` rather than ``oks`` to tell matched rows from unmatched ones.
 """
 
 
@@ -71,9 +72,10 @@ class _SplitMetrics:
     """Captures DeepLabCut's canonical error metrics for one labeled-data partition.
 
     Notes:
-        The values are taken verbatim from DeepLabCut's scorer so they agree with ``deeplabcut.evaluate_network``.
-        RMSE values are in pixels; ``map`` and ``mar`` are on the DeepLabCut 0-100 scale. ``rmse_pcutoff`` counts only
-        keypoints predicted above the confidence cutoff.
+        The values are taken verbatim from DeepLabCut's scorer so they agree with ``deeplabcut.evaluate_network``. RMSE
+        values are in pixels, and DeepLabCut's ``rmse`` is a mean Euclidean pixel error rather than a root-mean-square,
+        so the two diverge in the presence of outliers. ``map`` and ``mar`` are on the DeepLabCut 0-100 scale.
+        ``rmse_pcutoff`` counts only keypoints predicted above the confidence cutoff.
     """
 
     images: int
@@ -96,7 +98,7 @@ class EvaluationSummary:
 
     Notes:
         The summary is built after the feather is written. It reports what was evaluated and the headline test-set
-        accuracy; the per-frame, per-keypoint detail lives in the feather and the full metric set lives in the
+        accuracy. The per-frame, per-keypoint detail lives in the feather and the full metric set lives in the
         provenance sidecar.
     """
 
@@ -109,7 +111,7 @@ class EvaluationSummary:
     feather_path: Path
     """The tidy evaluation feather that was written."""
     provenance_path: Path
-    """The path of the YAML provenance-and-summary sidecar; it is written beside the feather only when
+    """The path of the YAML provenance-and-summary sidecar. It is written beside the feather only when
     ``write_provenance`` is True, otherwise this path names a file that was not created."""
     pcutoff: float
     """The confidence cutoff applied when computing the cutoff-filtered metrics and the ``above_pcutoff`` column."""
@@ -120,7 +122,7 @@ class EvaluationSummary:
 
     @property
     def generalization_gap_px(self) -> float:
-        """Returns the test-minus-train RMSE gap in pixels; a large positive gap indicates overfitting."""
+        """Returns the test-minus-train RMSE gap in pixels. A large positive gap indicates overfitting."""
         return self.test.rmse_px - self.train.rmse_px
 
     def describe(self) -> str:
@@ -165,12 +167,12 @@ def evaluate_trained_model(
         training_set_index: The training-set fraction index.
         snapshot_index: The snapshot to score: ``"best"`` (falling back to the last snapshot when no best snapshot was
             saved), an integer index, or ``-1`` for the last snapshot.
-        detector_snapshot_index: The detector snapshot index for top-down models; ignored for bottom-up models and
-            when no detector was trained, in which case ground-truth bounding boxes are used.
+        detector_snapshot_index: The detector snapshot index for top-down models. It is ignored for bottom-up models
+            and when no detector was trained, in which case ground-truth bounding boxes are used.
         confidence_cutoff: The confidence cutoff for the cutoff-filtered metrics and the ``above_pcutoff`` column, or
             None to fall back to the project configuration's ``pcutoff`` (0.6 when unset), matching
             ``deeplabcut.evaluate_network``.
-        batch_size: The number of frames scored per forward pass; larger batches use the device more fully. It is
+        batch_size: The number of frames scored per forward pass. Larger batches use the device more fully. It is
             reduced to one automatically when the labeled frames span more than one resolution, which DeepLabCut cannot
             stack into a single batch.
         device: The device to evaluate on (for example ``"cuda:0"`` or ``"cpu"``), or None to resolve it from the
@@ -182,7 +184,7 @@ def evaluate_trained_model(
 
     Raises:
         ValueError: When the requested snapshot cannot be resolved.
-        OSError: When the provenance sidecar cannot be written; the feather written earlier is removed first so a
+        OSError: When the provenance sidecar cannot be written. The feather written earlier is removed first so a
             feather is never left without its provenance sidecar.
     """
     config = Path(config)
@@ -190,7 +192,7 @@ def evaluate_trained_model(
     parameters = loader.get_dataset_parameters()
     single_animal = parameters.max_num_animals == 1
     cutoff = float(loader.project_cfg.get("pcutoff", 0.6)) if confidence_cutoff is None else float(confidence_cutoff)
-    batch_size = _resolve_evaluation_batch_size(loader=loader, requested=batch_size)
+    batch_size = resolve_evaluation_batch_size(loader=loader, requested=batch_size)
 
     pose_snapshot = _resolve_snapshot(loader=loader, index=snapshot_index, task=loader.pose_task)
     detector_snapshot = None
@@ -236,7 +238,7 @@ def evaluate_trained_model(
         image_paths = loader.image_filenames(split)
         ground_truth = loader.ground_truth_keypoints(split)
         unmatched = _accumulate_split_rows(
-            columns,
+            columns=columns,
             snapshot_name=snapshot_name,
             split=split,
             image_paths=image_paths,
@@ -249,7 +251,7 @@ def evaluate_trained_model(
         )
         if parameters.num_unique_bpts > 0:
             _accumulate_split_rows(
-                columns,
+                columns=columns,
                 snapshot_name=snapshot_name,
                 split=split,
                 image_paths=image_paths,
@@ -280,7 +282,7 @@ def evaluate_trained_model(
     if write_provenance:
         try:
             _write_provenance(
-                provenance_path,
+                provenance_path=provenance_path,
                 config=config,
                 loader=loader,
                 parameters=parameters,
@@ -311,7 +313,7 @@ def evaluate_trained_model(
     )
 
 
-def _resolve_evaluation_batch_size(loader: DLCLoader, requested: int) -> int:
+def resolve_evaluation_batch_size(loader: DLCLoader, requested: int) -> int:
     """Reduces the evaluation batch size to one unless every labeled frame shares a single native resolution.
 
     DeepLabCut's inference runner stacks each forward-pass batch into one tensor, and its evaluation transforms do not
@@ -356,7 +358,7 @@ def _resolve_snapshot(loader: DLCLoader, index: int | str, task: Task, *, requir
         loader: The loader holding the model directory the snapshots live in.
         index: The requested snapshot index (``"best"``, an integer, or ``-1``).
         task: The task whose snapshots to search (pose or detector).
-        required: Determines whether to raise when no snapshot is found; when False, returns None instead.
+        required: Determines whether to raise when no snapshot is found. When False, returns None instead.
 
     Returns:
         The resolved DeepLabCut snapshot, or None when none is found and ``required`` is False.
@@ -443,7 +445,7 @@ def _accumulate_split_rows(
         predictions: DeepLabCut's per-image predictions, keyed by image path.
         ground_truth: The per-image ground-truth keypoints, keyed by image path.
         bodyparts: The ordered bodypart names to write rows for.
-        individuals: The ordered individual names; the first labels rows for single-animal projects.
+        individuals: The ordered individual names. The first labels rows for single-animal projects.
         single_animal: Determines whether these keypoints are matched as a single individual.
         confidence_cutoff: The confidence cutoff used to fill the ``above_pcutoff`` column.
         prediction_key: The per-image prediction head to read (``"bodyparts"`` or ``"unique_bodyparts"``).
@@ -497,7 +499,7 @@ def _accumulate_split_rows(
                 columns["error_px"].append(float(errors[keypoint]))
                 columns["above_pcutoff"].append(likelihood >= confidence_cutoff)
                 columns["matched"].append(matched)
-                # OKS is only meaningful for a matched prediction; an unmatched prediction keeps the match object's
+                # OKS is only meaningful for a matched prediction. An unmatched prediction keeps the match object's
                 # default 0.0, so store NaN instead to honor the "populated only for matched predictions" contract.
                 columns["oks"].append(float(match.oks) if matched else float("nan"))
         if not matched_any:

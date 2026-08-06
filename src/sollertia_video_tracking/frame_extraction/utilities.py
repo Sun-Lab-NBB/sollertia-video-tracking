@@ -24,16 +24,17 @@ class PurgeSummary:
     """Summarizes a wholesale labeled-data purge, whether previewed as a dry run or actually executed.
 
     Notes:
-        A purge is deliberately destructive: unlike the frame and outlier re-extraction options, which preserve every
-        human-labeled and machine-labeled frame, it removes each targeted video's entire ``labeled-data`` directory,
-        including its labels. The ``executed`` flag distinguishes a dry-run preview from a completed deletion, and
-        ``labeled_directories`` names the directories that held human labels so callers can warn before deleting them.
+        A purge is deliberately destructive: it removes each targeted video's entire ``labeled-data`` directory,
+        including its labels. The frame and outlier re-extraction options always keep the human labels and clear only a
+        video's unlabeled bootstrap frames or a single iteration's outlier frames. The ``executed`` flag distinguishes a
+        dry-run preview from a completed deletion, and ``labeled_directories`` names the directories that held human
+        labels so callers can warn before deleting them.
     """
 
     config_path: Path
     """The path to the DeepLabCut project's config.yaml the purge targeted."""
     executed: bool
-    """Indicates whether the directories were actually deleted (True) or only previewed as a dry run (False)."""
+    """Determines whether the directories were actually deleted (True) or only previewed as a dry run (False)."""
     removed_directories: tuple[Path, ...]
     """The ``labeled-data/<stem>`` directories that were removed, or that a dry run would remove."""
     labeled_directories: tuple[Path, ...]
@@ -70,7 +71,7 @@ class RefinementStatusSummary:
 
     Notes:
         Only directories that still hold unrefined machine frames for the project's current refinement iteration are
-        recorded in ``pending_directories``; directories that are already fully refined, purely human-labeled, or still
+        recorded in ``pending_directories``. Directories that are already fully refined, purely human-labeled, or still
         bootstrapping are left out because they need no attention this round. This is what ``extract pending`` lists.
     """
 
@@ -162,11 +163,11 @@ def iter_pinned_extraction(
     """Runs the workers over a pinned process pool, yielding each ``(video_path, frames_written, status)`` result.
 
     Owns the spawn context, the manager-backed progress and core-set queues, and the aggregate progress bar, so both
-    pipelines share one worker-pool lifecycle. Each worker claims its assigned core block for CPU-affinity pinning
-    (disjoint in the default allocation; explicit worker/core counts may overlap within the usable band). The progress
-    queue is handed to ``make_tasks`` only when progress is displayed (None otherwise), so the workers never
-    stream to a queue nobody drains. The bar and manager are always torn down, even if the caller's consumption of
-    the results raises.
+    pipelines share one worker-pool lifecycle. Each worker claims its assigned core block for CPU-affinity pinning, and
+    the blocks are always disjoint, because a request that would need overlapping blocks raises ``ValueError`` during
+    core allocation instead. The progress queue is handed to ``make_tasks`` only when progress is displayed (None
+    otherwise), so the workers never stream to a queue nobody drains. The bar and manager are always torn down, even if
+    the caller's consumption of the results raises.
 
     Args:
         videos: The ordered video paths, used to map each result back to its progress-bar slot.
@@ -206,7 +207,7 @@ def iter_pinned_extraction(
     finally:
         # The bar thread is only started once the pool is created, so joining it when progress is off or when pool
         # construction raised before the start would hit an unstarted thread and mask the real error with a
-        # RuntimeError. Stop and join it only while it is actually running.
+        # RuntimeError. Stops and joins it only while it is actually running.
         if display_progress and bar.is_alive():
             bar.stop()
             bar.join(timeout=3)
@@ -249,8 +250,8 @@ def extracted_frame_paths(directory: Path) -> list[Path]:
     """Lists a labeled-data directory's extracted frames, excluding any predicted-label overlays.
 
     The outlier-refinement pipeline may leave ``imgNNNNlabeled.png`` prediction overlays beside the extracted
-    ``imgNNNN.png`` frames when it saves labeled frames. Those overlays are not training frames, so counting them
-    would inflate the k-means budgeted-sampling accounting and the per-video totals; they are filtered out here.
+    ``imgNNNN.png`` frames when it saves labeled frames. Those overlays are not training frames, so counting them would
+    inflate the k-means budgeted-sampling accounting and the per-video totals. They are filtered out here.
 
     Args:
         directory: The ``labeled-data/<video>`` directory whose extracted frames are listed.
@@ -268,7 +269,7 @@ def frame_names_from_index(frame_index: Any) -> set[str]:
     """Extracts the ``imgNNNN.png`` file names from a labeled-data table's row index.
 
     DeepLabCut indexes its label tables by a ``("labeled-data", video, image)`` row MultiIndex, though older tables may
-    store a flat path string; the trailing image name is taken from either form.
+    store a flat path string. The trailing image name is taken from either form.
 
     Args:
         frame_index: The pandas row index of a CollectedData or machine-label table.
@@ -291,7 +292,8 @@ def finite_labeled_frame_names(collected_data_path: Path) -> set[str]:
     placeholders as still-unlabeled.
 
     Args:
-        collected_data_path: The ``CollectedData_<scorer>.h5`` file holding one video's human labels.
+        collected_data_path: The label table to read, either the ``CollectedData_<scorer>.h5`` file holding one video's
+            human labels or the ``MachineLabelsRefine.h5`` file holding its legacy refinements.
 
     Returns:
         The set of ``imgNNNN.png`` frame names with at least one finite coordinate, or an empty set when the file does
@@ -311,9 +313,11 @@ def machine_label_frame_names(directory: Path) -> set[str]:
     """Returns every frame a video directory's machine-label or refinement tables reference.
 
     Outlier extraction records its machine pre-labels in ``machinelabels-iter<N>.h5`` (one table per refinement
-    iteration) and the labeling GUI writes human refinements of them to ``MachineLabelsRefine.h5``. Both name frames
-    that belong to the outlier-refinement workflow rather than the k-means bootstrap set, so callers protect them when
-    clearing bootstrap frames.
+    iteration). ``MachineLabelsRefine.h5`` is a legacy refine-flow artifact DeepLabCut no longer writes and only checks
+    for, as the ``merge_datasets`` gate that marks a directory refined, while the napari labeler saves human
+    refinements into ``CollectedData_<scorer>.h5``. Both ``machinelabels-iter<N>.h5`` and ``MachineLabelsRefine.h5``
+    name frames that belong to the outlier-refinement workflow rather than the k-means bootstrap set, so callers
+    protect them when clearing bootstrap frames.
 
     Args:
         directory: The ``labeled-data/<stem>`` directory whose machine-label tables are scanned.
@@ -329,6 +333,35 @@ def machine_label_frame_names(directory: Path) -> set[str]:
     for table_path in table_paths:
         names |= frame_names_from_index(pd.read_hdf(table_path, key="df_with_missing").index)
     return names
+
+
+def drop_collected_data_rows(*, collected_data_path: Path, removed_frame_names: set[str]) -> None:
+    """Drops the label rows naming removed frames from a video's ``CollectedData`` tables so no label dangles.
+
+    The labeling GUI reindexes ``CollectedData`` to every image in the directory, so a removed frame may leave behind
+    an all-NaN row referencing an image that is no longer there. The bootstrap and outlier clearing paths both call
+    this after deleting frames, and both pass only frames carrying no finite coordinate, so no human annotation is
+    dropped. When the removal empties the table, its ``.h5`` and ``.csv`` files are deleted outright.
+
+    Args:
+        collected_data_path: The ``CollectedData_<scorer>.h5`` file to prune, alongside its ``.csv`` sibling.
+        removed_frame_names: The frame image names that were removed and must not remain in the label tables.
+    """
+    if not collected_data_path.is_file():
+        return
+    labels = pd.read_hdf(collected_data_path, key="df_with_missing")
+    row_frame_names = [entry[-1] if isinstance(entry, tuple) else Path(str(entry)).name for entry in labels.index]
+    keep_row_mask = [frame_name not in removed_frame_names for frame_name in row_frame_names]
+    if all(keep_row_mask):
+        return
+    remaining_labels = labels[keep_row_mask]
+    collected_data_csv_path = collected_data_path.with_suffix(".csv")
+    if remaining_labels.empty:
+        collected_data_path.unlink(missing_ok=True)
+        collected_data_csv_path.unlink(missing_ok=True)
+        return
+    remaining_labels.to_hdf(collected_data_path, key="df_with_missing", mode="w")
+    remaining_labels.to_csv(collected_data_csv_path)
 
 
 def has_outlier_refinement_data(directory: Path) -> bool:
@@ -354,9 +387,7 @@ def select_registered_videos(
     """Resolves the caller's requested video files to the project's registered videos, in registered order.
 
     Each requested path and each registered video path is resolved to its absolute form before matching, so a request
-    selects its video regardless of how the path was spelled (relative, symlinked, or otherwise un-normalized). The
-    frames pipeline uses the matches either as always-included pins over the full project or, under exclusive
-    extraction, as the entire set to extract.
+    selects its video regardless of how the path was spelled (relative, symlinked, or otherwise un-normalized).
 
     Args:
         registered_videos: The project's registered video paths, in configuration order.
@@ -445,8 +476,8 @@ def purge_labeled_data(
 
     unmatched_videos: tuple[str, ...] = ()
     if not videos:
-        # Iterate the directories actually present on disk so the purge covers every video's labeled data, including any
-        # directories for videos no longer registered in config.yaml. The '_labeled' directories hold DeepLabCut's
+        # Iterates the directories actually present on disk so the purge covers every video's labeled data, including
+        # any directories for videos no longer registered in config.yaml. The '_labeled' directories hold DeepLabCut's
         # rendered label overlays rather than a video's frames, and dot-prefixed entries are temporary, so both are left
         # alone.
         target_directories = (
@@ -495,7 +526,7 @@ def summarize_refinement_status(config_path: Path, *, videos: tuple[str | Path, 
     Outlier extraction writes a trained model's likely-wrong frames into each video's ``machinelabels-iter<N>.h5`` table
     for the project's current iteration, and the human refines them in the labeling GUI, which saves the corrected
     coordinates into the directory's human ``CollectedData`` labels. A machine frame therefore counts as refined once it
-    carries a finite human coordinate; an all-NaN placeholder row the GUI writes for an opened-but-untouched frame does
+    carries a finite human coordinate. An all-NaN placeholder row the GUI writes for an opened-but-untouched frame does
     not count. This scans the project's labeled-data tree and reports, per directory, how many of the current
     iteration's machine frames remain unrefined, so the human knows which directories to open next. It only reads the
     project, mutating nothing.
@@ -525,7 +556,7 @@ def summarize_refinement_status(config_path: Path, *, videos: tuple[str | Path, 
 
     unmatched_videos: tuple[str, ...] = ()
     if not videos:
-        # Scan the directories present on disk, mirroring purge_labeled_data: skip rendered '_labeled' overlays,
+        # Scans the directories present on disk, mirroring purge_labeled_data: skips rendered '_labeled' overlays,
         # temporary dot-prefixed entries, and symlinks so only real per-video directories are inspected.
         target_directories = (
             sorted(
@@ -553,7 +584,8 @@ def summarize_refinement_status(config_path: Path, *, videos: tuple[str | Path, 
     for directory in target_directories:
         machine_labels_path = directory / machine_labels_name
         if not machine_labels_path.is_file():
-            # A directory without a current-iteration machine-label table has nothing to refine this round; skip it.
+            # A directory without a current-iteration machine-label table has nothing to refine this round, so it is
+            # skipped.
             continue
         try:
             machine_frame_names = frame_names_from_index(pd.read_hdf(machine_labels_path, key="df_with_missing").index)

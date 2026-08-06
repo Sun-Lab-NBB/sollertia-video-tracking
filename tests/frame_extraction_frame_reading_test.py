@@ -16,8 +16,8 @@ from sollertia_video_tracking.frame_extraction.frame_reading import (
 )
 
 
-class FakeVideoReader:
-    """Minimal stand-in for DeepLabCut's ``VideoReader`` driven from an in-memory frame table.
+class _FakeVideoReader:
+    """Stands in for DeepLabCut's ``VideoReader``, serving frames from an in-memory frame table.
 
     A single cursor backs both grabbing (skip past a frame) and reading (decode and advance), so the streaming and
     seeking readers exercise the identical positioning logic they would against the real reader. ``video`` points back
@@ -49,35 +49,10 @@ class FakeVideoReader:
         self.cursor += 1
 
     def read_frame(self, **_read_options):
-        # The real reader is called as read_frame(crop=True); the crop flag is irrelevant to this in-memory table.
+        # The real reader is called as read_frame(crop=True). The crop flag is irrelevant to this in-memory table.
         frame = self._frames.get(self.cursor)
         self.cursor += 1
         return frame
-
-
-def _solid_frame(value, *, height=40, width=60):
-    """Builds a uniform RGB frame whose grayscale thumbnail collapses to a single, predictable value."""
-    return np.full((height, width, 3), value, dtype=np.uint8)
-
-
-def _make_fake_kmeans(labels, recorder):
-    """Returns a MiniBatchKMeans replacement that records its constructor arguments and yields fixed cluster labels."""
-
-    class _FakeKMeans:
-        def __init__(self, *, n_clusters, tol, batch_size, max_iter):
-            recorder["n_clusters"] = n_clusters
-            recorder["tol"] = tol
-            recorder["batch_size"] = batch_size
-            recorder["max_iter"] = max_iter
-            self.labels_ = None
-
-        def fit(self, data):
-            recorder["fitted_shape"] = data.shape
-            recorder["fitted_data"] = np.array(data, copy=True)
-            self.labels_ = np.asarray(labels)
-            return self
-
-    return _FakeKMeans
 
 
 # make_fast_kmeans_selector / the installed select closure
@@ -93,7 +68,7 @@ def test_selector_uses_defaults_and_plain_tqdm(monkeypatch):
 
     selector = make_fast_kmeans_selector()
     reader = object()
-    # DeepLabCut passes reader, cluster count, and window bounds positionally; no keyword options here.
+    # DeepLabCut passes reader, cluster count, and window bounds positionally. No keyword options here.
     result = selector(reader, 5, 0.0, 1.0)
 
     assert result == [1, 2, 3]
@@ -240,7 +215,7 @@ def test_downsample_frame_color_stacks_channels_horizontally():
 def test_read_thumbnails_streaming_grabs_gaps_and_skips_failed_decode():
     """Verifies streaming grabs past non-candidate gaps, decodes candidates, and leaves failed-decode rows untouched."""
     frames = {2: _solid_frame(30), 4: None, 5: _solid_frame(200)}
-    reader = FakeVideoReader(frame_count=100, dimensions=(60, 40), frames=frames)
+    reader = _FakeVideoReader(frame_count=100, dimensions=(60, 40), frames=frames)
     thumbnails = np.full((3, 20, 30), -1.0)
 
     _read_thumbnails_streaming(
@@ -265,7 +240,7 @@ def test_read_thumbnails_streaming_grabs_gaps_and_skips_failed_decode():
 def test_read_thumbnails_seeking_seeks_each_candidate_and_skips_failed_decode():
     """Verifies that seeking positions to each candidate independently and leaves failed-decode rows untouched."""
     frames = {10: _solid_frame(70), 20: None}
-    reader = FakeVideoReader(frame_count=100, dimensions=(60, 40), frames=frames)
+    reader = _FakeVideoReader(frame_count=100, dimensions=(60, 40), frames=frames)
     thumbnails = np.full((2, 20, 30), -1.0)
 
     _read_thumbnails_seeking(
@@ -345,7 +320,7 @@ def test_cluster_and_pick_shrinks_oversized_batch_and_drops_empty_cluster(monkey
 # End-to-end tests for the frame-selection entry point _select_kmeans_frames
 def test_select_kmeans_frames_raises_when_resize_would_upsample():
     """Verifies a resize width wider than the frame would upsample, which DeepLabCut and this reader both reject."""
-    reader = FakeVideoReader(frame_count=100, dimensions=(20, 40), frames={})
+    reader = _FakeVideoReader(frame_count=100, dimensions=(20, 40), frames={})
     with pytest.raises(ValueError, match="must not upsample"):
         _select_kmeans_frames(
             video_reader=reader,
@@ -364,7 +339,7 @@ def test_select_kmeans_frames_raises_when_resize_would_upsample():
 
 def test_select_kmeans_frames_returns_all_candidates_below_cluster_count():
     """Verifies that with fewer candidates than clusters the reader returns them all without decoding any frame."""
-    reader = FakeVideoReader(frame_count=100, dimensions=(60, 40), frames={})
+    reader = _FakeVideoReader(frame_count=100, dimensions=(60, 40), frames={})
     result = _select_kmeans_frames(
         video_reader=reader,
         cluster_count=10,
@@ -388,7 +363,7 @@ def test_select_kmeans_frames_streams_dense_candidates():
     """Verifies that dense candidates take the streaming path and cluster down to at most the requested count."""
     rng = np.random.default_rng(0)
     frames = {index: rng.integers(0, 256, size=(40, 60, 3), dtype=np.uint8) for index in range(1, 8)}
-    reader = FakeVideoReader(frame_count=100, dimensions=(60, 40), frames=frames)
+    reader = _FakeVideoReader(frame_count=100, dimensions=(60, 40), frames=frames)
 
     result = _select_kmeans_frames(
         video_reader=reader,
@@ -404,7 +379,7 @@ def test_select_kmeans_frames_streams_dense_candidates():
         progress=lambda iterable: iterable,
     )
 
-    # A single seek marks the streaming path; the consecutive candidates never trigger a seek per frame.
+    # A single seek marks the streaming path. The consecutive candidates never trigger a seek per frame.
     assert reader.set_to_frame_calls == [1]
     assert isinstance(result, list)
     assert 1 <= len(result) <= 3
@@ -416,7 +391,7 @@ def test_select_kmeans_frames_seeks_sparse_candidates():
     """Verifies that sparse candidates take the seeking path, seeking once per candidate."""
     rng = np.random.default_rng(1)
     frames = {index: rng.integers(0, 256, size=(40, 60, 3), dtype=np.uint8) for index in (10, 900)}
-    reader = FakeVideoReader(frame_count=1000, dimensions=(60, 40), frames=frames)
+    reader = _FakeVideoReader(frame_count=1000, dimensions=(60, 40), frames=frames)
 
     result = _select_kmeans_frames(
         video_reader=reader,
@@ -437,3 +412,28 @@ def test_select_kmeans_frames_seeks_sparse_candidates():
     assert isinstance(result, list)
     assert 1 <= len(result) <= 2
     assert all(index in {10, 900} for index in result)
+
+
+def _solid_frame(value, *, height=40, width=60):
+    """Builds a uniform RGB frame whose grayscale thumbnail collapses to a single, predictable value."""
+    return np.full((height, width, 3), value, dtype=np.uint8)
+
+
+def _make_fake_kmeans(labels, recorder):
+    """Returns a MiniBatchKMeans replacement that records its constructor arguments and yields fixed cluster labels."""
+
+    class _FakeKMeans:
+        def __init__(self, *, n_clusters, tol, batch_size, max_iter):
+            recorder["n_clusters"] = n_clusters
+            recorder["tol"] = tol
+            recorder["batch_size"] = batch_size
+            recorder["max_iter"] = max_iter
+            self.labels_ = None
+
+        def fit(self, data):
+            recorder["fitted_shape"] = data.shape
+            recorder["fitted_data"] = np.array(data, copy=True)
+            self.labels_ = np.asarray(labels)
+            return self
+
+    return _FakeKMeans

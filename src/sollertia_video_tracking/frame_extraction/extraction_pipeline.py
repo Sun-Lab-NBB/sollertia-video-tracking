@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
 
 import cv2
-import pandas as pd
 import deeplabcut
 import deeplabcut.utils.frameselectiontools as frame_selection_tools
 
@@ -19,6 +18,7 @@ from .progress import make_progress_reporter
 from .utilities import (
     extracted_frame_paths,
     iter_pinned_extraction,
+    drop_collected_data_rows,
     normalize_project_config,
     select_registered_videos,
     ensure_unique_video_stems,
@@ -51,7 +51,7 @@ class FrameExtractionSummary:
     """The number of videos for which frames were freshly extracted."""
     cleared_frame_count: int
     """The number of unlabeled bootstrap frames removed across the selection by ``overwrite`` or ``reset`` before
-    re-extraction; zero when neither option was set."""
+    re-extraction. Zero when neither option was set."""
     total_video_count: int
     """The total number of videos considered in the run."""
     worker_count: int
@@ -105,11 +105,11 @@ def extract_frames_kmeans(
 ) -> FrameExtractionSummary:
     """Runs DeepLabCut k-means frame extraction across a project's videos in parallel and reports the outcome.
 
-    Reads the run parameters from the project's config.yaml, plans the CPU-core allocation, and clusters every
-    selected video in its own pinned worker process. ``numframes2pick`` is a per-video ceiling: each selected video is
-    topped up to it, so a not-yet-extracted video gains a full set while a partly-extracted one gains only the frames
-    that reach the ceiling, and a video already at the ceiling is skipped. ``overwrite`` and ``reset`` instead clear a
-    video's unlabeled bootstrap frames first so it is re-rolled from scratch, always preserving every human-labeled and
+    Reads the run parameters from the project's config.yaml, plans the CPU-core allocation, and clusters every selected
+    video in its own pinned worker process. ``numframes2pick`` is a per-video ceiling: each selected video is topped up
+    to it. A not-yet-extracted video gains a full set, while a partly-extracted one gains only the frames that reach the
+    ceiling, and a video already at the ceiling is skipped. ``overwrite`` and ``reset`` instead clear a video's
+    unlabeled bootstrap frames first so it is re-rolled from scratch, always preserving every human-labeled and
     outlier-extracted frame. Frame extraction is the bootstrap step that precedes outlier refinement, so a video already
     in refinement is off-limits: it is dropped from the candidate pool, and an explicit refined ``requested_videos``
     target is refused under ``overwrite``. A single bad video is recorded in the returned summary rather than aborting
@@ -118,36 +118,37 @@ def extract_frames_kmeans(
     When ``total_frame_budget`` is set, the run selects just enough videos to reach that project-wide frame total,
     preferring not-yet-extracted videos and falling back to below-ceiling ones, so coverage grows before existing videos
     are deepened. The full project's video set can be added once and repeated passes grow it toward the budget without
-    manual selection. When the existing frames already meet the budget, the run extracts nothing and warns; if even
+    manual selection. When the existing frames already meet the budget, the run extracts nothing and warns. If even
     topping every eligible video to the ceiling cannot reach the budget in one pass, the run reports the shortfall and
     raises rather than extracting a partial set.
 
     Notes:
         The pipeline uses the spawn multiprocessing start method on every platform for reproducible behavior, so a
-        programmatic caller must guard the call with ``if __name__ == "__main__":``. The installed console-script
-        entry point is already guarded. CPU-affinity pinning is applied on Linux and Windows; macOS exposes no
-        affinity API, so its workers run unpinned but still in parallel.
+        programmatic caller must guard the call with ``if __name__ == "__main__":``. The installed console-script entry
+        point is already guarded. CPU-affinity pinning is applied on Linux and Windows. macOS exposes no affinity API,
+        so its workers run unpinned but still in parallel.
 
         ``overwrite`` and ``reset`` remove only a video's bare bootstrap frames: the extracted images that carry no
         human label and belong to no outlier-refinement iteration. Frames the human has annotated (a finite
         ``CollectedData`` coordinate) and machine-labeled outlier frames are always kept, so re-rolling the diverse
         bootstrap set never disturbs labeling or outlier work. ``overwrite`` clears the videos this run selects to
-        process (refusing any already in outlier refinement), while ``reset`` clears every non-refined project video,
-        so the run re-rolls its whole selection or the whole project respectively. The video subset is drawn fresh each
-        run, and
-        k-means picks the frames within a video, so a re-rolled selection differs each run. To reproduce a specific
-        selection, name the videos explicitly with ``requested_videos``. To instead discard a video's labels and start
-        its ``labeled-data`` directory over from scratch, use ``purge_labeled_data``.
+        process (refusing any already in outlier refinement), while ``reset`` clears every non-refined project video, so
+        the run re-rolls its whole selection or the whole project respectively. The video subset is drawn fresh each
+        run, and k-means picks the frames within a video, so a re-rolled selection differs each run. To reproduce a
+        specific selection, name the videos explicitly with ``requested_videos``. To instead discard a video's labels
+        and start its ``labeled-data`` directory over from scratch, use ``purge_labeled_data``.
 
         Empty ``labeled-data`` directories left by videos that were registered but never extracted are removed after
         every run, so the labeling GUI shows only the videos that have frames.
 
     Args:
         config_path: The path to the DeepLabCut project's config.yaml.
-        clustering_stride: The clustering stride passed to DeepLabCut as ``cluster_step``; every Nth frame is sampled,
+        clustering_stride: The clustering stride passed to DeepLabCut as ``cluster_step``. Every Nth frame is sampled,
             where N is this stride.
         worker_count: The number of videos to decode in parallel. Set to -1 to fill the usable cores automatically.
-        cores_per_worker: The number of CPU cores pinned to each worker. Set to -1 to spread the usable cores evenly.
+        cores_per_worker: The number of CPU cores pinned to each worker. Set to -1 to give each worker a saturating
+            core block when the worker count is automatic, or to split the usable cores evenly across an explicit
+            worker count.
         reserved_core_count: The number of CPU cores to leave free for other tasks.
         frames_per_video: The per-video frame ceiling, overriding ``numframes2pick`` in config.yaml. Each selected
             video is topped up to this many frames. Set to -1 to use the value already stored in the configuration file.
@@ -197,7 +198,8 @@ def extract_frames_kmeans(
             ``video_sets``, or when an exclusive run's requested videos match no eligible registered project video.
             Raised when a budgeted run cannot reach ``total_frame_budget`` in one pass even after topping every eligible
             video to its ceiling. Raised when two selected videos share a file-name stem and would collide in the
-            labeled-data tree.
+            labeled-data tree. Raised when an explicit ``worker_count`` or ``cores_per_worker``, or their product, needs
+            more cores than remain usable after reserving ``reserved_core_count``.
     """
     config_path = config_path.resolve()
     if overwrite and reset:
@@ -244,10 +246,11 @@ def extract_frames_kmeans(
     project_directory_path = config_path.parent
     labeled_data_directory = project_directory_path / "labeled-data"
 
-    # The requested videos are matched against the registered project videos whenever they are honored: as
-    # always-included pins over the full project pool in budgeted mode, as the whole set with exclusive, or as the
-    # explicit targets otherwise. Without a budget and without exclusive or overwrite, --videos is ignored (warned
-    # below), so matching it there would only emit a misleading per-video warning.
+    # The requested videos are matched against the registered project videos whenever the match is used. The match
+    # serves as always-included pins over the full project pool in budgeted mode, as the whole set with exclusive, or to
+    # drive the unregistered warning and the in-refinement refusal under overwrite. Overwrite does not let --videos
+    # steer the selection, as an unbudgeted non-exclusive run always tops up every below-ceiling video (warned below),
+    # so matching outside these three cases would only emit a misleading per-video warning.
     requested_matched: list[str] = []
     if requested_videos and (exclusive or overwrite or total_frame_budget != -1):
         matched_videos, unmatched_videos = select_registered_videos(
@@ -292,11 +295,11 @@ def extract_frames_kmeans(
     # Exclusive tops up the requested videos directly, so they are not pins. In every other mode they are the pins the
     # budgeted draw always includes first.
     pinned_videos: tuple[str, ...] = () if exclusive else tuple(requested_matched)
-    # Two videos that share a stem would map to one labeled-data directory, so their frame counts and writes collide;
-    # this is checked before sampling, whose per-video accounting reads those same stem-keyed directories.
+    # Two videos that share a stem would map to one labeled-data directory, so their frame counts and writes collide.
+    # This is checked before sampling, whose per-video accounting reads those same stem-keyed directories.
     ensure_unique_video_stems(videos=videos, error_context="Unable to extract frames.")
 
-    # numframes2pick is the per-video ceiling every selected video is topped up to; it is resolved once here and used
+    # numframes2pick is the per-video ceiling every selected video is topped up to. It is resolved once here and used
     # both to size the budgeted selection and to derive each worker's per-video pick count.
     frames_per_video_count = configuration.get("numframes2pick")
     if not isinstance(frames_per_video_count, int) or frames_per_video_count < 1:
@@ -390,7 +393,7 @@ def extract_frames_kmeans(
     elif exclusive:
         selected_videos = list(videos)
     else:
-        # Unbudgeted: top up every below-ceiling candidate video to its per-video ceiling.
+        # Unbudgeted: tops up every below-ceiling candidate video to its per-video ceiling.
         selected_videos = [video for video in videos if extracted_counts.get(video, 0) < frames_per_video_count]
 
     # Overwrite re-rolls the whole selected set: each selected video's unlabeled frames are cleared here, after the
@@ -443,11 +446,11 @@ def extract_frames_kmeans(
             config_path=config_path,
         )
 
-    # Crop the extracted frames to each video's configured region only when the project is set to crop, so extraction
+    # Crops the extracted frames to each video's configured region only when the project is set to crop, so extraction
     # honors the same project-wide cropping toggle inference and outlier extraction do.
     crop_frames = bool(configuration.get("cropping", False))
 
-    # Decode one video per worker, pinned to a disjoint core block, streaming progress to the shared aggregate bar.
+    # Decodes one video per worker, pinned to a disjoint core block, streaming progress to the shared aggregate bar.
     def build_tasks(reporting_queue: Any | None) -> list[tuple[Any, ...]]:
         """Packs one work item per selected video, embedding the progress queue only when progress is displayed."""
         return [
@@ -665,37 +668,8 @@ def _clear_bare_frames_in_directory(*, directory: Path, scorer: str) -> int:
         # A bare frame never has an overlay, but --save-labeled overlays from any earlier run are dropped defensively.
         (directory / f"{Path(frame_name).stem}labeled.png").unlink(missing_ok=True)
     if bare_frame_names:
-        _drop_collected_data_rows(collected_data_path=collected_data_path, removed_frame_names=bare_frame_names)
+        drop_collected_data_rows(collected_data_path=collected_data_path, removed_frame_names=bare_frame_names)
     return len(bare_frame_names)
-
-
-def _drop_collected_data_rows(*, collected_data_path: Path, removed_frame_names: set[str]) -> None:
-    """Drops any placeholder label rows for cleared bare frames from a video's ``CollectedData`` tables.
-
-    The labeling GUI reindexes ``CollectedData`` to every image in the directory, so a cleared bare frame may leave
-    behind an all-NaN row referencing the deleted image. Those rows are removed here so no label dangles; when that
-    empties the table, its ``.h5`` and ``.csv`` files are deleted outright. Only bare (unlabeled) frames are ever
-    passed in, so no finite human label is dropped.
-
-    Args:
-        collected_data_path: The ``CollectedData_<scorer>.h5`` file to prune, alongside its ``.csv`` sibling.
-        removed_frame_names: The frame image names that were cleared and must not remain in the label tables.
-    """
-    if not collected_data_path.is_file():
-        return
-    labels = pd.read_hdf(collected_data_path, "df_with_missing")
-    row_frame_names = [entry[-1] if isinstance(entry, tuple) else Path(str(entry)).name for entry in labels.index]
-    keep_row_mask = [frame_name not in removed_frame_names for frame_name in row_frame_names]
-    if all(keep_row_mask):
-        return
-    remaining_labels = labels[keep_row_mask]
-    collected_data_csv_path = collected_data_path.with_suffix(".csv")
-    if remaining_labels.empty:
-        collected_data_path.unlink(missing_ok=True)
-        collected_data_csv_path.unlink(missing_ok=True)
-        return
-    remaining_labels.to_hdf(collected_data_path, key="df_with_missing", mode="w")
-    remaining_labels.to_csv(collected_data_csv_path)
 
 
 def _count_clustering_frames(
@@ -710,7 +684,7 @@ def _count_clustering_frames(
         videos: The ordered list of video paths to inspect.
         start_fraction: The fractional start position within each video, in the range [0, 1].
         stop_fraction: The fractional stop position within each video, in the range [0, 1].
-        clustering_stride: The sampling stride; every ``clustering_stride``-th frame is clustered.
+        clustering_stride: The sampling stride. Every ``clustering_stride``-th frame is clustered.
 
     Returns:
         A mapping of video index to the number of frames that video contributes to the aggregate total.

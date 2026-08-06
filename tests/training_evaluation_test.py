@@ -20,7 +20,7 @@ from deeplabcut.core.metrics.matching import PotentialMatch
 from deeplabcut.pose_estimation_pytorch.data import PoseDatasetParameters
 from deeplabcut.pose_estimation_pytorch.task import Task
 
-from sollertia_video_tracking.training import evaluation as ev
+from sollertia_video_tracking.training import evaluation
 from sollertia_video_tracking.training.evaluation import (
     EvaluationSummary,
     _SplitMetrics,
@@ -31,32 +31,12 @@ from sollertia_video_tracking.training.evaluation import (
     evaluate_trained_model,
     _derive_relative_image_path,
     _surviving_individual_indices,
-    _resolve_evaluation_batch_size,
+    resolve_evaluation_batch_size,
     _realign_memory_replay_parameters,
 )
 
 
-def _raising_stub(exception: Exception):
-    """Builds a stub that raises the given exception, mimicking a DeepLabCut handoff that fails."""
-
-    def _stub(*args, **kwargs):
-        raise exception
-
-    return _stub
-
-
 # _SplitMetrics and EvaluationSummary dataclasses
-def _make_split_metrics(rmse_px: float) -> _SplitMetrics:
-    return _SplitMetrics(
-        images=3,
-        rmse_px=rmse_px,
-        rmse_pcutoff_px=rmse_px - 0.5,
-        map=80.0,
-        mar=70.0,
-        unmatched_images=0,
-    )
-
-
 def test_split_metrics_fields() -> None:
     """Verifies that the metrics dataclass stores each canonical value verbatim."""
     metrics = _SplitMetrics(images=5, rmse_px=2.0, rmse_pcutoff_px=1.5, map=90.0, mar=88.0, unmatched_images=1)
@@ -129,13 +109,6 @@ def test_surviving_individual_indices_drops_fully_occluded() -> None:
 
 
 # _matched_individual
-def _prepared_ground_truth() -> np.ndarray:
-    return np.array(
-        [[[10.0, 10.0, 2.0], [20.0, 20.0, 2.0]], [[30.0, 30.0, 2.0], [40.0, 40.0, 2.0]]],
-        dtype=np.float32,
-    )
-
-
 def test_matched_individual_names_the_matched_row() -> None:
     """Verifies that a matched prediction whose ground truth equals a prepared row is named by its individual."""
     prepared = _prepared_ground_truth()
@@ -215,7 +188,7 @@ def test_rank_worst_keypoints_sorts_and_truncates() -> None:
         # index 7 has no metric entry -> skipped
     }
     bodyparts = ["b0", "b1", "b2", "b3", "b4", "b5", "b6", "b7"]
-    ranked = _rank_worst_keypoints(metrics, bodyparts)
+    ranked = _rank_worst_keypoints(metrics=metrics, bodyparts=bodyparts)
     assert [entry["bodypart"] for entry in ranked] == ["b1", "b6", "b4", "b3", "b5"]
     assert ranked[0]["rmse_px"] == 9.0
     assert len(ranked) == 5  # six valid keypoints truncated to five
@@ -223,38 +196,34 @@ def test_rank_worst_keypoints_sorts_and_truncates() -> None:
 
 def test_rank_worst_keypoints_empty_when_no_metrics() -> None:
     """Verifies that with no per-keypoint metrics the ranking is empty."""
-    assert _rank_worst_keypoints({}, ["only"]) == []
+    assert _rank_worst_keypoints(metrics={}, bodyparts=["only"]) == []
 
 
-# _resolve_evaluation_batch_size
-def _loader_with_images(images_by_split: dict[str, list[dict[str, int | None]]]) -> SimpleNamespace:
-    return SimpleNamespace(load_data=lambda split: {"images": images_by_split[split]})
-
-
+# resolve_evaluation_batch_size
 def test_resolve_batch_size_one_is_kept() -> None:
     """Verifies that a requested size of one short-circuits without inspecting any frame."""
     loader = _loader_with_images({"train": [], "test": []})
-    assert _resolve_evaluation_batch_size(loader, 1) == 1
+    assert resolve_evaluation_batch_size(loader=loader, requested=1) == 1
 
 
 def test_resolve_batch_size_uniform_resolution_keeps_request() -> None:
     """Verifies that when every frame shares one native resolution the requested batch size is kept."""
     uniform = {"train": [{"height": 100, "width": 200}], "test": [{"height": 100, "width": 200}]}
-    assert _resolve_evaluation_batch_size(_loader_with_images(uniform), 8) == 8
+    assert resolve_evaluation_batch_size(loader=_loader_with_images(uniform), requested=8) == 8
 
 
 def test_resolve_batch_size_multiple_resolutions_falls_to_one(caplog: pytest.LogCaptureFixture) -> None:
     """Verifies that frames spanning more than one resolution cannot be stacked, so the batch size drops to one."""
     multi = {"train": [{"height": 100, "width": 200}], "test": [{"height": 50, "width": 60}]}
     with caplog.at_level("INFO"):
-        assert _resolve_evaluation_batch_size(_loader_with_images(multi), 8) == 1
+        assert resolve_evaluation_batch_size(loader=_loader_with_images(multi), requested=8) == 1
     assert "multiple resolutions" in caplog.text
 
 
 def test_resolve_batch_size_missing_dimension_falls_to_one() -> None:
     """Verifies that a frame whose header lacks a dimension is treated as unbatchable, so batch size drops to one."""
     missing = {"train": [{"height": None, "width": 200}], "test": []}
-    assert _resolve_evaluation_batch_size(_loader_with_images(missing), 8) == 1
+    assert resolve_evaluation_batch_size(loader=_loader_with_images(missing), requested=8) == 1
 
 
 # _resolve_snapshot
@@ -262,7 +231,7 @@ def test_resolve_snapshot_returns_first(monkeypatch: pytest.MonkeyPatch) -> None
     """Verifies that the first snapshot returned by DeepLabCut is the resolved one."""
     loader = SimpleNamespace(model_folder="/m")
     monkeypatch.setattr(
-        ev,
+        evaluation,
         "get_model_snapshots",
         lambda **kwargs: [SimpleNamespace(path=Path("/m/snapshot-100.pt")), "ignored"],
     )
@@ -280,14 +249,14 @@ def test_resolve_snapshot_best_falls_back_to_last(monkeypatch: pytest.MonkeyPatc
             raise ValueError(message)
         return [SimpleNamespace(path=Path("/m/snapshot-last.pt"))]
 
-    monkeypatch.setattr(ev, "get_model_snapshots", fake)
+    monkeypatch.setattr(evaluation, "get_model_snapshots", fake)
     assert _resolve_snapshot(loader, index="best", task=Task.BOTTOM_UP).path.stem == "snapshot-last"
 
 
 def test_resolve_snapshot_best_all_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies that when both the best and last lookups fail and a snapshot is required, a ValueError is raised."""
     loader = SimpleNamespace(model_folder="/m")
-    monkeypatch.setattr(ev, "get_model_snapshots", _raising_stub(IndexError("no snapshots")))
+    monkeypatch.setattr(evaluation, "get_model_snapshots", _raising_stub(IndexError("no snapshots")))
     with pytest.raises(ValueError, match="Unable to resolve"):
         _resolve_snapshot(loader, index="best", task=Task.DETECT)
 
@@ -295,14 +264,14 @@ def test_resolve_snapshot_best_all_missing_raises(monkeypatch: pytest.MonkeyPatc
 def test_resolve_snapshot_best_all_missing_optional_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies that an absent optional best snapshot resolves to None rather than raising."""
     loader = SimpleNamespace(model_folder="/m")
-    monkeypatch.setattr(ev, "get_model_snapshots", _raising_stub(ValueError("none")))
+    monkeypatch.setattr(evaluation, "get_model_snapshots", _raising_stub(ValueError("none")))
     assert _resolve_snapshot(loader, index="best", task=Task.DETECT, required=False) is None
 
 
 def test_resolve_snapshot_int_index_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies that a missing integer-indexed snapshot raises without attempting the best-snapshot fallback."""
     loader = SimpleNamespace(model_folder="/m")
-    monkeypatch.setattr(ev, "get_model_snapshots", _raising_stub(ValueError("bad index")))
+    monkeypatch.setattr(evaluation, "get_model_snapshots", _raising_stub(ValueError("bad index")))
     with pytest.raises(ValueError, match="Unable to resolve"):
         _resolve_snapshot(loader, index=5, task=Task.BOTTOM_UP)
 
@@ -310,35 +279,27 @@ def test_resolve_snapshot_int_index_missing_raises(monkeypatch: pytest.MonkeyPat
 def test_resolve_snapshot_int_index_missing_optional_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies that a missing optional integer-indexed snapshot resolves to None."""
     loader = SimpleNamespace(model_folder="/m")
-    monkeypatch.setattr(ev, "get_model_snapshots", _raising_stub(IndexError("none")))
+    monkeypatch.setattr(evaluation, "get_model_snapshots", _raising_stub(IndexError("none")))
     assert _resolve_snapshot(loader, index=3, task=Task.BOTTOM_UP, required=False) is None
 
 
 # _realign_memory_replay_parameters
-def _params(bodyparts: list[str], unique: list[str], individuals: list[str]) -> PoseDatasetParameters:
-    return PoseDatasetParameters(bodyparts=bodyparts, unique_bpts=unique, individuals=individuals)
-
-
-def _loader_with_weight_init(weight_init: dict | None, project_cfg: dict | None = None) -> SimpleNamespace:
-    return SimpleNamespace(model_cfg={"train_settings": {"weight_init": weight_init}}, project_cfg=project_cfg or {})
-
-
 def test_realign_no_weight_init_returns_unchanged() -> None:
     """Verifies that without a weight-initialization config the parameters are returned unchanged."""
-    params = _params(["a", "b", "c"], ["u"], ["single"])
-    assert _realign_memory_replay_parameters(_loader_with_weight_init(None), params) is params
+    params = _params(bodyparts=["a", "b", "c"], unique=["u"], individuals=["single"])
+    assert _realign_memory_replay_parameters(loader=_loader_with_weight_init(None), parameters=params) is params
 
 
 def test_realign_non_memory_replay_returns_unchanged() -> None:
     """Verifies that a weight-init config that is not memory replay leaves the parameters unchanged."""
-    params = _params(["a", "b", "c"], ["u"], ["single"])
+    params = _params(bodyparts=["a", "b", "c"], unique=["u"], individuals=["single"])
     weight_init = {"snapshot_path": "x", "with_decoder": False, "memory_replay": False}
-    assert _realign_memory_replay_parameters(_loader_with_weight_init(weight_init), params) is params
+    assert _realign_memory_replay_parameters(loader=_loader_with_weight_init(weight_init), parameters=params) is params
 
 
 def test_realign_memory_replay_uses_weight_init_bodyparts() -> None:
     """Verifies that a memory-replay config with explicit bodyparts rebuilds the parameters in that bodypart space."""
-    params = _params(["full0", "full1", "full2"], ["u"], ["single"])
+    params = _params(bodyparts=["full0", "full1", "full2"], unique=["u"], individuals=["single"])
     weight_init = {
         "snapshot_path": "x",
         "with_decoder": True,
@@ -346,7 +307,7 @@ def test_realign_memory_replay_uses_weight_init_bodyparts() -> None:
         "bodyparts": ["proj_a", "proj_b"],
         "conversion_array": [0, 1],
     }
-    realigned = _realign_memory_replay_parameters(_loader_with_weight_init(weight_init), params)
+    realigned = _realign_memory_replay_parameters(loader=_loader_with_weight_init(weight_init), parameters=params)
     assert realigned.bodyparts == ["proj_a", "proj_b"]
     assert realigned.unique_bpts == ["u"]  # unique and individuals carried through
     assert realigned.individuals == ["single"]
@@ -354,18 +315,17 @@ def test_realign_memory_replay_uses_weight_init_bodyparts() -> None:
 
 def test_realign_memory_replay_without_bodyparts_reads_project(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies that a memory-replay config with no bodyparts falls back to the project configuration's bodyparts."""
-    params = _params(["full0", "full1", "full2"], ["u"], ["single"])
+    params = _params(bodyparts=["full0", "full1", "full2"], unique=["u"], individuals=["single"])
     weight_init = {"snapshot_path": "x", "with_decoder": True, "memory_replay": True, "conversion_array": [0, 1, 2]}
-    monkeypatch.setattr(ev.auxiliaryfunctions, "get_bodyparts", lambda _cfg: ["proj0", "proj1"])
-    realigned = _realign_memory_replay_parameters(_loader_with_weight_init(weight_init, {"k": 1}), params)
+    monkeypatch.setattr(evaluation.auxiliaryfunctions, "get_bodyparts", lambda _cfg: ["proj0", "proj1"])
+    realigned = _realign_memory_replay_parameters(
+        loader=_loader_with_weight_init(weight_init=weight_init, project_cfg={"k": 1}),
+        parameters=params,
+    )
     assert realigned.bodyparts == ["proj0", "proj1"]
 
 
 # _accumulate_split_rows
-def _empty_columns() -> dict[str, list]:
-    return {name: [] for name in ev._FEATHER_SCHEMA}
-
-
 def test_accumulate_single_animal_matched_and_skips_missing() -> None:
     """Verifies that single-animal rows are matched with real DeepLabCut routines and absent images are skipped."""
     image = "/proj/labeled-data/vid/img0.png"
@@ -426,13 +386,13 @@ def test_accumulate_multi_animal_matched_and_unmatched(monkeypatch: pytest.Monke
     predictions = np.array(
         [[[11.0, 10.0, 0.9], [19.0, 21.0, 0.8]], [[31.0, 30.0, 0.5], [41.0, 40.0, 0.4]]], dtype=np.float32
     )
-    # Control preparation and matching so the greedy multi-animal matcher does not need real assembly construction.
-    # prepare_evaluation_data is called per image as {image: array}, so return that image's ground truth as the
-    # prepared array that _matched_individual locates match.gt within.
-    monkeypatch.setattr(ev, "prepare_evaluation_data", lambda **kwargs: [(kwargs["ground_truth"][image], None)])
+    # Controls preparation and matching so the greedy multi-animal matcher needs no real assembly construction.
+    # prepare_evaluation_data is called per image as {image: array}, so the stub returns that image's ground truth as
+    # the prepared array _matched_individual locates match.gt within.
+    monkeypatch.setattr(evaluation, "prepare_evaluation_data", lambda **kwargs: [(kwargs["ground_truth"][image], None)])
     matched = PotentialMatch(pose=predictions[0], score=0.85, gt=ground_truth[0], oks=0.8)
     unmatched = PotentialMatch(pose=predictions[1], score=0.45, gt=None, oks=0.0)
-    monkeypatch.setattr(ev, "match_predictions_for_rmse", lambda **kwargs: [matched, unmatched])
+    monkeypatch.setattr(evaluation, "match_predictions_for_rmse", lambda **kwargs: [matched, unmatched])
 
     columns = _empty_columns()
     unmatched_count = _accumulate_split_rows(
@@ -481,8 +441,267 @@ def test_accumulate_skips_image_missing_prediction_key() -> None:
 
 
 # evaluate_trained_model orchestration
+def test_evaluate_trained_model_bottom_up_single_animal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Verifies that a bottom-up single-animal run writes the feather and provenance sidecar and reports both errors."""
+    image_train = "/proj/labeled-data/vid/train0.png"
+    image_test = "/proj/labeled-data/vid/test0.png"
+    gt = np.array([[[10.0, 10.0, 2.0], [20.0, 20.0, 2.0]]], dtype=np.float32)
+    prediction = np.array([[[11.0, 10.0, 0.9], [19.0, 21.0, 0.8]]], dtype=np.float32)
+    params = _params(bodyparts=["nose", "tail"], unique=[], individuals=["single"])
+    loader = _FakeLoader(
+        project_cfg={"pcutoff": 0.55},
+        pose_task=Task.BOTTOM_UP,
+        model_cfg={"metadata": {"with_identity": False}, "train_settings": {}, "detector": None},
+        model_folder=str(tmp_path / "model"),
+        evaluation_folder=str(tmp_path / "eval"),
+        params=params,
+        images={"train": [image_train], "test": [image_test]},
+        ground_truth={"train": {image_train: gt}, "test": {image_test: gt}},
+    )
+
+    def evaluate_function(**kwargs):
+        image = image_train if kwargs["mode"] == "train" else image_test
+        rmse = 3.0 if kwargs["mode"] == "train" else 5.0
+        metrics = {
+            "rmse": rmse,
+            "rmse_pcutoff": rmse - 0.5,
+            "mAP": 80.0,
+            "mAR": 70.0,
+            "rmse_keypoint_0": 4.0,
+            "rmse_keypoint_1": 6.0,
+        }
+        return metrics, {image: {"bodyparts": prediction}}
+
+    _install_common_stubs(monkeypatch=monkeypatch, loader=loader, evaluate_function=evaluate_function)
+
+    summary = evaluate_trained_model(tmp_path / "config.yaml")
+
+    assert summary.snapshot == "snapshot-100"
+    assert summary.pcutoff == pytest.approx(0.55)  # cutoff resolved from the project configuration
+    assert summary.train.rmse_px == pytest.approx(3.0)
+    assert summary.test.rmse_px == pytest.approx(5.0)
+    assert summary.generalization_gap_px == pytest.approx(2.0)
+    assert summary.feather_path.exists()
+    assert summary.provenance_path.exists()
+
+    frame = pl.read_ipc(summary.feather_path)
+    assert set(frame.columns) == set(evaluation._FEATHER_SCHEMA)
+    assert frame.height == 4  # two splits x one image x two bodyparts
+    # Every row is the single individual and matched, and the nose prediction sits 1px from its label.
+    assert frame["individual"].unique().to_list() == ["single"]
+    assert frame["matched"].to_list() == [True, True, True, True]
+    assert frame["snapshot"].unique().to_list() == ["snapshot-100"]
+    assert frame["split"].to_list() == ["train", "train", "test", "test"]
+    nose = frame.filter(pl.col("bodypart") == "nose")
+    assert nose["pred_x"].to_list() == pytest.approx([11.0, 11.0])
+    assert nose["gt_x"].to_list() == pytest.approx([10.0, 10.0])
+    assert nose["error_px"].to_list() == pytest.approx([1.0, 1.0])
+    # Likelihoods 0.9 (nose) and 0.8 (tail) both clear the 0.55 cutoff resolved from the project config.
+    assert frame["above_pcutoff"].to_list() == [True, True, True, True]
+    assert all(np.isnan(oks) for oks in frame["oks"].to_list())  # single-animal RMSE matches carry no OKS
+
+    record = YAML().load(summary.provenance_path.read_text(encoding="utf-8"))
+    assert record["engine"] == "pytorch"
+    assert record["snapshot"] == "snapshot-100"
+    assert record["shuffle"] == 1
+    assert record["train_fraction"] == pytest.approx(0.95)
+    assert record["single_animal"] is True
+    assert record["detector_snapshot"] is None  # a bottom-up run has no detector
+    assert record["pcutoff"] == pytest.approx(0.55)
+    assert list(record["bodyparts"]) == ["nose", "tail"]
+    assert list(record["individuals"]) == ["single"]
+    assert record["feather"] == "snapshot-100_evaluation.feather"
+    assert record["deeplabcut_version"] == evaluation.deeplabcut.__version__
+    assert record["metrics"]["train"]["rmse_px"] == pytest.approx(3.0)
+    assert record["metrics"]["test"]["rmse_px"] == pytest.approx(5.0)
+    assert record["metrics"]["train"]["images"] == 1
+    assert record["metrics"]["test"]["unmatched_images"] == 0
+    assert record["generalization_gap_px"] == pytest.approx(2.0)
+    # worst_keypoints ranks the test per-keypoint RMSE, tail (6.0) ahead of nose (4.0).
+    assert [entry["bodypart"] for entry in record["worst_keypoints"]] == ["tail", "nose"]
+    assert record["worst_keypoints"][0]["rmse_px"] == pytest.approx(6.0)
+
+
+def test_evaluate_trained_model_top_down_detector_and_unique(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Verifies that a top-down run with a detector, unique bodyparts, and an explicit cutoff scores every head."""
+    image_train = "/proj/labeled-data/vid/train0.png"
+    image_test = "/proj/labeled-data/vid/test0.png"
+    gt = np.array([[[10.0, 10.0, 2.0], [20.0, 20.0, 2.0]]], dtype=np.float32)
+    prediction = np.array([[[11.0, 10.0, 0.9], [19.0, 21.0, 0.8]]], dtype=np.float32)
+    unique_gt = np.array([[[5.0, 5.0, 2.0]]], dtype=np.float32)
+    unique_prediction = np.array([[[6.0, 5.0, 0.7]]], dtype=np.float32)
+    params = _params(bodyparts=["nose", "tail"], unique=["led"], individuals=["single"])
+    loader = _FakeLoader(
+        project_cfg={"pcutoff": 0.6},
+        pose_task=Task.TOP_DOWN,
+        model_cfg={"metadata": {"with_identity": False}, "train_settings": {}, "detector": {"type": "ssd"}},
+        model_folder=str(tmp_path / "model"),
+        evaluation_folder=str(tmp_path / "eval"),
+        params=params,
+        images={"train": [image_train], "test": [image_test]},
+        ground_truth={"train": {image_train: gt}, "test": {image_test: gt}},
+        unique_ground_truth={"train": {image_train: unique_gt}, "test": {image_test: unique_gt}},
+    )
+
+    def evaluate_function(**kwargs):
+        image = image_train if kwargs["mode"] == "train" else image_test
+        metrics = {"rmse": 3.0, "rmse_pcutoff": 2.5, "mAP": 80.0, "mAR": 70.0, "rmse_keypoint_0": 4.0}
+        predictions = {image: {"bodyparts": prediction, "unique_bodyparts": unique_prediction}}
+        return metrics, predictions
+
+    _install_common_stubs(monkeypatch=monkeypatch, loader=loader, evaluate_function=evaluate_function)
+
+    summary = evaluate_trained_model(
+        str(tmp_path / "config.yaml"),
+        confidence_cutoff=0.4,
+        write_provenance=True,
+    )
+
+    assert summary.pcutoff == pytest.approx(0.4)  # explicit cutoff overrides the project value
+    frame = pl.read_ipc(summary.feather_path)
+    # Two splits, one image each, two main bodyparts + one unique bodypart -> six rows.
+    assert frame.height == 6
+    led = frame.filter(pl.col("bodypart") == "led")
+    assert led.height == 2  # one unique-head row per split
+    assert led["individual"].unique().to_list() == ["unique"]  # unique bodyparts are labeled "unique"
+    assert led["pred_x"].to_list() == pytest.approx([6.0, 6.0])
+    assert led["gt_x"].to_list() == pytest.approx([5.0, 5.0])
+    assert led["error_px"].to_list() == pytest.approx([1.0, 1.0])  # (6, 5) is 1px from the (5, 5) label
+
+    record = YAML().load(summary.provenance_path.read_text(encoding="utf-8"))
+    assert record["detector_snapshot"] == "snapshot-detector-050"  # the detector snapshot is recorded
+    assert list(record["bodyparts"]) == ["nose", "tail"]  # the unique head is not part of the pose bodyparts
+    assert list(record["individuals"]) == ["single"]
+    assert record["pcutoff"] == pytest.approx(0.4)
+    # Only rmse_keypoint_0 (nose) is present in the test metrics, so it is the lone ranked keypoint.
+    assert [entry["bodypart"] for entry in record["worst_keypoints"]] == ["nose"]
+
+
+def test_evaluate_trained_model_provenance_failure_removes_feather(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Verifies that when the provenance sidecar cannot be written, the feather is removed and OSError propagates."""
+    image_train = "/proj/labeled-data/vid/train0.png"
+    image_test = "/proj/labeled-data/vid/test0.png"
+    gt = np.array([[[10.0, 10.0, 2.0], [20.0, 20.0, 2.0]]], dtype=np.float32)
+    prediction = np.array([[[11.0, 10.0, 0.9], [19.0, 21.0, 0.8]]], dtype=np.float32)
+    params = _params(bodyparts=["nose", "tail"], unique=[], individuals=["single"])
+    loader = _FakeLoader(
+        project_cfg={"pcutoff": 0.6},
+        pose_task=Task.BOTTOM_UP,
+        model_cfg={"metadata": {"with_identity": False}, "train_settings": {}, "detector": None},
+        model_folder=str(tmp_path / "model"),
+        evaluation_folder=str(tmp_path / "eval"),
+        params=params,
+        images={"train": [image_train], "test": [image_test]},
+        ground_truth={"train": {image_train: gt}, "test": {image_test: gt}},
+    )
+
+    def evaluate_function(**kwargs):
+        image = image_train if kwargs["mode"] == "train" else image_test
+        metrics = {"rmse": 3.0, "rmse_pcutoff": 2.5, "mAP": 80.0, "mAR": 70.0, "rmse_keypoint_0": 4.0}
+        return metrics, {image: {"bodyparts": prediction}}
+
+    _install_common_stubs(monkeypatch=monkeypatch, loader=loader, evaluate_function=evaluate_function)
+
+    monkeypatch.setattr(evaluation, "_write_provenance", _raising_stub(OSError("disk full")))
+
+    feather_path = tmp_path / "eval" / "snapshot-100_evaluation.feather"
+    with pytest.raises(OSError, match="disk full"):
+        evaluate_trained_model(tmp_path / "config.yaml")
+    assert not feather_path.exists()  # the feather written earlier is removed so no sidecar-less feather survives
+
+
+def test_evaluate_trained_model_reduces_batch_for_multi_resolution(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Verifies that a requested batch larger than one is reduced when labeled frames span multiple resolutions."""
+    image_train = "/proj/labeled-data/vid/train0.png"
+    image_test = "/proj/labeled-data/vid/test0.png"
+    gt = np.array([[[10.0, 10.0, 2.0], [20.0, 20.0, 2.0]]], dtype=np.float32)
+    prediction = np.array([[[11.0, 10.0, 0.9], [19.0, 21.0, 0.8]]], dtype=np.float32)
+    params = _params(bodyparts=["nose", "tail"], unique=[], individuals=["single"])
+    loader = _FakeLoader(
+        project_cfg={"pcutoff": 0.6},
+        pose_task=Task.BOTTOM_UP,
+        model_cfg={"metadata": {"with_identity": False}, "train_settings": {}, "detector": None},
+        model_folder=str(tmp_path / "model"),
+        evaluation_folder=str(tmp_path / "eval"),
+        params=params,
+        images={"train": [image_train], "test": [image_test]},
+        ground_truth={"train": {image_train: gt}, "test": {image_test: gt}},
+        data={
+            "train": {"images": [{"height": 100, "width": 200}]},
+            "test": {"images": [{"height": 50, "width": 60}]},
+        },
+    )
+
+    recorded_batch = {}
+
+    def evaluate_function(**kwargs):
+        image = image_train if kwargs["mode"] == "train" else image_test
+        metrics = {"rmse": 3.0, "rmse_pcutoff": 2.5, "mAP": 80.0, "mAR": 70.0, "rmse_keypoint_0": 4.0}
+        return metrics, {image: {"bodyparts": prediction}}
+
+    def capture_runners(**kwargs):
+        recorded_batch["batch_size"] = kwargs["batch_size"]
+        return ("pose_runner", "detector_runner")
+
+    _install_common_stubs(monkeypatch=monkeypatch, loader=loader, evaluate_function=evaluate_function)
+    monkeypatch.setattr(evaluation, "get_inference_runners", capture_runners)
+
+    summary = evaluate_trained_model(tmp_path / "config.yaml", batch_size=8, write_provenance=False)
+
+    assert recorded_batch["batch_size"] == 1  # multi-resolution frames force a batch size of one
+    assert summary.feather_path.exists()
+    assert not summary.provenance_path.exists()  # provenance was not requested
+
+
+def _raising_stub(exception: Exception):
+    """Builds a stub that raises the given exception, mimicking a DeepLabCut handoff that fails."""
+
+    def _stub(*args, **kwargs):
+        raise exception
+
+    return _stub
+
+
+def _make_split_metrics(rmse_px: float) -> _SplitMetrics:
+    return _SplitMetrics(
+        images=3,
+        rmse_px=rmse_px,
+        rmse_pcutoff_px=rmse_px - 0.5,
+        map=80.0,
+        mar=70.0,
+        unmatched_images=0,
+    )
+
+
+def _prepared_ground_truth() -> np.ndarray:
+    return np.array(
+        [[[10.0, 10.0, 2.0], [20.0, 20.0, 2.0]], [[30.0, 30.0, 2.0], [40.0, 40.0, 2.0]]],
+        dtype=np.float32,
+    )
+
+
+def _loader_with_images(images_by_split: dict[str, list[dict[str, int | None]]]) -> SimpleNamespace:
+    return SimpleNamespace(load_data=lambda split: {"images": images_by_split[split]})
+
+
+def _params(bodyparts: list[str], unique: list[str], individuals: list[str]) -> PoseDatasetParameters:
+    return PoseDatasetParameters(bodyparts=bodyparts, unique_bpts=unique, individuals=individuals)
+
+
+def _loader_with_weight_init(weight_init: dict | None, project_cfg: dict | None = None) -> SimpleNamespace:
+    return SimpleNamespace(model_cfg={"train_settings": {"weight_init": weight_init}}, project_cfg=project_cfg or {})
+
+
+def _empty_columns() -> dict[str, list]:
+    return {name: [] for name in evaluation._FEATHER_SCHEMA}
+
+
 class _FakeLoader:
-    """A minimal stand-in for DeepLabCut's DLCLoader exposing only the attributes the evaluator reads."""
+    """Stands in for DeepLabCut's DLCLoader, exposing only the attributes the evaluator reads."""
 
     def __init__(
         self,
@@ -528,9 +747,9 @@ class _FakeLoader:
 
 def _install_common_stubs(monkeypatch: pytest.MonkeyPatch, loader: _FakeLoader, evaluate_function) -> None:
     """Redirects every DeepLabCut handoff the evaluator makes to in-process fakes."""
-    monkeypatch.setattr(ev, "DLCLoader", lambda **kwargs: loader)
-    monkeypatch.setattr(ev, "get_inference_runners", lambda **kwargs: ("pose_runner", "detector_runner"))
-    monkeypatch.setattr(ev, "evaluate", evaluate_function)
+    monkeypatch.setattr(evaluation, "DLCLoader", lambda **kwargs: loader)
+    monkeypatch.setattr(evaluation, "get_inference_runners", lambda **kwargs: ("pose_runner", "detector_runner"))
+    monkeypatch.setattr(evaluation, "evaluate", evaluate_function)
 
     def fake_snapshots(**kwargs):
         folder = Path(kwargs["model_folder"])
@@ -538,220 +757,4 @@ def _install_common_stubs(monkeypatch: pytest.MonkeyPatch, loader: _FakeLoader, 
             return [SimpleNamespace(path=folder / "snapshot-detector-050.pt")]
         return [SimpleNamespace(path=folder / "snapshot-100.pt")]
 
-    monkeypatch.setattr(ev, "get_model_snapshots", fake_snapshots)
-
-
-def test_evaluate_trained_model_bottom_up_single_animal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Verifies that a bottom-up single-animal run writes the feather and provenance sidecar and reports both errors."""
-    image_train = "/proj/labeled-data/vid/train0.png"
-    image_test = "/proj/labeled-data/vid/test0.png"
-    gt = np.array([[[10.0, 10.0, 2.0], [20.0, 20.0, 2.0]]], dtype=np.float32)
-    prediction = np.array([[[11.0, 10.0, 0.9], [19.0, 21.0, 0.8]]], dtype=np.float32)
-    params = _params(["nose", "tail"], [], ["single"])
-    loader = _FakeLoader(
-        project_cfg={"pcutoff": 0.55},
-        pose_task=Task.BOTTOM_UP,
-        model_cfg={"metadata": {"with_identity": False}, "train_settings": {}, "detector": None},
-        model_folder=str(tmp_path / "model"),
-        evaluation_folder=str(tmp_path / "eval"),
-        params=params,
-        images={"train": [image_train], "test": [image_test]},
-        ground_truth={"train": {image_train: gt}, "test": {image_test: gt}},
-    )
-
-    def evaluate_function(**kwargs):
-        image = image_train if kwargs["mode"] == "train" else image_test
-        rmse = 3.0 if kwargs["mode"] == "train" else 5.0
-        metrics = {
-            "rmse": rmse,
-            "rmse_pcutoff": rmse - 0.5,
-            "mAP": 80.0,
-            "mAR": 70.0,
-            "rmse_keypoint_0": 4.0,
-            "rmse_keypoint_1": 6.0,
-        }
-        return metrics, {image: {"bodyparts": prediction}}
-
-    _install_common_stubs(monkeypatch, loader, evaluate_function)
-
-    summary = evaluate_trained_model(tmp_path / "config.yaml")
-
-    assert summary.snapshot == "snapshot-100"
-    assert summary.pcutoff == pytest.approx(0.55)  # cutoff resolved from the project configuration
-    assert summary.train.rmse_px == pytest.approx(3.0)
-    assert summary.test.rmse_px == pytest.approx(5.0)
-    assert summary.generalization_gap_px == pytest.approx(2.0)
-    assert summary.feather_path.exists()
-    assert summary.provenance_path.exists()
-
-    frame = pl.read_ipc(summary.feather_path)
-    assert set(frame.columns) == set(ev._FEATHER_SCHEMA)
-    assert frame.height == 4  # two splits x one image x two bodyparts
-    # Every row is the single individual and matched, and the nose prediction sits 1px from its label.
-    assert frame["individual"].unique().to_list() == ["single"]
-    assert frame["matched"].to_list() == [True, True, True, True]
-    assert frame["snapshot"].unique().to_list() == ["snapshot-100"]
-    assert frame["split"].to_list() == ["train", "train", "test", "test"]
-    nose = frame.filter(pl.col("bodypart") == "nose")
-    assert nose["pred_x"].to_list() == pytest.approx([11.0, 11.0])
-    assert nose["gt_x"].to_list() == pytest.approx([10.0, 10.0])
-    assert nose["error_px"].to_list() == pytest.approx([1.0, 1.0])
-    # Likelihoods 0.9 (nose) and 0.8 (tail) both clear the 0.55 cutoff resolved from the project config.
-    assert frame["above_pcutoff"].to_list() == [True, True, True, True]
-    assert all(np.isnan(oks) for oks in frame["oks"].to_list())  # single-animal RMSE matches carry no OKS
-
-    record = YAML().load(summary.provenance_path.read_text(encoding="utf-8"))
-    assert record["engine"] == "pytorch"
-    assert record["snapshot"] == "snapshot-100"
-    assert record["shuffle"] == 1
-    assert record["train_fraction"] == pytest.approx(0.95)
-    assert record["single_animal"] is True
-    assert record["detector_snapshot"] is None  # a bottom-up run has no detector
-    assert record["pcutoff"] == pytest.approx(0.55)
-    assert list(record["bodyparts"]) == ["nose", "tail"]
-    assert list(record["individuals"]) == ["single"]
-    assert record["feather"] == "snapshot-100_evaluation.feather"
-    assert record["deeplabcut_version"] == ev.deeplabcut.__version__
-    assert record["metrics"]["train"]["rmse_px"] == pytest.approx(3.0)
-    assert record["metrics"]["test"]["rmse_px"] == pytest.approx(5.0)
-    assert record["metrics"]["train"]["images"] == 1
-    assert record["metrics"]["test"]["unmatched_images"] == 0
-    assert record["generalization_gap_px"] == pytest.approx(2.0)
-    # worst_keypoints ranks the test per-keypoint RMSE, tail (6.0) ahead of nose (4.0).
-    assert [entry["bodypart"] for entry in record["worst_keypoints"]] == ["tail", "nose"]
-    assert record["worst_keypoints"][0]["rmse_px"] == pytest.approx(6.0)
-
-
-def test_evaluate_trained_model_top_down_detector_and_unique(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Verifies that a top-down run with a detector, unique bodyparts, and an explicit cutoff scores every head."""
-    image_train = "/proj/labeled-data/vid/train0.png"
-    image_test = "/proj/labeled-data/vid/test0.png"
-    gt = np.array([[[10.0, 10.0, 2.0], [20.0, 20.0, 2.0]]], dtype=np.float32)
-    prediction = np.array([[[11.0, 10.0, 0.9], [19.0, 21.0, 0.8]]], dtype=np.float32)
-    unique_gt = np.array([[[5.0, 5.0, 2.0]]], dtype=np.float32)
-    unique_prediction = np.array([[[6.0, 5.0, 0.7]]], dtype=np.float32)
-    params = _params(["nose", "tail"], ["led"], ["single"])
-    loader = _FakeLoader(
-        project_cfg={"pcutoff": 0.6},
-        pose_task=Task.TOP_DOWN,
-        model_cfg={"metadata": {"with_identity": False}, "train_settings": {}, "detector": {"type": "ssd"}},
-        model_folder=str(tmp_path / "model"),
-        evaluation_folder=str(tmp_path / "eval"),
-        params=params,
-        images={"train": [image_train], "test": [image_test]},
-        ground_truth={"train": {image_train: gt}, "test": {image_test: gt}},
-        unique_ground_truth={"train": {image_train: unique_gt}, "test": {image_test: unique_gt}},
-    )
-
-    def evaluate_function(**kwargs):
-        image = image_train if kwargs["mode"] == "train" else image_test
-        metrics = {"rmse": 3.0, "rmse_pcutoff": 2.5, "mAP": 80.0, "mAR": 70.0, "rmse_keypoint_0": 4.0}
-        predictions = {image: {"bodyparts": prediction, "unique_bodyparts": unique_prediction}}
-        return metrics, predictions
-
-    _install_common_stubs(monkeypatch, loader, evaluate_function)
-
-    summary = evaluate_trained_model(
-        str(tmp_path / "config.yaml"),
-        confidence_cutoff=0.4,
-        write_provenance=True,
-    )
-
-    assert summary.pcutoff == pytest.approx(0.4)  # explicit cutoff overrides the project value
-    frame = pl.read_ipc(summary.feather_path)
-    # Two splits, one image each, two main bodyparts + one unique bodypart -> six rows.
-    assert frame.height == 6
-    led = frame.filter(pl.col("bodypart") == "led")
-    assert led.height == 2  # one unique-head row per split
-    assert led["individual"].unique().to_list() == ["unique"]  # unique bodyparts are labeled "unique"
-    assert led["pred_x"].to_list() == pytest.approx([6.0, 6.0])
-    assert led["gt_x"].to_list() == pytest.approx([5.0, 5.0])
-    assert led["error_px"].to_list() == pytest.approx([1.0, 1.0])  # (6, 5) is 1px from the (5, 5) label
-
-    record = YAML().load(summary.provenance_path.read_text(encoding="utf-8"))
-    assert record["detector_snapshot"] == "snapshot-detector-050"  # the detector snapshot is recorded
-    assert list(record["bodyparts"]) == ["nose", "tail"]  # the unique head is not part of the pose bodyparts
-    assert list(record["individuals"]) == ["single"]
-    assert record["pcutoff"] == pytest.approx(0.4)
-    # Only rmse_keypoint_0 (nose) is present in the test metrics, so it is the lone ranked keypoint.
-    assert [entry["bodypart"] for entry in record["worst_keypoints"]] == ["nose"]
-
-
-def test_evaluate_trained_model_provenance_failure_removes_feather(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Verifies that when the provenance sidecar cannot be written, the feather is removed and OSError propagates."""
-    image_train = "/proj/labeled-data/vid/train0.png"
-    image_test = "/proj/labeled-data/vid/test0.png"
-    gt = np.array([[[10.0, 10.0, 2.0], [20.0, 20.0, 2.0]]], dtype=np.float32)
-    prediction = np.array([[[11.0, 10.0, 0.9], [19.0, 21.0, 0.8]]], dtype=np.float32)
-    params = _params(["nose", "tail"], [], ["single"])
-    loader = _FakeLoader(
-        project_cfg={"pcutoff": 0.6},
-        pose_task=Task.BOTTOM_UP,
-        model_cfg={"metadata": {"with_identity": False}, "train_settings": {}, "detector": None},
-        model_folder=str(tmp_path / "model"),
-        evaluation_folder=str(tmp_path / "eval"),
-        params=params,
-        images={"train": [image_train], "test": [image_test]},
-        ground_truth={"train": {image_train: gt}, "test": {image_test: gt}},
-    )
-
-    def evaluate_function(**kwargs):
-        image = image_train if kwargs["mode"] == "train" else image_test
-        metrics = {"rmse": 3.0, "rmse_pcutoff": 2.5, "mAP": 80.0, "mAR": 70.0, "rmse_keypoint_0": 4.0}
-        return metrics, {image: {"bodyparts": prediction}}
-
-    _install_common_stubs(monkeypatch, loader, evaluate_function)
-
-    monkeypatch.setattr(ev, "_write_provenance", _raising_stub(OSError("disk full")))
-
-    feather_path = tmp_path / "eval" / "snapshot-100_evaluation.feather"
-    with pytest.raises(OSError, match="disk full"):
-        evaluate_trained_model(tmp_path / "config.yaml")
-    assert not feather_path.exists()  # the feather written earlier is removed so no sidecar-less feather survives
-
-
-def test_evaluate_trained_model_reduces_batch_for_multi_resolution(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Verifies that a requested batch larger than one is reduced when labeled frames span multiple resolutions."""
-    image_train = "/proj/labeled-data/vid/train0.png"
-    image_test = "/proj/labeled-data/vid/test0.png"
-    gt = np.array([[[10.0, 10.0, 2.0], [20.0, 20.0, 2.0]]], dtype=np.float32)
-    prediction = np.array([[[11.0, 10.0, 0.9], [19.0, 21.0, 0.8]]], dtype=np.float32)
-    params = _params(["nose", "tail"], [], ["single"])
-    loader = _FakeLoader(
-        project_cfg={"pcutoff": 0.6},
-        pose_task=Task.BOTTOM_UP,
-        model_cfg={"metadata": {"with_identity": False}, "train_settings": {}, "detector": None},
-        model_folder=str(tmp_path / "model"),
-        evaluation_folder=str(tmp_path / "eval"),
-        params=params,
-        images={"train": [image_train], "test": [image_test]},
-        ground_truth={"train": {image_train: gt}, "test": {image_test: gt}},
-        data={
-            "train": {"images": [{"height": 100, "width": 200}]},
-            "test": {"images": [{"height": 50, "width": 60}]},
-        },
-    )
-
-    recorded_batch = {}
-
-    def evaluate_function(**kwargs):
-        image = image_train if kwargs["mode"] == "train" else image_test
-        metrics = {"rmse": 3.0, "rmse_pcutoff": 2.5, "mAP": 80.0, "mAR": 70.0, "rmse_keypoint_0": 4.0}
-        return metrics, {image: {"bodyparts": prediction}}
-
-    def capture_runners(**kwargs):
-        recorded_batch["batch_size"] = kwargs["batch_size"]
-        return ("pose_runner", "detector_runner")
-
-    _install_common_stubs(monkeypatch, loader, evaluate_function)
-    monkeypatch.setattr(ev, "get_inference_runners", capture_runners)
-
-    summary = evaluate_trained_model(tmp_path / "config.yaml", batch_size=8, write_provenance=False)
-
-    assert recorded_batch["batch_size"] == 1  # multi-resolution frames force a batch size of one
-    assert summary.feather_path.exists()
-    assert not summary.provenance_path.exists()  # provenance was not requested
+    monkeypatch.setattr(evaluation, "get_model_snapshots", fake_snapshots)
