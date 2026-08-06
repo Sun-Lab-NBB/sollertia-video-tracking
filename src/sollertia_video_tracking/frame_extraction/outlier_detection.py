@@ -74,16 +74,13 @@ def jump_outlier_indices(predictions: pd.DataFrame, pixel_distance_threshold: fl
     Returns:
         The frame indices, in the prediction table's own index, that hold at least one over-threshold jump.
     """
-    with warnings.catch_warnings():
-        # Mirrors DeepLabCut's own "jump" branch in extract_outlier_frames
-        # (deeplabcut/refine_training_dataset/outlier_frames.py), which uses the same axis=1 groupby; matching it keeps
-        # flagged frames identical to upstream. pandas 2.x deprecates axis=1 groupby but still evaluates it, and DLC
-        # 3.0 itself calls it, so the env stays on pandas 2.x regardless. Follow DLC if it migrates off axis=1 groupby.
-        warnings.simplefilter("ignore", category=FutureWarning)
-        warnings.simplefilter("ignore", category=DeprecationWarning)
-        squared_step = predictions.diff(axis=0) ** 2
-        squared_step = squared_step.drop(labels="likelihood", axis=1, level="coords")
-        per_bodypart = squared_step.groupby(level="bodyparts", axis=1).sum()  # type: ignore[call-overload]
+    # Mirrors DeepLabCut's own "jump" branch in extract_outlier_frames
+    # (deeplabcut/refine_training_dataset/outlier_frames.py:405), which computes the per-bodypart sums as
+    # temp_dt.T.groupby(level="bodyparts").sum().T. Matching that form keeps the flagged frames identical to upstream
+    # and avoids the axis=1 groupby pandas deprecates.
+    squared_step = predictions.diff(axis=0) ** 2
+    squared_step = squared_step.drop(labels="likelihood", axis=1, level="coords")
+    per_bodypart = squared_step.T.groupby(level="bodyparts").sum().T
     return predictions.index[(per_bodypart > pixel_distance_threshold**2).any(axis=1)].tolist()
 
 

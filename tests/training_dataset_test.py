@@ -1,8 +1,8 @@
 """Contains tests for the DeepLabCut training-dataset creation wrapper.
 
 Every DeepLabCut handoff (``available_models``/``available_detectors``, ``build_weight_init``, the two
-``create_training_dataset`` entry points, ``get_existing_shuffle_indices``, and the augmentation catalog through
-``dlc_compat``) is monkeypatched at the exact module binding so no real DLC runtime, GPU, or project on disk is needed.
+``create_training_dataset`` entry points, and ``get_existing_shuffle_indices``) is monkeypatched at the exact module
+binding so no real DLC runtime, GPU, or project on disk is needed.
 """
 
 import io

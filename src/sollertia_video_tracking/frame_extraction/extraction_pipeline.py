@@ -147,7 +147,9 @@ def extract_frames_kmeans(
         clustering_stride: The clustering stride passed to DeepLabCut as ``cluster_step``; every Nth frame is sampled,
             where N is this stride.
         worker_count: The number of videos to decode in parallel. Set to -1 to fill the usable cores automatically.
-        cores_per_worker: The number of CPU cores pinned to each worker. Set to -1 to spread the usable cores evenly.
+        cores_per_worker: The number of CPU cores pinned to each worker. Set to -1 to give each worker a saturating
+            core block when the worker count is automatic, or to split the usable cores evenly across an explicit
+            worker count.
         reserved_core_count: The number of CPU cores to leave free for other tasks.
         frames_per_video: The per-video frame ceiling, overriding ``numframes2pick`` in config.yaml. Each selected
             video is topped up to this many frames. Set to -1 to use the value already stored in the configuration file.
@@ -197,7 +199,8 @@ def extract_frames_kmeans(
             ``video_sets``, or when an exclusive run's requested videos match no eligible registered project video.
             Raised when a budgeted run cannot reach ``total_frame_budget`` in one pass even after topping every eligible
             video to its ceiling. Raised when two selected videos share a file-name stem and would collide in the
-            labeled-data tree.
+            labeled-data tree. Raised when an explicit ``worker_count`` or ``cores_per_worker``, or their product, needs
+            more cores than remain usable after reserving ``reserved_core_count``.
     """
     config_path = config_path.resolve()
     if overwrite and reset:
@@ -244,10 +247,11 @@ def extract_frames_kmeans(
     project_directory_path = config_path.parent
     labeled_data_directory = project_directory_path / "labeled-data"
 
-    # The requested videos are matched against the registered project videos whenever they are honored: as
-    # always-included pins over the full project pool in budgeted mode, as the whole set with exclusive, or as the
-    # explicit targets otherwise. Without a budget and without exclusive or overwrite, --videos is ignored (warned
-    # below), so matching it there would only emit a misleading per-video warning.
+    # The requested videos are matched against the registered project videos whenever the match is used: as
+    # always-included pins over the full project pool in budgeted mode, as the whole set with exclusive, or to drive
+    # the unregistered warning and the in-refinement refusal under overwrite. Overwrite does not let --videos steer the
+    # selection, as an unbudgeted non-exclusive run always tops up every below-ceiling video (warned below), so
+    # matching outside these three cases would only emit a misleading per-video warning.
     requested_matched: list[str] = []
     if requested_videos and (exclusive or overwrite or total_frame_budget != -1):
         matched_videos, unmatched_videos = select_registered_videos(

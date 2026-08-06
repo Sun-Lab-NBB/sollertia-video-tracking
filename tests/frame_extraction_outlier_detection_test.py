@@ -102,7 +102,9 @@ def test_jump_ignores_likelihood_channel() -> None:
 
 
 def test_jump_sums_displacement_across_individuals_sharing_a_bodypart() -> None:
-    """Verifies that columns sharing a bodypart name are summed together, matching DeepLabCut's axis=1 groupby."""
+    """Verifies that columns sharing a bodypart name are summed together, matching DeepLabCut's transposed per-bodypart
+    column groupby.
+    """
     # Two individuals each contribute an "ear" keypoint; the groupby sums their squared displacements per frame.
     columns = pd.MultiIndex.from_product(
         [["DLC"], ["mouse_a", "mouse_b"], ["ear"], ["x", "y", "likelihood"]],

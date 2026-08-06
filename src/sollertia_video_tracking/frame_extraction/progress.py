@@ -60,11 +60,11 @@ class AggregateBar(LiveBar):
     """Renders a single progress bar that tracks the total frames read across all extraction or inference workers.
 
     Notes:
-        The renderer consumes ``("progress", video_index, count)`` and ``("done", video_index)`` messages from the
-        shared queue, on top of the warm-up, spinner, interval, and ``stop``-sentinel handling inherited from
-        ``LiveBar``. Each reporter announces its video with a ``count`` of zero before its first frame is decoded, so
-        the bar leaves the warm-up line for the active bar as soon as any worker begins. It counts every announced but
-        unfinished video as actively decoding.
+        The renderer consumes ``("progress", key, count)`` and ``("done", key)`` messages from the shared queue, where
+        ``key`` identifies a work unit (a whole video, or one frame-range chunk of a video), on top of the warm-up,
+        spinner, interval, and ``stop``-sentinel handling inherited from ``LiveBar``. Each reporter announces its work
+        unit with a ``count`` of zero before its first frame is decoded, so the bar leaves the warm-up line for the
+        active bar as soon as any worker begins. It counts every announced but unfinished video as actively decoding.
 
     Attributes:
         _total_video_count: The total number of videos in the run.

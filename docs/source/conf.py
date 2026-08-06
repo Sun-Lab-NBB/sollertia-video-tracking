@@ -9,10 +9,14 @@ author = 'Ivan Kondratyev'
 release = importlib_metadata.version("sollertia-video-tracking")
 
 # -- General configuration ---------------------------------------------------
+# The sphinx_click entry must load before sphinx_autodoc_typehints. With the two swapped, the click directive fails to
+# import slvt_cli with TypeError: 'module' object is not callable, and the build still exits zero, logging that as a
+# non-fatal ERROR while the Command-Line Interface heading renders with no commands beneath it. Confirmed with
+# sphinx-click 6.2.0, sphinx-autodoc-typehints 3.13.2, and Sphinx 9.1.0. Re-check when any of the three is upgraded.
 extensions = [
     'sphinx.ext.autodoc',        # To build documentation from python source code docstrings.
     'sphinx.ext.napoleon',       # To read google-style docstrings (works with autodoc module).
-    'sphinx_click',              # Must load before sphinx_autodoc_typehints to avoid mock import shadowing.
+    'sphinx_click',              # Must load before sphinx_autodoc_typehints. See the note above the list.
     'sphinx_autodoc_typehints',  # To parse typehints into documentation
 ]
 
@@ -33,7 +37,6 @@ napoleon_use_param = True
 napoleon_use_rtype = True
 
 # Additional sphinx-typehints configuration
-sphinx_autodoc_typehints = True
 always_document_param_types = False
 typehints_document_rtype = True
 typehints_use_rtype = True

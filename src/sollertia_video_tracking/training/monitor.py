@@ -87,9 +87,10 @@ class TrainingMonitor(LiveBar):
         The renderer consumes ``{"kind": "config", ...}`` and ``{"kind": "metrics", ...}`` messages, on top of the
         warm-up, spinner, interval, and ``stop``-sentinel handling inherited from ``LiveBar``. The warm-up line shows
         while no epoch budget has been reported yet, which covers the workers still preparing: initializing the process
-        group, downloading pretrained weights, building the model, and any ``torch.compile`` warm-up. Because
-        evaluation epochs deliver a train message and an evaluation message at the same epoch, the latest of each is
-        retained and merged onto one line.
+        group, downloading pretrained weights, and building the model. Any ``torch.compile`` stall instead falls after
+        the epoch budget is reported, while the active line still shows the last reported epoch, which is epoch 0 for
+        the first model of a run. Because evaluation epochs deliver a train message and an evaluation message at the
+        same epoch, the latest of each is retained and merged onto one line.
 
     Attributes:
         _total_epochs: The total number of epochs the run trains for, once reported by the configuration message.

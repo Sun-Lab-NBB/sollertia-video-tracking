@@ -91,9 +91,10 @@ command additionally requires a graphical session.
 deprecating it, so every `slvt` command targets the PyTorch engine exclusively and options that only the TensorFlow
 engine would honor are not exposed. A project whose shuffles were created for the TensorFlow engine is not supported.
 
-***Note,*** the DeepLabCut dependency is pinned to an exact version. The training subpackage overrides DeepLabCut 
-internals that carry no stability guarantee within the 3.x series, so bumping the pin is a deliberate, tested action 
-rather than a routine upgrade.
+***Note,*** the DeepLabCut dependency is pinned to an exact version. The training subpackage subclasses DeepLabCut's
+training runners, the inference subpackage patches its inference-runner builders, and the frame-extraction subpackage
+replaces its k-means frame selector and its video-registration helper. Those internals carry no stability guarantee
+within the 3.x series, so bumping the pin is a deliberate, tested action rather than a routine upgrade.
 
 For users, all library dependencies are installed automatically by all supported installation methods. For
 developers, see the [Developers](#developers) section for information on installing additional development
@@ -185,7 +186,8 @@ exposes no CPU affinity API, so its workers run in parallel but unpinned.
 Frame selection is governed by two budgets. `--frames-per-video`, given before the subcommand, is a per-video ceiling,
 and `--total-frames` (default 200), given after it, is the project-wide budget: videos are selected until the budget is
 reached, preferring not-yet-extracted videos and falling back to below-ceiling ones. Videos named with `--videos` are
-included first, except that a video already in outlier refinement is skipped with a warning: `extract frames` is the
+included first, except that a video already in outlier refinement is skipped with a warning. Naming a refined video
+together with `--overwrite` instead aborts the run before any frames are extracted, because `extract frames` is the
 pre-refinement bootstrap step and never disturbs a video that has entered refinement. Extraction is a top-up rather
 than a re-roll, so a fresh video gains a full set while a partly-extracted one gains only the frames that reach the
 ceiling. If topping every eligible video to the ceiling still cannot reach the total in one pass, the run reports the
@@ -305,9 +307,10 @@ The following command trains shuffle 1 across two GPUs for 200 epochs:
 balanced across the run's slots, and the same command runs on multiple GPUs, one GPU, or a CPU-only machine.
 
 Providing `--videos` once per file analyzes those videos; omitting it analyzes every video registered in the project's
-config.yaml. The videos need not be registered in the project at all, which is what allows de-novo recordings to be
-analyzed. `--crop` takes an `x1,x2,y1,y2` rectangle that replaces the project's configured crop, given once to apply
-one rectangle to every video or once per `--videos` file for per-video crops.
+config.yaml that still exists on disk, silently skipping registered paths whose files are missing. The videos need not
+be registered in the project at all, which is what allows de-novo recordings to be analyzed. `--crop` takes an
+`x1,x2,y1,y2` rectangle that replaces the project's configured crop, given once to apply one rectangle to every video
+or once per `--videos` file for per-video crops.
 
 Predictions are written as DeepLabCut's native `.h5` files. By default, each lands beside its own video, which is where
 `slvt extract outliers` reads them, so the default keeps the refinement loop wired together. `--output` redirects them,
@@ -333,8 +336,9 @@ it:
 
 ***Note,*** conditional-top-down models run at stock precision, as the acceleration path does not apply to them.
 
-***Note,*** `--chunks` above one applies to single-animal projects, as stitching per-frame predictions does not
-reproduce multi-animal tracking.
+***Note,*** `--chunks` above one applies to single-animal bottom-up models only, as stitching per-frame predictions
+does not reproduce multi-animal tracking. A multi-animal project, or a top-down or conditional-top-down shuffle, must
+run with `--chunks 1`.
 
 ### Extracting Outlier Frames
 

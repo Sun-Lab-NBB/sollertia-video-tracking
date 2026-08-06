@@ -1,8 +1,9 @@
 """Contains tests for the inference optimization-profile resolver and the resolved profile's derived views.
 
 These tests drive the real ``resolve_inference_profile``/``apply_runtime_optimizations`` logic on a headless, GPU-free
-box by monkeypatching only the torch/psutil capability probes the code consults (``torch.cuda.*`` and
-``psutil.cpu_count``). No GPU, network, or DLC runtime is touched.
+box. Monkeypatching covers the capability probes the code consults (``torch.cuda.*``, ``psutil.cpu_count``, and
+``os.cpu_count``), the ``torch.set_num_threads`` effector, and the ``apply_backend_flags`` collaborator, whose real
+body therefore never runs. No GPU, network, or DLC runtime is touched.
 """
 
 import os
@@ -46,7 +47,7 @@ def _patch_cuda(monkeypatch, *, count, capability) -> None:
     """Makes the hardware probes report ``count`` CUDA devices, each at the given compute capability."""
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: count)
-    # resolve_target_device / supports_ampere call get_device_capability(device=index); accept any call.
+    # supports_ampere calls get_device_capability(device=index); accept any call.
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda **_kwargs: capability)
 
 
@@ -74,17 +75,17 @@ def test_amp_device_type_maps_each_device() -> None:
 
 
 def test_total_workers_cuda_multiplies_gpus_by_processes() -> None:
-    """Verifies that on CUDA the worker cap is the device count times the per-device process count."""
+    """Verifies that on CUDA the worker cap is gpu count x gpu_processes x chunks, exercised here at chunks=1."""
     assert _profile(device="cuda", gpus=(0, 1), gpu_processes=2).total_workers == 4
 
 
 def test_total_workers_cpu_uses_cpu_worker_count() -> None:
-    """Verifies that on CPU the worker cap is the resolved CPU worker count."""
+    """Verifies that on CPU the worker cap is cpu_workers x chunks, exercised here at chunks=1."""
     assert _profile(device="cpu", gpus=(), cpu_workers=3).total_workers == 3
 
 
 def test_total_workers_other_device_is_single() -> None:
-    """Verifies that a non-CUDA, non-CPU device (MPS) runs a single worker."""
+    """Verifies that on a non-CUDA, non-CPU device (MPS) the worker cap is chunks alone, exercised here at chunks=1."""
     assert _profile(device="mps", gpus=(), cpu_workers=0).total_workers == 1
 
 
@@ -140,7 +141,7 @@ def test_describe_mps_uppercases_device() -> None:
 
 
 def test_resolve_profile_cuda_auto_defaults(monkeypatch) -> None:
-    """Verifies the Ampere CUDA auto defaults enable bf16, tf32, channels-last, and pinning, one process per GPU."""
+    """Verifies the Ampere CUDA auto defaults enable bf16, tf32, and channels-last, one process per GPU."""
     _patch_cuda(monkeypatch, count=2, capability=(8, 0))
     profile = resolve_inference_profile(device=DeviceType.CUDA, fixed_input_size=True)
     assert profile.device == "cuda"

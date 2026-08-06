@@ -121,7 +121,9 @@ _pass_shared_parameters = click.make_pass_decorator(_SharedExtractionParameters)
     type=int,
     default=-1,
     show_default=True,
-    help="How many frames to keep from each processed video. Set to -1 to use the project's configured amount.",
+    help="How many frames to keep from each processed video. Set to -1 to use the project's configured amount. Any "
+    "other value is written into config.yaml as the project's numframes2pick before extraction starts, so it becomes "
+    "the default for later runs and for the DeepLabCut GUI.",
 )
 @click.option(
     "-cs",
@@ -162,11 +164,13 @@ _pass_shared_parameters = click.make_pass_decorator(_SharedExtractionParameters)
     multiple=True,
     type=click.Path(dir_okay=False, path_type=Path),
     metavar="PATH",
-    help="A project video, registered in config.yaml, that the subcommand targets. For 'frames' it is included in "
-    "the sample first, or is one of the only videos processed with --exclusive. For 'outliers' it is a video to "
-    "refine. For 'purge' its labeled-data directory is removed, and for 'pending' its directory is inspected. Provide "
-    "the option several times for several videos. Omit --videos to target the whole project: every video for 'frames', "
-    "'purge', and 'pending', and every video the current iteration model has analyzed for 'outliers'.",
+    help="A project video, registered in config.yaml, that the subcommand targets. For 'frames' it is included in the "
+    "sample first, or is one of the only videos processed with --exclusive. It is ignored with a warning when 'frames' "
+    "runs with --total-frames -1 and without --exclusive, since that run tops up every below-ceiling project video "
+    "whether or not --overwrite is given. For 'outliers' it is a video to refine. For 'purge' its labeled-data "
+    "directory is removed, and for 'pending' its directory is inspected. Provide the option several times for several "
+    "videos. Omit --videos to target the whole project: every video for 'frames', 'purge', and 'pending', and every "
+    "video the current iteration model has analyzed for 'outliers'.",
 )
 @click.option(
     "-o",
@@ -184,7 +188,7 @@ _pass_shared_parameters = click.make_pass_decorator(_SharedExtractionParameters)
     help="Re-roll across the whole project instead of topping up, clearing the relevant frames first. For 'frames' "
     "this clears every not-yet-refined video's unlabeled bootstrap frames and leaves videos already in outlier "
     "refinement untouched. For 'outliers' it clears the current iteration's outlier frames for every video. Mutually "
-    "exclusive with --overwrite.",
+    "exclusive with --overwrite, and with the 'frames' subcommand's --exclusive.",
 )
 @click.pass_context
 def extract_group(
@@ -264,7 +268,7 @@ def extract_group(
     is_flag=True,
     help="Restrict the run to exactly the --videos files, topping each up to --frames-per-video frames and ignoring "
     "the --total-frames budget and group balancing. A video already at that count is skipped unless --overwrite "
-    "re-rolls it. Requires --videos.",
+    "re-rolls it. Requires --videos, and cannot be combined with --reset.",
 )
 @_pass_shared_parameters
 def frames_command(

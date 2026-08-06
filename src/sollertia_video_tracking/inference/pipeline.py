@@ -126,11 +126,13 @@ class _InferenceLaunch:
     display_progress: bool
     """Determines whether the live aggregate progress bar is rendered."""
     video_queue: Any
-    """The shared queue each worker pulls per-video work items from."""
+    """The shared queue each worker pulls work items from, one whole video or, in a chunked run, one ``_ChunkItem``
+    frame range."""
     progress_queue: Any
-    """The shared queue workers publish per-video progress updates to."""
+    """The shared queue workers publish per-work-unit progress updates to."""
     results_queue: Any
-    """The shared queue workers report per-video results to."""
+    """The shared queue workers report per-work-unit results to, as a (video index, output path, error) triple on the
+    whole-video path and a (task id, video index, chunk index, predictions, error) tuple on the chunked path."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,13 +251,15 @@ def run_inference(
     crop_override: Sequence[tuple[int, int, int, int]] | None = None,
     display_progress: bool = True,
 ) -> InferenceSummary:
-    """Runs DeepLabCut inference over many videos, distributing whole videos across GPU or CPU worker slots.
+    """Runs DeepLabCut inference over many videos, distributing the work across GPU or CPU worker slots.
 
-    Each worker pulls whole videos from a shared queue and analyzes them with DeepLabCut, so the work is balanced
-    across slots without splitting any video. On CUDA a slot is a device (``gpu_processes`` of them per device); on CPU
-    a slot is a disjoint, thread-bounded block of physical cores. Every worker's forward pass is wrapped with the
-    profile's mixed precision and channels-last format, and each video's predictions are written as DeepLabCut's native
-    ``.h5`` prediction file, beside the video or into its chosen output directory.
+    Each worker pulls work from a shared queue and analyzes it with DeepLabCut. The default single-chunk run distributes
+    whole videos across the slots without splitting any video, with ``gpu_processes`` slots per CUDA device and, on CPU,
+    one disjoint thread-bounded block of physical cores per slot. A profile whose ``chunks`` exceeds one instead splits
+    each video into contiguous frame ranges run in parallel by ``gpu_processes * chunks`` workers per CUDA device, with
+    the per-chunk predictions stitched into one prediction file in the parent. Every worker's forward pass is wrapped
+    with the profile's mixed precision and channels-last format, and each video's predictions are written as
+    DeepLabCut's native ``.h5`` prediction file, beside the video or into its chosen output directory.
 
     Args:
         config: The path of the DeepLabCut project configuration file.

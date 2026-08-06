@@ -77,12 +77,11 @@ def _optimize_inference_runner(runner: InferenceRunner, profile: InferenceProfil
     """Enhances a DeepLabCut inference runner in place with mixed precision, channels-last, and ``torch.compile``.
 
     The runner's forward pass is replaced with a version that wraps the model call in the profile's autocast context,
-    with the correct device type and bfloat16/float16 dtype. That version moves each batch to the runner device on
-    every forward pass, using a non-blocking transfer only when host-memory pinning is enabled, and additionally
-    converts inputs to the channels-last memory format when channels-last is enabled. When enabled by the profile, the
-    model is converted to channels-last and compiled before the swap.
-    Conditional-top-down runners drive a stateful, multi-stage forward that this simple swap would not preserve, so
-    they are left unmodified with a warning.
+    with the correct device type and bfloat16/float16 dtype. That version moves each batch to the runner device on every
+    forward pass, and additionally converts inputs to the channels-last memory format when channels-last is enabled.
+    When enabled by the profile, the model is converted to channels-last and compiled before the swap.
+    Conditional-top-down runners drive a stateful, multi-stage forward that this simple swap would not preserve, so they
+    are left unmodified with a warning.
 
     Args:
         runner: The DeepLabCut inference runner to enhance.

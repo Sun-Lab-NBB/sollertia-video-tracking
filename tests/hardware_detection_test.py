@@ -267,7 +267,7 @@ def test_apply_backend_flags_non_cuda_is_noop(monkeypatch: pytest.MonkeyPatch) -
     snapshot = _snapshot_backend_flags()
     try:
         apply_backend_flags(device="cpu", tf32=True, cudnn_benchmark=True)
-        # The matmul-precision setter is the only observable side effect on the CUDA path; it must stay untouched.
+        # The matmul-precision setter is the CUDA-path side effect the flag-snapshot comparison cannot capture.
         assert recorded == []
         assert _snapshot_backend_flags() == snapshot
     finally:

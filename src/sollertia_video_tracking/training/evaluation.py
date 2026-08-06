@@ -59,10 +59,11 @@ Notes:
     Each row is one predicted keypoint. ``individual`` is the ground-truth individual name for single-animal projects
     and for matched multi-animal predictions; an unmatched multi-animal prediction (a false positive, ``matched`` is
     False) is labeled ``instance_<order>`` by its per-image match order and carries no stable identity across images.
-    ``error_px`` is the Euclidean pixel distance to the matched label, and is NaN when the keypoint is unmatched or its
-    label is occluded. ``oks`` is NaN for an unmatched prediction and otherwise holds the match's OKS; for matched
-    single-animal and unique-bodypart rows, which DeepLabCut scores by direct correspondence rather than OKS, that
-    value is the matcher's default rather than a computed OKS.
+    A unique-bodypart row's ``individual`` is the literal ``unique``. ``error_px`` is the Euclidean pixel distance to
+    the matched label, and is NaN when the keypoint is unmatched or its label is occluded. ``oks`` is NaN for an
+    unmatched multi-animal prediction and for every matched single-animal and unique-bodypart row, which DeepLabCut
+    scores by direct correspondence rather than OKS. Only a matched multi-animal row carries a computed OKS, so use
+    ``matched`` rather than ``oks`` to tell matched rows from unmatched ones.
 """
 
 
@@ -71,9 +72,10 @@ class _SplitMetrics:
     """Captures DeepLabCut's canonical error metrics for one labeled-data partition.
 
     Notes:
-        The values are taken verbatim from DeepLabCut's scorer so they agree with ``deeplabcut.evaluate_network``.
-        RMSE values are in pixels; ``map`` and ``mar`` are on the DeepLabCut 0-100 scale. ``rmse_pcutoff`` counts only
-        keypoints predicted above the confidence cutoff.
+        The values are taken verbatim from DeepLabCut's scorer so they agree with ``deeplabcut.evaluate_network``. RMSE
+        values are in pixels, and DeepLabCut's ``rmse`` is a mean Euclidean pixel error rather than a root-mean-square,
+        so the two diverge in the presence of outliers. ``map`` and ``mar`` are on the DeepLabCut 0-100 scale.
+        ``rmse_pcutoff`` counts only keypoints predicted above the confidence cutoff.
     """
 
     images: int

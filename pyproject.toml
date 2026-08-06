@@ -48,11 +48,14 @@ dependencies = [
     # so this bridge runs in its own environment and communicates with the rest of the Sollertia stack across the CLI
     # boundary rather than by direct import. torchvision is resolved transitively to match the installed torch build.
     #
-    # This is pinned to an exact version rather than the usual major-version range because the training subpackage
-    # overrides DeepLabCut internals (it reimplements the PyTorch train()/fit() orchestration and subclasses the
-    # training runners to add mixed precision and DistributedDataParallel). Those internals are private APIs with no
-    # stability guarantee within the 3.x series, so an exact pin is required to keep the overrides valid. Bumping this
-    # version is a deliberate, tested action: re-verify the overridden internals against the new release first.
+    # This is pinned to an exact version rather than the usual major-version range because three subpackages override
+    # DeepLabCut internals. The training subpackage reimplements the PyTorch train()/fit() orchestration and subclasses
+    # the training runners to add mixed precision and DistributedDataParallel, the inference subpackage patches the
+    # get_pose_inference_runner and get_detector_inference_runner builders, and the frame-extraction workers replace
+    # KmeansbasedFrameselectioncv2 and attempt_to_add_video. The frame-extraction patches are plain assignments, so a
+    # renamed upstream symbol silently no-ops. Those internals are private APIs with no stability guarantee within the
+    # 3.x series, so an exact pin is required to keep the overrides valid. Bumping this version is a deliberate, tested
+    # action: re-verify the overridden internals against the new release first.
     #
     # The [gui] extra is included because the refinement loop's manual labeling and label-refinement steps run in
     # DeepLabCut's napari-based GUI, which lives in this same isolated environment. It pulls in napari-deeplabcut and
@@ -211,7 +214,7 @@ disallow_untyped_defs = true # Enforces function annotation
 warn_unused_ignores = true   # Warns against using 'type: ignore' for packages with type stubs
 
 exclude = [
-    "sollertia-video-tracking-\\d+",  # Ignores temporary directory created by setuptools when building the sdist
+    "sollertia-video-tracking-\\d+",  # Ignores the temporary directory created while building the sdist
     "venv.*/",                        # Ignores virtual environments
     "build/",                         # Ignores the sdist directory
     "dist/",                          # Ignores the wheel directory
@@ -221,16 +224,16 @@ exclude = [
     "tests/",                         # Ignores the test directory.
 ]
 
-# DeepLabCut, and the sklearn, skimage, and tqdm packages it pulls in, ship no type information and have no stub
-# packages on PyPI, so their imports remain exempt from the missing-stub error. Types for pandas (also pulled in
-# transitively by DeepLabCut) and psutil are supplied by the pandas-stubs and types-psutil dev dependencies, while
-# OpenCV and ruamel.yaml now ship inline type information; all four are therefore type-checked rather than ignored.
-# The project's own code remains fully type-checked.
+# DeepLabCut, and the sklearn and tqdm packages it pulls in, ship no type information, so their imports remain exempt
+# from the missing-stub error. Neither DeepLabCut nor sklearn has a stub package on PyPI; tqdm does (types-tqdm), but
+# this project does not carry it. Types for pandas (also pulled in transitively by DeepLabCut) and psutil are supplied
+# by the pandas-stubs and types-psutil dev dependencies, while OpenCV, ruamel.yaml, and skimage ship a py.typed marker,
+# which takes their imports out of that error whether or not the functions behind them carry annotations. All five are
+# therefore resolved rather than ignored. The project's own code remains fully type-checked.
 [[tool.mypy.overrides]]
 module = [
     "deeplabcut.*",
     "sklearn.*",
-    "skimage.*",
     "tqdm",
 ]
 ignore_missing_imports = true
@@ -240,8 +243,8 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 addopts = "--import-mode=importlib"
 
-# Enables parallel coverage collection across the frame-extraction worker processes and the renderer thread, and lists
-# the source files excluded from coverage measurement in full.
+# Enables parallel coverage collection across the frame-extraction, inference, and DDP training worker processes and the
+# renderer thread, and lists the source files excluded from coverage measurement in full.
 [tool.coverage.run]
 parallel = true
 concurrency = ["multiprocessing", "thread"]

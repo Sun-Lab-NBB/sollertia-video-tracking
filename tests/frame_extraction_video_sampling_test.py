@@ -155,7 +155,7 @@ def test_balanced_group_exhaustion_does_not_requeue():
 
 
 def test_balanced_seeds_existing_frames_and_uses_below_ceiling_tier():
-    """Verifies that grouped seeding counts prior frames per group and drains below-ceiling before unextracted."""
+    """Verifies that grouped seeding counts prior frames per group and drains unextracted before below-ceiling."""
     plan = plan_video_sampling(
         ["a", "b"], {"a": 5}, frames_per_video_count=10, total_frame_budget=20, groups={"g1": ["a", "b"]}
     )

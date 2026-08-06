@@ -3,7 +3,8 @@
 These tests drive the whole pipeline module without a GPU, network, or real DeepLabCut runtime. Heavy handoffs
 (``analyze_videos``, the multiprocessing manager/context, the aggregate progress bar, OpenCV decode) are replaced with
 lightweight in-process fakes, and the worker/collector helpers are exercised directly so every branch runs on a
-headless CPU box.
+headless CPU box. The two bounded-iterator seek-accuracy tests are the exception: they write and read a short Motion
+JPEG clip through real OpenCV, and skip when the environment ships no encoder for it.
 """
 
 import sys

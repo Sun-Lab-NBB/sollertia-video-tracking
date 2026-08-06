@@ -223,6 +223,7 @@ def create_training_dataset(
 
     Raises:
         ValueError: When ``network_type`` or ``detector_type`` is not in the installed engine's catalog.
+        ValueError: When the shuffle index already exists and ``overwrite`` is False.
         ValueError: When DeepLabCut creates no shuffle (for example, no labeled frames exist, or every labeled frame
             was annotated by a scorer other than the one named in the project configuration).
     """

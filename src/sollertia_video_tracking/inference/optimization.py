@@ -43,10 +43,12 @@ class InferenceProfile:
     Notes:
         Every field is a concrete decision: the tri-state request flags and hardware capabilities have already been
         reconciled by ``resolve_inference_profile``, so consumers apply these values directly without any further
-        capability checks. Parallelism is expressed as independent worker processes that each pull whole videos from a
-        shared queue: ``gpu_processes`` per CUDA device (raising it oversubscribes a device to fill the GPU's idle
-        gaps between videos) or ``cpu_workers`` core-block-pinned processes on CPU. The profile holds cores back rather
-        than saturating the machine.
+        capability checks. Parallelism is expressed as independent worker processes that each pull work from a shared
+        queue: whole videos when ``chunks`` is one, and contiguous frame-range pieces of a video when it is above one.
+        Per-CUDA-device concurrency is therefore ``gpu_processes * chunks`` (raising either oversubscribes a device to
+        fill the GPU's idle gaps). A CPU run multiplies an explicit ``cpu_workers`` by ``chunks`` the same way and
+        leaves the automatic request for the core allocator to size, pinning every process to its own core block. The
+        profile holds cores back rather than saturating the machine.
     """
 
     device: str

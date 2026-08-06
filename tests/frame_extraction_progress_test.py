@@ -143,8 +143,9 @@ def test_reporter_accepts_and_ignores_extra_tqdm_arguments() -> None:
     progress_queue: queue.Queue = queue.Queue()
     reporter = make_progress_reporter(progress_queue, video_index=0, frame_total=3)
 
-    # DeepLabCut assigns the reporter as ``dlc_videos.tqdm`` and calls it like tqdm, e.g. tqdm(iterable, desc,
-    # total=..., leave=...); the shim must swallow those extras without disturbing forwarding or the progress stream.
+    # This library rebinds ``dlc_videos.tqdm`` to the reporter on the inference path and passes it as ``progress=`` on
+    # the frame-extraction path, and both call it with a single positional iterable today. The extra *args/**kwargs
+    # keep the shim a safe drop-in should a call site start passing tqdm's desc, total, or leave.
     forwarded = list(reporter(range(3), "frames", total=3, leave=False))
 
     assert forwarded == [0, 1, 2]

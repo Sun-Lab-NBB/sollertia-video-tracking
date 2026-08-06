@@ -80,7 +80,7 @@ class FakePoseModel:
 
 
 class FakeDetectorModel:
-    """A stand-in for a DLC detector model returning ``(features, raw_predictions)`` per its forward contract."""
+    """A stand-in for a DLC detector model returning ``(losses, raw_predictions)`` per its forward contract."""
 
     def __init__(self, items):
         self.items = items
@@ -93,7 +93,7 @@ class FakeDetectorModel:
 
     def __call__(self, inputs):
         self.last_inputs = inputs
-        return "features", self.items
+        return "losses", self.items
 
 
 class FakeDynamic:

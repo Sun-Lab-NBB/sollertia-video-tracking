@@ -147,7 +147,7 @@ def test_build_pose_runner_defaults_prefix_and_gradient_scaler(tmp_path):
     )
     assert isinstance(runner, runners._OptimizedPoseTrainingRunner)
     assert runner._load_head_weights is False  # load_head_weights threads through
-    assert runner._gradient_scaler is not None  # use_gradient_scaler=True constructs a real GradScaler (line 179)
+    assert runner._gradient_scaler is not None  # use_gradient_scaler=True constructs a real GradScaler
     assert runner._amp_dtype is torch.bfloat16
     assert runner.snapshot_manager.snapshot_prefix == "snapshot"  # task default
     assert runner.scheduler is not None

@@ -457,7 +457,7 @@ def test_build_dataloaders_ddp_injects_distributed_sampler(monkeypatch):
         }
     ]
     assert collate.calls == [{"type": "resize"}]
-    # The training loader takes the sampler (shuffle off); the validation loader uses persistent workers when >0.
+    # The training loader takes the sampler (shuffle off) and uses persistent workers when the worker count is nonzero.
     assert dataloader_calls[0]["sampler"] == "sampler"
     assert dataloader_calls[0]["shuffle"] is False
     assert dataloader_calls[0]["collate_fn"] == "collate-fn"
@@ -465,6 +465,7 @@ def test_build_dataloaders_ddp_injects_distributed_sampler(monkeypatch):
     assert dataloader_calls[0]["batch_size"] == 4
     assert dataloader_calls[0]["num_workers"] == 2
     assert dataloader_calls[0]["pin_memory"] is True
+    assert dataloader_calls[0]["persistent_workers"] is True
     # The validation loader always scores one frame at a time, never shuffles, and loads in the training process.
     assert dataloader_calls[1]["batch_size"] == 1
     assert dataloader_calls[1]["shuffle"] is False

@@ -24,10 +24,11 @@ class PurgeSummary:
     """Summarizes a wholesale labeled-data purge, whether previewed as a dry run or actually executed.
 
     Notes:
-        A purge is deliberately destructive: unlike the frame and outlier re-extraction options, which preserve every
-        human-labeled and machine-labeled frame, it removes each targeted video's entire ``labeled-data`` directory,
-        including its labels. The ``executed`` flag distinguishes a dry-run preview from a completed deletion, and
-        ``labeled_directories`` names the directories that held human labels so callers can warn before deleting them.
+        A purge is deliberately destructive: it removes each targeted video's entire ``labeled-data`` directory,
+        including its labels. The frame and outlier re-extraction options always keep the human labels and clear only a
+        video's unlabeled bootstrap frames or a single iteration's outlier frames. The ``executed`` flag distinguishes a
+        dry-run preview from a completed deletion, and ``labeled_directories`` names the directories that held human
+        labels so callers can warn before deleting them.
     """
 
     config_path: Path
@@ -162,11 +163,11 @@ def iter_pinned_extraction(
     """Runs the workers over a pinned process pool, yielding each ``(video_path, frames_written, status)`` result.
 
     Owns the spawn context, the manager-backed progress and core-set queues, and the aggregate progress bar, so both
-    pipelines share one worker-pool lifecycle. Each worker claims its assigned core block for CPU-affinity pinning
-    (disjoint in the default allocation; explicit worker/core counts may overlap within the usable band). The progress
-    queue is handed to ``make_tasks`` only when progress is displayed (None otherwise), so the workers never
-    stream to a queue nobody drains. The bar and manager are always torn down, even if the caller's consumption of
-    the results raises.
+    pipelines share one worker-pool lifecycle. Each worker claims its assigned core block for CPU-affinity pinning, and
+    the blocks are always disjoint, because a request that would need overlapping blocks raises ``ValueError`` during
+    core allocation instead. The progress queue is handed to ``make_tasks`` only when progress is displayed (None
+    otherwise), so the workers never stream to a queue nobody drains. The bar and manager are always torn down, even if
+    the caller's consumption of the results raises.
 
     Args:
         videos: The ordered video paths, used to map each result back to its progress-bar slot.
@@ -291,7 +292,8 @@ def finite_labeled_frame_names(collected_data_path: Path) -> set[str]:
     placeholders as still-unlabeled.
 
     Args:
-        collected_data_path: The ``CollectedData_<scorer>.h5`` file holding one video's human labels.
+        collected_data_path: The label table to read, either the ``CollectedData_<scorer>.h5`` file holding one video's
+            human labels or the ``MachineLabelsRefine.h5`` file holding its legacy refinements.
 
     Returns:
         The set of ``imgNNNN.png`` frame names with at least one finite coordinate, or an empty set when the file does
@@ -311,9 +313,11 @@ def machine_label_frame_names(directory: Path) -> set[str]:
     """Returns every frame a video directory's machine-label or refinement tables reference.
 
     Outlier extraction records its machine pre-labels in ``machinelabels-iter<N>.h5`` (one table per refinement
-    iteration) and the labeling GUI writes human refinements of them to ``MachineLabelsRefine.h5``. Both name frames
-    that belong to the outlier-refinement workflow rather than the k-means bootstrap set, so callers protect them when
-    clearing bootstrap frames.
+    iteration). ``MachineLabelsRefine.h5`` is a legacy refine-flow artifact DeepLabCut no longer writes and only checks
+    for, as the ``merge_datasets`` gate that marks a directory refined, while the napari labeler saves human
+    refinements into ``CollectedData_<scorer>.h5``. Both ``machinelabels-iter<N>.h5`` and ``MachineLabelsRefine.h5``
+    name frames that belong to the outlier-refinement workflow rather than the k-means bootstrap set, so callers
+    protect them when clearing bootstrap frames.
 
     Args:
         directory: The ``labeled-data/<stem>`` directory whose machine-label tables are scanned.

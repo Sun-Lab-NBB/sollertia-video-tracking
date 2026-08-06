@@ -217,7 +217,9 @@ def extract_outlier_frames_parallel(
         pose_snapshot_index: The pose snapshot index whose scorer named the prediction files, or None for the default.
         detector_snapshot_index: The detector snapshot index, for top-down models, or None for the default.
         worker_count: The number of videos to extract in parallel. Set to -1 to fill the usable cores automatically.
-        cores_per_worker: The number of CPU cores pinned to each extraction worker. Set to -1 to spread them evenly.
+        cores_per_worker: The number of CPU cores pinned to each extraction worker. Set to -1 to give each worker a
+            saturating core block when the worker count is automatic, or to split the usable cores evenly across an
+            explicit worker count.
         reserved_core_count: The number of CPU cores to leave free for other tasks.
         fitting_worker_count: The number of processes fitting SARIMAX models during ``fitting`` detection. Set to -1 to
             use every usable core.
@@ -239,14 +241,16 @@ def extract_outlier_frames_parallel(
     Raises:
         FileNotFoundError: If ``config_path`` does not point to an existing file.
         ValueError: Raised when the options conflict: ``overwrite`` and ``reset`` are both set. Raised when an argument
-            is invalid: ``outlier_algorithm`` or
-            ``extraction_algorithm`` is unknown, ``frames_per_video`` (other than the -1 sentinel) or ``candidate_step``
-            is below one, or ``outlier_algorithm`` is ``"list"`` without ``explicit_frame_indices``. Raised when the
-            comparison bodyparts resolve to none. Raised when no videos can be refined: the project lists none in
-            ``video_sets``, no requested video matches a registered one, or no videos are named and the current model
-            has analyzed none. Raised when two selected videos share a file-name stem and would collide in the
-            labeled-data tree. Raised when the ``fitting`` algorithm is selected but the project's ``numframes2pick``
-            is missing or not a positive integer and no ``frames_per_video`` override is supplied.
+            is invalid: ``outlier_algorithm`` or ``extraction_algorithm`` is unknown, ``frames_per_video`` (other than
+            the -1 sentinel) or ``candidate_step`` is below one, or ``outlier_algorithm`` is ``"list"`` without
+            ``explicit_frame_indices``. Raised when the comparison bodyparts resolve to none. Raised when no videos can
+            be refined: the project lists none in ``video_sets``, no requested video matches a registered one, or no
+            videos are named and the current model has analyzed none. Raised when two selected videos share a file-name
+            stem and would collide in the labeled-data tree. Raised when the ``fitting`` algorithm is selected but the
+            project's ``numframes2pick`` is missing or not a positive integer and no ``frames_per_video`` override is
+            supplied. Raised when an explicit ``worker_count`` or ``cores_per_worker``, or their product, needs more
+            cores than remain usable after reserving ``reserved_core_count``. This check runs after detection completes,
+            so a ``fitting`` run has already spent its SARIMAX fits.
     """
     config_path = config_path.resolve()
     if not config_path.is_file():
@@ -664,7 +668,8 @@ def _extract_all_videos(
         cluster_in_color: Determines whether k-means selection clusters on color channels.
         save_labeled_frames: Determines whether to also save each frame with the model's predictions drawn on it.
         worker_count: The requested extraction worker count, or -1 to resolve automatically.
-        cores_per_worker: The requested cores per worker, or -1 to spread them evenly.
+        cores_per_worker: The requested cores per worker, or -1 for a saturating block per worker when the worker count
+            is automatic and an even split of the usable cores across an explicit one.
         reserved_core_count: The number of cores to leave free.
         display_progress: Determines whether to render the run header and progress bar.
         total_video_count: The total number of videos considered, for the summary.
