@@ -626,6 +626,9 @@ def _build_dataloaders(
     worker_count = run_config["train_settings"]["dataloader_workers"]
     pin_memory = run_config["train_settings"]["dataloader_pin_memory"]
 
+    # Retains the worker processes across epochs. Windows and macOS spawn each worker rather than forking it, so a
+    # worker rebuilt every epoch re-imports this package and the DeepLabCut backend it loads, starving the GPU for
+    # several seconds per worker per epoch.
     if ddp:
         sampler: DistributedSampler = DistributedSampler(
             dataset=train_dataset,
@@ -641,6 +644,7 @@ def _build_dataloaders(
             collate_fn=collate_function,
             num_workers=worker_count,
             pin_memory=pin_memory,
+            persistent_workers=worker_count > 0,
         )
     else:
         train_dataloader = DataLoader(
@@ -650,6 +654,7 @@ def _build_dataloaders(
             collate_fn=collate_function,
             num_workers=worker_count,
             pin_memory=pin_memory,
+            persistent_workers=worker_count > 0,
         )
     valid_dataloader = DataLoader(
         dataset=valid_dataset,

@@ -7,6 +7,13 @@ Authors: Ivan Kondratyev (Inkaros)
 """
 
 import os
+import multiprocessing
+
+# Forces every worker process the library creates to start through spawn. Linux defaults to fork, which hands the
+# child an inherited CUDA context and inherited native thread pools, so a forked worker behaves differently from the
+# Windows and macOS workers that the platform always spawns. The start method has to be selected before any process is
+# created, so it is set here alongside the environment below.
+multiprocessing.set_start_method("spawn", force=True)
 
 # Pins the native math-library thread pools to one thread per worker and quiets OpenCV's logging. These environment
 # variables are read when NumPy, OpenCV, and DeepLabCut initialize their native backends, so they must be set before
