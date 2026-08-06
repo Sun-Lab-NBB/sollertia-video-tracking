@@ -1214,6 +1214,19 @@ def test_redirect_worker_console_active_captures_descriptor_output(tmp_path):
     assert "redirected-stderr" in content
 
 
+def test_redirect_worker_console_records_traceback_in_log(tmp_path):
+    """Verifies that a failure inside the redirected body is written to the log before descriptors are restored."""
+    log_path = tmp_path / "worker.log"
+    with pytest.raises(RuntimeError, match="worker exploded"):
+        with _redirect_worker_console(log_path, active=True):
+            message = "worker exploded"
+            raise RuntimeError(message)
+    content = log_path.read_text()
+    assert "RuntimeError" in content
+    assert "worker exploded" in content
+    assert "Traceback" in content
+
+
 def test_report_training_log_writes_notice(capsys):
     """Verifies that the failure notice names the training log and explains what it captured."""
     _report_training_log(Path("/models/run/train.txt"))

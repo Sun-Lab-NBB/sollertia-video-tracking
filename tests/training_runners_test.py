@@ -10,6 +10,7 @@ mixin ``__init__``.
 
 from types import SimpleNamespace
 import contextlib
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -751,3 +752,20 @@ def test_detector_step_eval_updates_predictions():
     assert ground_truth_record["bboxes"][0].tolist() == [10.0, 10.0, 20.0, 20.0]
     assert prediction_record["bboxes"][0].tolist() == [5.0, 5.0, 10.0, 10.0]
     assert prediction_record["scores"].tolist() == [pytest.approx(0.9)]
+
+
+def test_overwriting_path_rename_replaces_destination_and_restores(tmp_path):
+    """Verifies that the patched rename replaces an existing destination and is undone when the context exits."""
+    source = tmp_path / "snapshot-best-050.pt"
+    destination = tmp_path / "snapshot-050.pt"
+    source.write_text("new")
+    destination.write_text("old")
+    original_rename = Path.rename
+
+    with runners._overwriting_path_rename():
+        assert Path.rename is Path.replace
+        source.rename(destination)
+
+    assert Path.rename is original_rename
+    assert not source.exists()
+    assert destination.read_text() == "new"

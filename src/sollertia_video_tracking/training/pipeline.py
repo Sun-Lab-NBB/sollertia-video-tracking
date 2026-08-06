@@ -7,6 +7,7 @@ import socket
 from typing import Any, TextIO
 import logging
 from pathlib import Path
+import traceback
 import contextlib
 from dataclasses import dataclass
 from collections.abc import Iterator
@@ -499,6 +500,12 @@ def _redirect_worker_console(log_path: Path, *, active: bool) -> Iterator[None]:
         os.dup2(log_descriptor, 1)
         os.dup2(log_descriptor, 2)
         yield
+    except BaseException:
+        # Record the traceback while the descriptors still reach the log. Restoring them below sends the propagating
+        # exception to the console alone, which leaves no record once the terminal is closed or its scrollback rolls,
+        # and a worker that dies inside a spawned process writes only a bare object dump here to explain the run.
+        os.write(log_descriptor, traceback.format_exc().encode("utf-8", errors="replace"))
+        raise
     finally:
         sys.stdout.flush()
         sys.stderr.flush()
