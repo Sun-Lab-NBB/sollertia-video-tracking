@@ -17,9 +17,8 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "version PyTorch publishes no build for resolves to the newest build below it.",
 )
 @click.option(
-    "-v",
-    "--version",
-    "torch_version",
+    "-tv",
+    "--torch-version",
     default=None,
     help="The exact torch version to install, for example '2.9.1'. Omit to install the newest version the wheel index "
     "carries within the 'torch>=2,<3' range this library supports.",

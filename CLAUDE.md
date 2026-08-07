@@ -170,7 +170,7 @@ placeholder row the GUI wrote for an opened-but-untouched frame still reads as p
   same short flag means different things across commands. `-o` is `--overwrite` on `extract`/`prepare` but `--output`
   on `infer`. `-cb` is `--comparison-bodyparts` on `outliers` but `--cudnn-benchmark` on `train`/`infer`. `-d` is
   `--device` on `train`/`infer` but `--detector` on `prepare`. `-e` is `--epochs` on `train` but `--exclusive` on
-  `extract frames`. `-v` is `--videos` on `extract`/`infer` but `--version` on `cuda`.
+  `extract frames`.
 - `slvt infer` accepts videos that are **not** registered in the project, which is what makes de-novo analysis and
   deployment work. `extract outliers` and `extract purge` do not: unregistered paths are skipped with a warning.
 

@@ -175,8 +175,8 @@ The command reports the driver it found, the build it resolved, and the commands
 
 A build that already targets CUDA and reaches the local GPUs is left alone, which makes the command a no-op on a Linux
 host, where the published torch distribution already carries CUDA support. Pass `--force` to replace such a build
-anyway, `--cuda-version` to name the CUDA version instead of reading it from the driver, and `--version` to pin an exact
-torch version rather than taking the newest one the wheel index carries.
+anyway, `--cuda-version` to name the CUDA version instead of reading it from the driver, and `--torch-version` to pin an
+exact torch version rather than taking the newest one the wheel index carries.
 
 ***Note,*** PyTorch publishes no CUDA build for macOS, so the command reports that none applies there. Apple hardware
 runs through the Metal (MPS) backend, which the standard distribution already provides.
