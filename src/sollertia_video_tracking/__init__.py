@@ -34,6 +34,12 @@ os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "-8")
 # regardless of any inherited MPLBACKEND, keeping the spawned workers display-independent.
 os.environ["MPLBACKEND"] = "Agg"
 
+from .hardware import (  # noqa: E402 - after thread-limit setup
+    TorchInstaller,
+    TorchInstallationStatus,
+    TorchInstallationSummary,
+    install_cuda_torch,
+)
 from .training import (  # noqa: E402 - after thread-limit setup
     TrainingSummary,
     OptimizationProfile,
@@ -79,6 +85,9 @@ __all__ = [
     "PurgeSummary",
     "RefinementDirectoryStatus",
     "RefinementStatusSummary",
+    "TorchInstallationStatus",
+    "TorchInstallationSummary",
+    "TorchInstaller",
     "TrackingMethod",
     "TrainingDatasetSummary",
     "TrainingSummary",
@@ -90,6 +99,7 @@ __all__ = [
     "get_available_object_detectors",
     "get_available_pose_models",
     "get_available_super_animals",
+    "install_cuda_torch",
     "purge_labeled_data",
     "resolve_inference_profile",
     "resolve_optimization_profile",

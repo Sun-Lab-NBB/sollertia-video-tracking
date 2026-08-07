@@ -1,4 +1,4 @@
-"""Provides shared device, capability, and mixed-precision detection for the training and inference optimizers."""
+"""Provides the shared device and capability detection, and the CUDA-enabled PyTorch build installation."""
 
 from .detection import (
     DEFAULT_RESERVED_CPU_THREADS,
@@ -13,13 +13,23 @@ from .detection import (
     apply_backend_flags,
     resolve_target_device,
 )
+from .torch_installation import (
+    TorchInstaller,
+    TorchInstallationStatus,
+    TorchInstallationSummary,
+    install_cuda_torch,
+)
 
 __all__ = [
     "DEFAULT_RESERVED_CPU_THREADS",
     "AmpMode",
     "DeviceType",
     "Toggle",
+    "TorchInstallationStatus",
+    "TorchInstallationSummary",
+    "TorchInstaller",
     "apply_backend_flags",
+    "install_cuda_torch",
     "precision_label",
     "resolve_amp_dtype",
     "resolve_target_device",
