@@ -34,8 +34,8 @@ Command-Line Interface
    :prog: slvt
    :nested: full
 
-Hardware Detection
-==================
+Hardware Detection and Setup
+============================
 
 .. automodule:: sollertia_video_tracking.hardware
    :members:

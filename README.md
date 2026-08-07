@@ -59,6 +59,7 @@ ___
 - [Installation](#installation)
 - [Usage](#usage)
   - [CLI Commands](#cli-commands)
+  - [Enabling CUDA Support](#enabling-cuda-support)
   - [Workflow Overview](#workflow-overview)
   - [Extracting Initial Frames](#extracting-initial-frames)
   - [Labeling Frames](#labeling-frames)
@@ -121,6 +122,10 @@ ___
 Use the following command to install the library and all of its dependencies via [pip](https://pip.pypa.io/en/stable/):
 `pip install sollertia-video-tracking`
 
+***Note,*** the torch distribution published for Windows carries no CUDA support, so a stock install there runs on the
+CPU. Run `slvt cuda` after installing to replace it with the build the local NVIDIA driver runs. See
+[Enabling CUDA Support](#enabling-cuda-support) for details.
+
 ___
 
 ## Usage
@@ -139,6 +144,7 @@ This library provides the `slvt` CLI that exposes the following commands:
 | `prepare`          | Creates a training-dataset shuffle, selecting the model, weights, augmentation, and split       |
 | `train`            | Trains a shuffle with hardware optimizations and a clean progress monitor                       |
 | `infer`            | Analyzes videos with a trained model, distributing whole videos across GPU or CPU worker slots  |
+| `cuda`             | Installs the CUDA-enabled PyTorch build matching the local NVIDIA driver                        |
 
 Every `slvt` input is an option: no command takes positional arguments. Options offer both a long form and a short
 form, which may be multi-letter (`--config-path` and `-cfg`) or single-letter (`--videos` and `-v`), and every command
@@ -155,6 +161,25 @@ name, which then carries its own parameters: `slvt extract --config-path PATH --
 Use `slvt --help`, `slvt extract --help`, or `slvt COMMAND --help` for detailed usage information. Every option's help
 text documents its own defaults and interactions, so the sections below cover the workflow and the choices that matter
 rather than restating each flag.
+
+### Enabling CUDA Support
+
+The torch distribution published for Windows carries no CUDA support, so a stock install there runs training and
+inference on the CPU. `slvt cuda` repairs that. It reads the CUDA version the local NVIDIA driver runs, resolves the
+newest PyTorch build that version supports, and replaces the installed torch, torchvision, and torchaudio distributions
+with it. The replacement runs through uv where it is available and through pip otherwise, and it targets the environment
+this library is installed into rather than whichever environment happens to be active.
+
+The command reports the driver it found, the build it resolved, and the commands it would run, changing nothing until
+`--yes` is given: `slvt cuda`
+
+A build that already targets CUDA and reaches the local GPUs is left alone, which makes the command a no-op on a Linux
+host, where the published torch distribution already carries CUDA support. Pass `--force` to replace such a build
+anyway, `--cuda-version` to name the CUDA version instead of reading it from the driver, and `--torch-version` to pin an
+exact torch version rather than taking the newest one the wheel index carries.
+
+***Note,*** PyTorch publishes no CUDA build for macOS, so the command reports that none applies there. Apple hardware
+runs through the Metal (MPS) backend, which the standard distribution already provides.
 
 ### Workflow Overview
 

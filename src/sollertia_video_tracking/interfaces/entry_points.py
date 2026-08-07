@@ -3,6 +3,7 @@
 import click
 
 from .gui import gui_command
+from .cuda import cuda_command
 from .infer import infer_command
 from .train import train_command
 from .extract import extract_group
@@ -17,6 +18,7 @@ def slvt_cli() -> None:
     """Designs and deploys DeepLabCut video-tracking pipelines for the Sollertia platform."""
 
 
+slvt_cli.add_command(cmd=cuda_command)
 slvt_cli.add_command(cmd=extract_group)
 slvt_cli.add_command(cmd=gui_command)
 slvt_cli.add_command(cmd=prepare_command)

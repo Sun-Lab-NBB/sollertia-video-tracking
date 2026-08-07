@@ -96,7 +96,7 @@ import or a handwritten driver script on your own initiative. An explicit user r
 the user directly asks for a driver script or to use the Python API, provide it.
 
 The CLI is defined in `src/sollertia_video_tracking/interfaces/`: `entry_points.py` registers the root group, and
-`extract.py`, `gui.py`, `prepare.py`, `train.py`, and `infer.py` own one command each. Read the relevant module, or
+`extract.py`, `gui.py`, `prepare.py`, `train.py`, `infer.py`, and `cuda.py` own one command each. Read the module, or
 run `slvt COMMAND --help`, before constructing a non-trivial invocation, and verify any recalled recipe against
 `--help` before trusting it. `README.md` is authoritative on user-facing behavior.
 
@@ -113,6 +113,7 @@ run `slvt COMMAND --help`, before constructing a non-trivial invocation, and ver
 | "find what the model got wrong", "next refinement round"               | `slvt extract --config-path CFG outliers` |
 | "what still needs labeling?", "how much is left?"                      | `slvt extract --config-path CFG pending`  |
 | "start completely over", "I changed the crop"                          | `slvt extract --config-path CFG purge`    |
+| "torch runs on the CPU", "enable CUDA", "the GPU is not being used"    | `slvt cuda`                               |
 
 Two requests have no `slvt` command and MUST be routed to `slvt gui`: **project creation with its `video_sets`
 registration**, and **DeepLabCut's dataset merge** that advances the project's `iteration`. There is no other way to
@@ -194,6 +195,10 @@ Do not launch `slvt train` or `slvt infer` speculatively to check something. The
 of minutes to hours and collide with any run the user already has going. Confirm which videos, which shuffle, and
 which GPUs before starting one.
 
+**You MUST NOT run `slvt cuda --yes` unless the user has seen the preview and explicitly approved it.** It uninstalls
+and reinstalls the environment's torch distributions, which downloads gigabytes and breaks every concurrent run in that
+environment. Without `--yes` it only reports what it would run, so run the preview, show the user its output, and stop.
+
 ### Running long jobs
 
 Measured on the eye-tracking project's ~252k-frame (70-minute, 60 fps) videos:
@@ -248,7 +253,7 @@ for the Sollertia platform through the single `slvt` command-line interface.
 | `src/sollertia_video_tracking/frame_extraction/` | Parallel k-means and outlier frame extraction, core planning      |
 | `src/sollertia_video_tracking/training/`         | Shuffle creation, the DDP/AMP training pipeline, evaluation       |
 | `src/sollertia_video_tracking/inference/`        | Multi-device analysis orchestration and the runner-builder patch  |
-| `src/sollertia_video_tracking/hardware/`         | Shared device, capability, and AMP detection used by both paths   |
+| `src/sollertia_video_tracking/hardware/`         | Shared device and AMP detection, and the CUDA torch installer     |
 | `src/sollertia_video_tracking/reporting/`        | `LiveBar`, the progress-bar base every bar subclasses             |
 | `tests/`                                         | Pytest suite, one `<subpackage>_<module>_test.py` per module      |
 | `docs/`                                          | Sphinx API documentation sources built by `tox -e docs`           |
