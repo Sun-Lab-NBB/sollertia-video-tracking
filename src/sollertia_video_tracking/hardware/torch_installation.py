@@ -38,7 +38,7 @@ _NUMPY_REQUIREMENT: str = "numpy>=1.26,<2"
 _VERIFICATION_SCRIPT: str = (
     "import torch; print(torch.__version__); print(torch.version.cuda or ''); print(int(torch.cuda.is_available()))"
 )
-"""Reports the replaced build's version, CUDA version, and GPU reachability from a fresh interpreter."""
+"""Reports the newly installed build's version, CUDA version, and GPU reachability from a fresh interpreter."""
 
 _VERIFICATION_LINE_COUNT: int = 3
 """The number of lines the verification script prints, one per reported field."""
@@ -102,7 +102,7 @@ class TorchInstallationSummary:
     gpu_names: tuple[str, ...]
     """The names of the GPUs nvidia-smi reported, in the order it reported them."""
     driver_cuda_version: str | None
-    """The CUDA version the local driver runs, or None when no driver answered."""
+    """The CUDA version the local driver runs, or None when no driver answered or its report carried no version."""
     wheel_variant: str | None
     """The resolved wheel-variant tag, such as ``cu130``, or None when no variant applies."""
     index_url: str | None
@@ -194,14 +194,24 @@ def install_cuda_torch(
                 "PyTorch publishes no CUDA build for macOS. The standard build already carries the Metal (MPS) "
                 "backend this library uses on Apple hardware."
             )
-            return _summarize_environment(TorchInstallationStatus.UNAVAILABLE, gpu_names, driver_cuda, reason=reason)
+            return _summarize_environment(
+                status=TorchInstallationStatus.UNAVAILABLE,
+                gpu_names=gpu_names,
+                driver_cuda=driver_cuda,
+                reason=reason,
+            )
         requested = _parse_cuda_version(cuda_version) if cuda_version is not None else driver_cuda
         if requested is None:
             reason = (
                 "nvidia-smi reported no CUDA version, which means no NVIDIA driver is installed or none is visible "
                 "from this environment. Install the driver, or name the CUDA version explicitly."
             )
-            return _summarize_environment(TorchInstallationStatus.UNAVAILABLE, gpu_names, driver_cuda, reason=reason)
+            return _summarize_environment(
+                status=TorchInstallationStatus.UNAVAILABLE,
+                gpu_names=gpu_names,
+                driver_cuda=driver_cuda,
+                reason=reason,
+            )
         variant = _resolve_wheel_variant(requested)
         if variant is None:
             oldest = _format_cuda_version(_CUDA_WHEEL_VARIANTS[0])
@@ -209,14 +219,23 @@ def install_cuda_torch(
                 f"CUDA {_format_cuda_version(requested)} predates CUDA {oldest}, the oldest version PyTorch still "
                 f"publishes a wheel variant for. Upgrade the NVIDIA driver."
             )
-            return _summarize_environment(TorchInstallationStatus.UNAVAILABLE, gpu_names, driver_cuda, reason=reason)
+            return _summarize_environment(
+                status=TorchInstallationStatus.UNAVAILABLE,
+                gpu_names=gpu_names,
+                driver_cuda=driver_cuda,
+                reason=reason,
+            )
         resolved_index = f"{_WHEEL_INDEX_ROOT}/{variant}"
     else:
         variant = resolved_index.rstrip("/").rpartition("/")[2]
 
     if torch.version.cuda is not None and torch.cuda.is_available() and not force:
         return _summarize_environment(
-            TorchInstallationStatus.ENABLED, gpu_names, driver_cuda, variant=variant, index=resolved_index
+            status=TorchInstallationStatus.ENABLED,
+            gpu_names=gpu_names,
+            driver_cuda=driver_cuda,
+            variant=variant,
+            index=resolved_index,
         )
 
     packages = tuple(name for name in _TORCH_PACKAGES if _is_installed(name)) or _DEFAULT_TORCH_PACKAGES
@@ -230,9 +249,9 @@ def install_cuda_torch(
 
     if not execute:
         return _summarize_environment(
-            TorchInstallationStatus.PREVIEWED,
-            gpu_names,
-            driver_cuda,
+            status=TorchInstallationStatus.PREVIEWED,
+            gpu_names=gpu_names,
+            driver_cuda=driver_cuda,
             variant=variant,
             index=resolved_index,
             packages=packages,
@@ -273,7 +292,8 @@ def _summarize_environment(
     Args:
         status: The outcome the summary reports.
         gpu_names: The names of the GPUs nvidia-smi reported.
-        driver_cuda: The CUDA version the local driver runs, or None when no driver answered.
+        driver_cuda: The CUDA version the local driver runs, or None when no driver answered or its report carried no
+            version.
         reason: The reason no CUDA build applies to this machine.
         variant: The resolved wheel-variant tag, or None when no variant applies.
         index: The wheel index the build would be installed from, or None when no variant applies.
@@ -485,10 +505,10 @@ def _run_installer_command(command: tuple[str, ...]) -> None:
 
 
 def _verify_installation() -> tuple[str | None, str | None, bool]:
-    """Reads the replaced build's identity from a fresh interpreter.
+    """Reads the newly installed build's identity from a fresh interpreter.
 
-    The torch module this process imported at startup keeps reporting the replaced build, so the verification runs in
-    a subprocess that imports the newly installed one.
+    The torch module this process imported at startup keeps reporting the build the replacement removed, so the
+    verification runs in a subprocess that imports the new one.
 
     Returns:
         A tuple of the installed torch version, the CUDA version it targets, and whether it reaches a local GPU. The
