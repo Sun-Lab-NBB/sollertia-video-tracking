@@ -13,6 +13,7 @@ from ..hardware import (
     AmpMode,
     DeviceType,
     warn,
+    toggle_label,
     resolve_toggle,
     precision_label,
     supports_ampere,
@@ -117,6 +118,36 @@ class OptimizationProfile:
         ]
         suffix = f", {'+'.join(extras)}" if extras else ""
         return f"{where} | {precision} | workers={self.dataloader_workers} pin={self.pin_memory}{suffix}"
+
+    def report_rows(self) -> tuple[tuple[str, str], ...]:
+        """Builds the resolved state of every optimization as label and value pairs for the pre-flight report.
+
+        Returns:
+            One ``(label, value)`` pair per optimization, in display order, each labeled by the setting it reports.
+            The gradient-scaler and CPU-thread rows appear only where they apply, since float16 is the sole
+            precision requiring a scaler and the thread count is restored for CPU training alone.
+        """
+        on_cuda = self.device == "cuda"
+        rows = [
+            ("device", f"{self.device} {list(self.gpus)}" if on_cuda else self.device),
+            ("strategy", str(self.multi_gpu_strategy)),
+            ("processes", str(self.world_size)),
+            ("precision", precision_label(self.amp_dtype)),
+        ]
+        if self.use_gradient_scaler:
+            rows.append(("gradient scaler", toggle_label(enabled=True)))
+        rows.extend(
+            [
+                ("tf32", toggle_label(enabled=self.tf32)),
+                ("cudnn.benchmark", toggle_label(enabled=self.cudnn_benchmark)),
+                ("torch.compile", toggle_label(enabled=self.torch_compile)),
+                ("dataloader workers", str(self.dataloader_workers)),
+                ("pin_memory", toggle_label(enabled=self.pin_memory)),
+            ]
+        )
+        if self.cpu_threads is not None:
+            rows.append(("cpu threads", str(self.cpu_threads)))
+        return tuple(rows)
 
 
 def resolve_optimization_profile(

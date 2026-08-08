@@ -109,6 +109,65 @@ def test_describe_mps_uppercases_device() -> None:
     assert profile.describe() == "MPS | fp32 | workers=1"
 
 
+# InferenceProfile.report_rows
+def test_report_rows_cuda_lists_every_optimization_with_its_resolved_value() -> None:
+    """Verifies that a CUDA profile reports each optimization's resolved state, naming the selected GPU indices."""
+    profile = _profile(device="cuda", gpus=(0, 1), gpu_processes=2, chunks=4)
+    assert profile.report_rows() == (
+        ("device", "cuda [0, 1]"),
+        ("precision", "bfloat16"),
+        ("tf32", "on"),
+        ("cudnn.benchmark", "on"),
+        ("channels_last", "on"),
+        ("torch.compile", "on"),
+        ("gpu processes", "2 per gpu"),
+        ("chunks", "4 per video"),
+    )
+
+
+def test_report_rows_cpu_replaces_the_gpu_row_with_the_core_budget() -> None:
+    """Verifies that a CPU profile reports its worker and thread counts instead of a per-GPU process count."""
+    profile = _profile(
+        device="cpu",
+        gpus=(),
+        gpu_processes=0,
+        cpu_workers=3,
+        cpu_threads_per_worker=8,
+        amp_dtype=None,
+        tf32=False,
+        cudnn_benchmark=False,
+        channels_last=False,
+        torch_compile=False,
+    )
+    rows = dict(profile.report_rows())
+    assert rows["device"] == "cpu"
+    assert rows["cpu workers"] == "3"
+    assert rows["cpu threads"] == "8 per worker"
+    assert "gpu processes" not in rows
+
+
+def test_report_rows_mps_omits_both_parallelism_breakdowns() -> None:
+    """Verifies that a device with neither GPU nor CPU worker slots reports only its chunk count."""
+    profile = _profile(device="mps", gpus=(), gpu_processes=0, cpu_workers=0, cpu_threads_per_worker=None)
+    labels = [label for label, _value in profile.report_rows()]
+    assert "gpu processes" not in labels
+    assert "cpu workers" not in labels
+    assert labels[-1] == "chunks"
+
+
+def test_report_rows_renders_disabled_optimizations_as_off() -> None:
+    """Verifies that a disabled optimization is reported as off rather than omitted from the report."""
+    profile = _profile(tf32=False, cudnn_benchmark=False, channels_last=False, torch_compile=False, amp_dtype=None)
+    rows = dict(profile.report_rows())
+    assert rows["precision"] == "fp32"
+    assert (rows["tf32"], rows["cudnn.benchmark"], rows["channels_last"], rows["torch.compile"]) == (
+        "off",
+        "off",
+        "off",
+        "off",
+    )
+
+
 # resolve_inference_profile
 
 

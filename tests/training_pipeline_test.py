@@ -774,8 +774,10 @@ def test_train_model_retains_monitor_resources_when_renderer_outlives_join(monke
     monitor = _FakeMonitor.instances[0]
     assert monitor.stopped
     assert not records.manager.shutdown_called
-    # The renderer never drew its closing newline, so the teardown supplies one.
-    assert written == ["\n"]
+    # The renderer never drew its closing newline, so the teardown supplies one. The run also opens with the
+    # resolved-optimization report on this stream, so the closing newline is isolated from that one block here.
+    assert [entry for entry in written if entry == "\n"] == ["\n"]
+    assert written[-1] == "\n"
 
 
 def test_train_model_without_progress_skips_monitor(monkeypatch, tmp_path):
@@ -1024,6 +1026,22 @@ def test_train_model_start_up_failure_of_the_monitor_is_reported(monkeypatch, tm
         train_model(config=tmp_path / "config.yaml", profile=_profile(device="cpu"))
 
     assert records.spawn == []
+
+
+def test_train_model_emits_the_optimization_report(monkeypatch, tmp_path, capsys):
+    """Verifies that train_model writes the resolved-optimization report, so deleting the call fails here."""
+    loader = _FakeLoader(
+        model_cfg={"train_settings": {"epochs": 10}},
+        pose_task=Task.BOTTOM_UP,
+        model_folder=tmp_path,
+    )
+    _patch_train_model_deps(monkeypatch=monkeypatch, loader=loader, evaluation=_FakeEval())
+
+    train_model(config=str(tmp_path / "config.yaml"), profile=_profile(device="cpu"), shuffle=2, epochs=None)
+
+    report = capsys.readouterr().err
+    assert "-- training optimizations " in report
+    assert "cudnn.benchmark" in report
 
 
 # _evaluate_after_training

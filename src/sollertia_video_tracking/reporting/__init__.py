@@ -1,4 +1,4 @@
-"""Provides the shared live progress-bar, worker-supervision, and failure-reporting assets every pipeline builds on."""
+"""Provides the shared live progress-bar, worker-supervision, failure-reporting, and optimization-reporting assets."""
 
 from .failures import (
     PipelineFailedError,
@@ -10,6 +10,7 @@ from .failures import (
 )
 from .live_bar import LiveBar, format_duration
 from .supervision import WorkerExit, ProcessSupervisor
+from .optimization_report import write_optimization_report
 
 __all__ = [
     "LiveBar",
@@ -22,4 +23,5 @@ __all__ = [
     "format_duration",
     "is_interrupt_signal",
     "read_file_tail",
+    "write_optimization_report",
 ]

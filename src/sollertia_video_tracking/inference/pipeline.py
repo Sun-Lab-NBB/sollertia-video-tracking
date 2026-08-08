@@ -37,6 +37,7 @@ from ..reporting import (
     format_duration,
     describe_process_exit,
     enable_native_crash_dumps,
+    write_optimization_report,
 )
 from .optimization import InferenceProfile, apply_runtime_optimizations
 from ..frame_extraction import AggregateBar, plan_core_allocation, make_progress_reporter
@@ -295,6 +296,12 @@ def run_inference(
     with the profile's mixed precision and channels-last format, and each video's predictions are written as
     DeepLabCut's native ``.h5`` prediction file, beside the video or into its chosen output directory.
 
+    Notes:
+        Before the progress bar takes the terminal, the profile's resolved optimizations are written to the standard
+        error stream alongside the worker count the run actually spawns, so a run redirected to a log opens with the
+        configuration it ran under. That report is written whatever ``display_progress`` is set to, because it records
+        the run rather than tracking its progress.
+
     Args:
         config: The path of the DeepLabCut project configuration file.
         videos: The video files to analyze.
@@ -375,6 +382,7 @@ def run_inference(
     # positive placeholder and the video's own failure is reported by the worker that tries to analyze it.
     totals = {index: _probe_frame_count(video) or 1 for index, video in enumerate(video_paths)}
     slots = _build_slots(profile=profile, video_count=len(video_paths))
+    _report_inference_optimizations(profile=profile, worker_count=len(slots))
 
     # Resolves each video's crop once, in the parent, so every worker analyzes the same region the frames were extracted
     # from. A caller-supplied override takes precedence over the project configuration, letting de-novo videos be
@@ -557,6 +565,22 @@ def _resolve_video_cropping(project_config: dict[str, Any], video: str) -> list[
             return None
         corners.append(int(corner))
     return corners
+
+
+def _report_inference_optimizations(profile: InferenceProfile, worker_count: int) -> None:
+    """Writes the resolved-optimization report for the run, including the worker count it actually spawns.
+
+    The profile's worker count is the configured ceiling, which a run with less work than that never
+    reaches, since ``_build_slots`` spawns no more workers than there are work units. Reporting the spawned count,
+    and the ceiling alongside it whenever the two differ, keeps the report describing the run rather than the machine.
+
+    Args:
+        profile: The resolved optimization profile whose state is reported.
+        worker_count: The number of worker processes the run spawns.
+    """
+    configured = profile.total_workers
+    workers = f"{worker_count} of {configured} configured" if worker_count < configured else str(worker_count)
+    write_optimization_report(title="inference optimizations", rows=(*profile.report_rows(), ("workers", workers)))
 
 
 def _describe_precision(profile: InferenceProfile) -> str:
@@ -1049,6 +1073,7 @@ def _run_inference_chunked(
             task_id += 1
 
     slots = _build_slots(profile=profile, video_count=len(work_items), chunks=profile.chunks)
+    _report_inference_optimizations(profile=profile, worker_count=len(slots))
 
     manager = _start_inference_manager()
     video_queue = manager.Queue()
