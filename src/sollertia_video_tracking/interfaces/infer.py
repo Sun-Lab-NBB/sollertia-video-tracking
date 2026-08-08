@@ -14,7 +14,9 @@ from ..inference import (
     run_inference,
     resolve_project_videos,
     detect_fixed_input_size,
+    discover_directory_videos,
     resolve_inference_profile,
+    ensure_unique_prediction_targets,
 )
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
@@ -39,8 +41,19 @@ _CROP_FIELD_COUNT: int = 4
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     metavar="PATH",
     help="A video file to analyze. Provide the option several times for several videos. These need not be registered "
-    "in the project, so de-novo videos can be analyzed, optionally at a chosen region with --crop. Omit --videos to "
-    "analyze every video registered in the project's config.yaml.",
+    "in the project, so de-novo videos can be analyzed, optionally at a chosen region with --crop. Cannot be combined "
+    "with --videos-directory. Omit both to analyze every video registered in the project's config.yaml.",
+)
+@click.option(
+    "-vd",
+    "--videos-directory",
+    default=None,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    metavar="DIRECTORY",
+    help="A directory whose videos are all analyzed, scanned one level deep for the video extensions DeepLabCut "
+    "recognizes. Subdirectories are not searched, and the videos need not be registered in the project. Cannot be "
+    "combined with --videos. Because the discovered order is not chosen by the operator, the run takes a single "
+    "--crop rectangle and a single --output directory rather than per-video values.",
 )
 @click.option(
     "-o",
@@ -216,6 +229,7 @@ _CROP_FIELD_COUNT: int = 4
 def infer_command(
     config_path: Path,
     videos: tuple[Path, ...],
+    videos_directory: Path | None,
     output: tuple[Path, ...],
     shuffle: int,
     snapshot_index: int | None,
@@ -240,8 +254,10 @@ def infer_command(
     """Analyzes videos with a trained DeepLabCut model, distributing the work across GPU or CPU worker slots.
 
     ``--config-path`` names the DeepLabCut project's config.yaml whose trained model runs. Provide the videos to analyze
-    with ``--videos`` (given several times for several files), or omit ``--videos`` to analyze every existing video
-    registered in the project configuration. Each worker pulls work from a shared queue, so the work is balanced across
+    with ``--videos`` (given several times for several files), point ``--videos-directory`` at one directory to analyze
+    every video stored directly inside it, or give neither to analyze every existing video registered in the project
+    configuration. A directory run takes one shared ``--crop`` and one shared ``--output``, because its video order is
+    discovered rather than chosen. Each worker pulls work from a shared queue, so the work is balanced across
     slots. By default a worker analyzes a whole video, and ``--chunks`` instead splits each running video into that many
     contiguous frame ranges analyzed concurrently, with the parent stitching each video's ranges back into one
     prediction file. Chunking supports only single-animal bottom-up models, so a multi-animal or top-down model requires
@@ -260,28 +276,54 @@ def infer_command(
         )
         raise click.ClickException(message=message) from error
 
-    whole_project = not videos
-    resolved_videos: list[Path] = list(resolve_project_videos(config_path)) if whole_project else list(videos)
-    unique_videos: list[str | Path] = list({str(video.resolve()): video for video in resolved_videos}.values())
-    if not unique_videos:
+    if videos and videos_directory is not None:
         message = (
-            "Unable to run inference without videos. Provide one or more videos with --videos, or register videos "
-            "in the project's config.yaml to analyze the whole project."
+            "Unable to combine --videos with --videos-directory. Pass --videos to analyze specific files, or "
+            "--videos-directory to analyze every video stored in one directory."
         )
         raise click.UsageError(message=message)
-    if whole_project:
-        click.echo(message=f"analyzing {len(unique_videos)} videos from the project configuration")
 
-    crop_override = _resolve_crop_override(crop=crop, video_count=len(unique_videos), whole_project=whole_project)
+    # A discovered video list carries no operator-chosen order, so the source is recorded here to reject the per-video
+    # --crop and --output pairings that such an order would make ambiguous.
+    selection_source: str | None = None
+    if videos_directory is not None:
+        resolved_videos: list[Path] = discover_directory_videos(videos_directory)
+        selection_source = f"'{videos_directory}'"
+    elif videos:
+        resolved_videos = list(videos)
+    else:
+        resolved_videos = list(resolve_project_videos(config_path))
+        selection_source = "the whole project"
+    unique_videos: list[str | Path] = list({str(video.resolve()): video for video in resolved_videos}.values())
+    if not unique_videos:
+        if videos_directory is not None:
+            message = (
+                f"Unable to run inference on the requested directory. '{videos_directory}' holds no video files "
+                f"directly inside it. Point --videos-directory at the directory that stores the videos, as "
+                f"subdirectories are not searched, or name the videos with --videos."
+            )
+        else:
+            message = (
+                "Unable to run inference without videos. Provide one or more videos with --videos, or register videos "
+                "in the project's config.yaml to analyze the whole project."
+            )
+        raise click.UsageError(message=message)
+    if selection_source is not None:
+        click.echo(message=f"analyzing {len(unique_videos)} videos from {selection_source}")
+
+    crop_override = _resolve_crop_override(crop=crop, video_count=len(unique_videos), selection_source=selection_source)
     destination_override = _resolve_output_override(
-        output=output, video_count=len(unique_videos), whole_project=whole_project
+        output=output, video_count=len(unique_videos), selection_source=selection_source
     )
 
-    # Detects whether the run feeds the network one fixed input size so the cuDNN autotuner's 'auto' default can enable
-    # itself only when it pays off.
-    fixed_input_size = detect_fixed_input_size(config=config_path, videos=unique_videos, crop_override=crop_override)
-
     try:
+        ensure_unique_prediction_targets(videos=unique_videos, destinations=destination_override)
+
+        # Detects whether the run feeds the network one fixed input size so the cuDNN autotuner's 'auto' default can
+        # enable itself only when it pays off.
+        fixed_input_size = detect_fixed_input_size(
+            config=config_path, videos=unique_videos, crop_override=crop_override
+        )
         profile = resolve_inference_profile(
             device=DeviceType(device),
             gpus=gpu_indices,
@@ -356,35 +398,36 @@ def _parse_crop_option(value: str) -> tuple[int, int, int, int]:
 
 
 def _resolve_crop_override(
-    crop: tuple[str, ...], video_count: int, *, whole_project: bool
+    crop: tuple[str, ...], video_count: int, selection_source: str | None
 ) -> list[tuple[int, int, int, int]] | None:
     """Resolves the ``--crop`` option values into one crop rectangle per analyzed video, or None when unset.
 
     A single ``--crop`` is applied uniformly to every video. Several ``--crop`` rectangles are matched to the videos in
-    order and must equal the video count. Because the whole-project video order is not user-controlled, per-video crops
-    cannot be combined with the whole-project default and require explicit ``--videos``.
+    order and must equal the video count. A discovered video order is not user-controlled, so per-video crops require
+    the videos to be listed explicitly with ``--videos``.
 
     Args:
         crop: The raw ``--crop`` option values, each a ``x1,x2,y1,y2`` string.
         video_count: The number of videos the run will analyze.
-        whole_project: Determines whether the run defaults to every registered project video.
+        selection_source: The phrase naming where a discovered video list came from, used by the error that rejects
+            per-video rectangles, or None when the videos were listed explicitly with ``--videos``.
 
     Returns:
         One ``(x1, x2, y1, y2)`` rectangle per video, or None when no ``--crop`` was given.
 
     Raises:
-        click.UsageError: When a rectangle is malformed, when several rectangles are given while defaulting to the whole
-            project, or when the rectangle count matches neither one nor the video count.
+        click.UsageError: When a rectangle is malformed, when several rectangles are given for a discovered video list,
+            or when the rectangle count matches neither one nor the video count.
     """
     if not crop:
         return None
     rectangles = [_parse_crop_option(value) for value in crop]
     if len(rectangles) == 1:
         return rectangles * video_count
-    if whole_project:
+    if selection_source is not None:
         message = (
-            "Unable to apply per-video --crop rectangles when analyzing the whole project. Pass a single --crop to "
-            "apply one rectangle to every video, or list the videos explicitly with --videos and one --crop each."
+            f"Unable to apply per-video --crop rectangles when analyzing {selection_source}. Pass a single --crop to "
+            f"apply one rectangle to every video, or list the videos explicitly with --videos and one --crop each."
         )
         raise click.UsageError(message=message)
     if len(rectangles) != video_count:
@@ -396,36 +439,38 @@ def _resolve_crop_override(
     return rectangles
 
 
-def _resolve_output_override(output: tuple[Path, ...], video_count: int, *, whole_project: bool) -> list[Path] | None:
+def _resolve_output_override(
+    output: tuple[Path, ...], video_count: int, selection_source: str | None
+) -> list[Path] | None:
     """Resolves the ``--output`` option values into one output directory per analyzed video, or None when unset.
 
     A single ``--output`` collects every video's predictions in one directory. Several ``--output`` directories are
-    matched to the videos in order and must equal the video count. Because the whole-project video order is not
-    user-controlled, per-video directories cannot be combined with the whole-project default and require explicit
-    ``--videos``.
+    matched to the videos in order and must equal the video count. A discovered video order is not user-controlled, so
+    per-video directories require the videos to be listed explicitly with ``--videos``.
 
     Args:
         output: The raw ``--output`` option values, each a directory path.
         video_count: The number of videos the run will analyze.
-        whole_project: Determines whether the run defaults to every registered project video.
+        selection_source: The phrase naming where a discovered video list came from, used by the error that rejects
+            per-video directories, or None when the videos were listed explicitly with ``--videos``.
 
     Returns:
         One output directory per video, or None when no ``--output`` was given.
 
     Raises:
-        click.UsageError: When several directories are given while defaulting to the whole project, or when the
-            directory count matches neither one nor the video count.
+        click.UsageError: When several directories are given for a discovered video list, or when the directory count
+            matches neither one nor the video count.
     """
     if not output:
         return None
     directories = list(output)
     if len(directories) == 1:
         return directories * video_count
-    if whole_project:
+    if selection_source is not None:
         message = (
-            "Unable to apply per-video --output directories when analyzing the whole project. Pass a single --output "
-            "to collect every video's predictions in one directory, or list the videos explicitly with --videos and "
-            "one --output each."
+            f"Unable to apply per-video --output directories when analyzing {selection_source}. Pass a single "
+            f"--output to collect every video's predictions in one directory, or list the videos explicitly with "
+            f"--videos and one --output each."
         )
         raise click.UsageError(message=message)
     if len(directories) != video_count:

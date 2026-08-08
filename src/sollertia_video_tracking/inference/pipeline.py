@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import cv2
 import psutil
 import torch.multiprocessing as mp
+from deeplabcut.utils.auxfun_videos import SUPPORTED_VIDEOS, DEFAULT_EXCLUDE_PATTERNS
 from deeplabcut.utils.auxiliaryfunctions import read_config, read_plainconfig
 from deeplabcut.pose_estimation_pytorch.apis import videos as dlc_videos
 from deeplabcut.pose_estimation_pytorch.data import DLCLoader
@@ -57,6 +58,9 @@ DeepLabCut's own autocast and compile are disabled while its async decode pipeli
 
 _CROP_FIELD_COUNT: int = 4
 """The number of comma-separated integers, ``x1,x2,y1,y2``, in a video's config.yaml crop specification."""
+
+_VIDEO_SUFFIXES: frozenset[str] = frozenset(f".{extension}" for extension in SUPPORTED_VIDEOS)
+"""The lowercase file extensions DeepLabCut recognizes as video containers, used to filter a scanned directory."""
 
 _RESULT_POLL_TIMEOUT_SECONDS: float = 5.0
 """The per-result wait when draining the worker results queue after every worker has already ended. It bounds the
@@ -230,6 +234,60 @@ def resolve_project_videos(config: str | Path) -> list[Path]:
     registered = project.get("video_sets") or {}
     videos = [Path(entry) for entry in registered]
     return [video for video in videos if video.exists()]
+
+
+def discover_directory_videos(directory: str | Path) -> list[Path]:
+    """Returns the video files stored directly inside a directory, sorted by name.
+
+    The scan stays one level deep and keeps only the extensions DeepLabCut recognizes as video containers, skipping
+    the rendered ``_labeled`` and ``_full`` companion files DeepLabCut writes beside a video it has analyzed. Sorting
+    the result makes the selection reproducible, as directory-entry order is filesystem-dependent.
+
+    Args:
+        directory: The directory to scan.
+
+    Returns:
+        The video files stored directly inside the directory, sorted by name.
+    """
+    return sorted(
+        entry
+        for entry in Path(directory).iterdir()
+        if entry.is_file()
+        and entry.suffix.lower() in _VIDEO_SUFFIXES
+        and not any(entry.match(pattern) for pattern in DEFAULT_EXCLUDE_PATTERNS)
+    )
+
+
+def ensure_unique_prediction_targets(
+    videos: Sequence[str | Path], destinations: Sequence[str | Path] | None = None
+) -> None:
+    """Raises when two of the selected videos would write their predictions to the same file.
+
+    DeepLabCut names a prediction file after the analyzed video's stem alone, so two videos that share a stem and
+    resolve to one output directory claim one file name, and whichever worker finishes last overwrites the other's
+    predictions. Two videos sharing a stem while writing to separate directories keep distinct files and are accepted.
+
+    Args:
+        videos: The video files the run will analyze.
+        destinations: The output directory each video's predictions are written to, parallel to ``videos``, or None to
+            write each video's predictions beside the video itself.
+
+    Raises:
+        ValueError: If two videos sharing a file-name stem resolve to one output directory.
+    """
+    claimed: dict[tuple[Path, str], Path] = {}
+    for index, video in enumerate(videos):
+        path = Path(video)
+        directory = Path(destinations[index]).resolve() if destinations is not None else path.parent.resolve()
+        existing = claimed.get((directory, path.stem))
+        if existing is not None:
+            message = (
+                f"Unable to analyze the selected videos. '{existing}' and '{path}' share the file-name stem "
+                f"'{path.stem}', so both would write their predictions to the same file in '{directory}'. Rename one "
+                f"of the videos, or give them separate --output directories."
+            )
+            raise ValueError(message)
+        claimed[(directory, path.stem)] = path
 
 
 def detect_fixed_input_size(
