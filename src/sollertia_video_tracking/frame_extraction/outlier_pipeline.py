@@ -11,7 +11,6 @@ from pathlib import Path
 import traceback
 import contextlib
 from dataclasses import dataclass
-import multiprocessing
 
 import cv2
 import pandas as pd
@@ -20,6 +19,7 @@ from deeplabcut.refine_training_dataset import outlier_frames as dlc_outlier_fra
 
 from .progress import make_progress_reporter
 from .utilities import (
+    run_supervised_tasks,
     extracted_frame_paths,
     frame_names_from_index,
     iter_pinned_extraction,
@@ -30,6 +30,7 @@ from .utilities import (
     finite_labeled_frame_names,
     prune_empty_labeled_data_directories,
 )
+from ..reporting import enable_native_crash_dumps
 from .frame_reading import make_fast_kmeans_selector
 from .cpu_allocation import DEFAULT_RESERVED_CORE_COUNT, plan_core_allocation
 from .outlier_detection import (
@@ -48,6 +49,12 @@ if TYPE_CHECKING:
 
 _CROP_FIELD_COUNT: int = 4
 """The number of comma-separated integers, ``x1,x2,y1,y2``, in a video's config.yaml crop specification."""
+
+_FITTING_MEMORY_REMEDY: str = (
+    "Each fit worker loads the whole prediction table and runs two SARIMAX fits, so lower the fit-worker count, use "
+    "shorter videos, or free host memory, then re-run."
+)
+"""The advice offered when the out-of-memory killer ends a trajectory-fit worker."""
 
 
 class ExtractionAlgorithm(StrEnum):
@@ -244,6 +251,8 @@ def extract_outlier_frames_parallel(
 
     Raises:
         FileNotFoundError: If ``config_path`` does not point to an existing file.
+        PipelineFailedError: If the worker queues cannot be started, or if a SARIMAX fit worker ended without reporting
+            its keypoint's deviation.
         ValueError: Raised when the options conflict: ``overwrite`` and ``reset`` are both set. Raised when an argument
             is invalid: ``outlier_algorithm`` or ``extraction_algorithm`` is unknown, ``frames_per_video`` (other than
             the -1 sentinel) or ``candidate_step`` is below one, or ``outlier_algorithm`` is ``"list"`` without
@@ -583,15 +592,15 @@ def _detect_fitting_outliers(
     reserved_core_count: int,
     display_progress: bool,
 ) -> dict[str, list[int]]:
-    """Fits every video's per-keypoint SARIMAX models across one shared pool and reduces them to outlier frames.
+    """Fits every video's per-keypoint SARIMAX models across one supervised worker group and reduces them to outliers.
 
-    Flattening every video's keypoints into a single pool keeps all usable cores busy even when only a few videos are
-    refined, which is the expensive path the fitting algorithm needs to scale on high-core machines.
+    Flattening every video's keypoints into a single work set keeps all usable cores busy even when only a few videos
+    are refined, which is the expensive path the fitting algorithm needs to scale on high-core machines.
 
     Notes:
         Each work item names a video and a keypoint rather than carrying its trajectory, so the parent holds no
-        trajectory at all and the pool ships paths instead of arrays. The worker reloads the video's prediction table,
-        which costs about a thousandth of the SARIMAX fit it then performs.
+        trajectory at all and the workers receive paths instead of arrays. The worker reloads the video's prediction
+        table, which costs about a thousandth of the SARIMAX fit it then performs.
 
     Args:
         fitting_keypoint_counts: The number of keypoints to fit for each video needing SARIMAX fits.
@@ -641,9 +650,13 @@ def _detect_fitting_outliers(
         )
         sys.stderr.flush()
 
-    context = multiprocessing.get_context("spawn")
-    with context.Pool(processes=resolved_fitting_worker_count) as pool:
-        keypoint_deviations = pool.starmap(func=_fit_video_keypoint, iterable=tasks)
+    keypoint_deviations = run_supervised_tasks(
+        tasks=list(tasks),
+        worker=_fit_one_keypoint_task,
+        worker_count=resolved_fitting_worker_count,
+        role="trajectory-fit worker",
+        memory_remedy=_FITTING_MEMORY_REMEDY,
+    )
 
     deviations_by_video: dict[str, list[NDArray[np.float64]]] = {video: [] for video in fitting_keypoint_counts}
     for video, deviation in zip(owner_videos, keypoint_deviations, strict=True):
@@ -657,6 +670,18 @@ def _detect_fitting_outliers(
         )
         for video, video_deviations in deviations_by_video.items()
     }
+
+
+def _fit_one_keypoint_task(task: tuple[Any, ...]) -> NDArray[np.float64]:
+    """Applies one packed trajectory-fit work item, adapting the packed tuple to the fit function's signature.
+
+    Args:
+        task: The packed arguments for one video's keypoint fit.
+
+    Returns:
+        The per-frame deviation of the keypoint from its fitted trajectory.
+    """
+    return _fit_video_keypoint(*task)
 
 
 def _fit_video_keypoint(
@@ -1070,6 +1095,9 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
         A tuple of the video path, the number of frames freshly written, and a status string (``"ok"``,
         ``"not_analyzed"``, or an ``"error:"`` traceback).
     """
+    # Installed before the worker redirects its own console, so a native crash inside OpenCV or a DeepLabCut backend
+    # writes a readable dump instead of ending the worker without a word.
+    enable_native_crash_dumps()
     (
         video,
         video_index,

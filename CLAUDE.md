@@ -144,7 +144,7 @@ Step 6 goes wrong most often: the outlier detectors read the model's **stored pr
 model, so `slvt extract outliers` on a video never passed through `slvt infer` finds nothing. Outlier extraction is
 additive, so successive passes grow the same refinement set. That is how multiple detector rounds compose, and it is
 why `--overwrite` and `--reset` are rarely what a refinement request means. `slvt extract pending` is stricter than
-the GUI merge's own gate: a frame counts as refined only once it carries a finite human coordinate, so an all-NaN
+the GUI merge's own gate. A frame counts as refined only once it carries a finite human coordinate, so an all-NaN
 placeholder row the GUI wrote for an opened-but-untouched frame still reads as pending.
 
 ### Invocation rules
@@ -213,8 +213,8 @@ Those levers are measured, and the obvious alternatives do not work. On a single
 decode, so `--chunks` splits that one video into concurrent frame ranges to fill the gap and roughly triples throughput.
 `--gpu-processes` only helps when several videos run at once, and stops helping past 2 per GPU once the device is
 compute-bound. A moderately larger `--clustering-stride` does not cut `extract outliers` wall-clock. The reader makes
-one sequential pass over the first-to-last candidate span whenever the mean candidate gap stays at or below 200 frames,
-so a wider stride traverses that same span and barely moves the wall-clock, though it decodes fewer candidates. Only a
+one sequential pass over the first-to-last candidate span whenever the mean candidate gap stays at or below 200 frames.
+A wider stride traverses that same span and barely moves the wall-clock, though it decodes fewer candidates. Only a
 stride large enough to push the mean gap past 200 returns the reader to per-candidate seeking. Training defaults to one
 GPU because multi-GPU is often slower for DeepLabCut workloads, and `dp` cannot combine with `--amp`.
 
@@ -254,7 +254,7 @@ for the Sollertia platform through the single `slvt` command-line interface.
 | `src/sollertia_video_tracking/training/`         | Shuffle creation, the DDP/AMP training pipeline, evaluation       |
 | `src/sollertia_video_tracking/inference/`        | Multi-device analysis orchestration and the runner-builder patch  |
 | `src/sollertia_video_tracking/hardware/`         | Shared device and AMP detection, and the CUDA torch installer     |
-| `src/sollertia_video_tracking/reporting/`        | `LiveBar`, the progress-bar base every bar subclasses             |
+| `src/sollertia_video_tracking/reporting/`        | `LiveBar`, failure types, process exits, and `ProcessSupervisor`  |
 | `tests/`                                         | Pytest suite, one `<subpackage>_<module>_test.py` per module      |
 | `docs/`                                          | Sphinx API documentation sources built by `tox -e docs`           |
 
@@ -272,10 +272,12 @@ The package `__init__.py` is a side-effecting preamble, not just re-exports. Its
 **before** the domain imports, which carry `# noqa: E402`. These must precede any numpy, OpenCV, or DeepLabCut import,
 and spawned workers inherit the environment.
 
-Extraction and inference both use `multiprocessing.get_context("spawn")` pools. Extraction pins one video per worker
-to a disjoint core block from `plan_core_allocation`. Inference spawns processes that drain a shared video queue one
-whole video at a time, so work balances without ever splitting a video. Workers never render: they push throttled
-progress messages through a queue to a single parent-side `LiveBar` subclass, and dropped messages are non-fatal.
+Extraction and inference both spawn `multiprocessing.get_context("spawn")` worker processes supervised by
+`ProcessSupervisor`. Extraction hands each worker its own disjoint core block from `plan_core_allocation` at
+construction, and the workers drain a shared task queue. Inference workers drain a shared work queue that carries one
+whole video per item by default, so work balances without splitting a video, and one frame-range piece per item once
+`--chunks` rises above 1. Workers never render: they push throttled progress messages through a queue to a single
+parent-side `LiveBar` subclass, and dropped messages are non-fatal.
 
 ### Key patterns
 

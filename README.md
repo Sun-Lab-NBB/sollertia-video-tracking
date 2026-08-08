@@ -59,6 +59,7 @@ ___
 - [Installation](#installation)
 - [Usage](#usage)
   - [CLI Commands](#cli-commands)
+  - [Failure Reporting](#failure-reporting)
   - [Enabling CUDA Support](#enabling-cuda-support)
   - [Workflow Overview](#workflow-overview)
   - [Extracting Initial Frames](#extracting-initial-frames)
@@ -161,6 +162,31 @@ name, which then carries its own parameters: `slvt extract --config-path PATH --
 Use `slvt --help`, `slvt extract --help`, or `slvt COMMAND --help` for detailed usage information. Every option's help
 text documents its own defaults and interactions, so the sections below cover the workflow and the choices that matter
 rather than restating each flag.
+
+### Failure Reporting
+
+Every command reports a failure rather than ending quietly. The work each one distributes runs in worker processes, so
+the command process keeps its own console and stays able to speak for a worker that ends badly. A worker can raise,
+crash inside a native backend, or be killed by the operating system's out-of-memory killer. Each case produces an error
+naming the signal, the shell exit status, the affected video or shuffle, and the remedy that applies. Each worker also
+installs the interpreter's fault handler, so a native crash leaves a readable dump on the standard error stream.
+
+The batch commands report each unit separately. `slvt infer` and `slvt extract` print every failed video's reason
+before their summary line, and finish with a non-zero exit status whenever any video failed or was skipped for an
+unmet precondition, so a partially successful run is never mistaken for a complete one. An option value Click itself
+rejects is refused at parse time with status 2, and one a command validates in its own body, such as `--gpus`, ends
+the run with status 1. Stopping a run with Ctrl-C exits with status 130 and reports what was already written.
+
+| Outcome                                                    | Exit status |
+|------------------------------------------------------------|-------------|
+| Every submitted unit succeeded                             | 0           |
+| Some units succeeded and some failed                       | 1           |
+| A named video was skipped for an unmet precondition        | 1           |
+| The run itself could not start or complete                 | 1           |
+| Training completed but its evaluation failed               | 1           |
+| The operator interrupted the run                           | 130         |
+| A Click-typed option value was rejected                    | 2           |
+| A command-validated option value was rejected              | 1           |
 
 ### Enabling CUDA Support
 
@@ -319,6 +345,12 @@ and the run's provenance. Together they answer whether the model is accurate eno
 `--evaluation-confidence-cutoff` sets the confidence below which predictions are excluded from the cutoff-filtered
 error, falling back to the project's p-cutoff. `--evaluation-batch-size` (default 1) is worth raising on a capable GPU.
 `--no-evaluate` finishes at the last snapshot instead.
+
+A failed run additionally carries the cause, not only its location. A worker that raised has its traceback reproduced
+in the report, and a worker that died without unwinding instead has the tail of the shuffle's `train.txt` quoted,
+where the workers' diverted output is captured. A run whose training completes but whose
+evaluation fails keeps its snapshots, reports them on standard output, appends the evaluation traceback to `train.txt`,
+and still exits non-zero, because the evaluation files a later refinement decision reads were not written.
 
 The following command trains shuffle 1 across two GPUs for 200 epochs:
 `slvt train --config-path /path/to/project/config.yaml --gpus 0,1 --epochs 200`

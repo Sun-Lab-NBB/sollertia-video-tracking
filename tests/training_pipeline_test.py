@@ -10,32 +10,40 @@ GPU, network, or long-running training.
 
 import os
 import types
+import signal
 import socket
 from typing import ClassVar
 import logging
 from pathlib import Path
+import contextlib
 
 import torch
 import pytest
+from torch.multiprocessing import ProcessExitedException, ProcessRaisedException
 from deeplabcut.pose_estimation_pytorch.task import Task
 
 from sollertia_video_tracking.training import pipeline
 from sollertia_video_tracking.training.pipeline import (
     TrainingSummary,
+    TrainingFailedError,
+    TrainingInterruptedError,
     train_model,
     _TrainingLaunch,
     _find_free_port,
-    _duplicate_stderr,
     _build_dataloaders,
     _train_single_model,
+    _append_training_log,
     _plan_training_tasks,
-    _report_training_log,
     _run_training_worker,
     _has_fixed_dimensions,
+    _is_operator_interrupt,
     _is_positive_dimension,
     _route_logging_to_file,
+    _stop_progress_monitor,
     detect_fixed_input_size,
+    _describe_worker_failure,
     _evaluate_after_training,
+    _format_training_failure,
     _redirect_worker_console,
     _resolve_process_placement,
     _augmentation_is_fixed_size,
@@ -64,6 +72,17 @@ class _FakeLoader:
 
     def load_data(self, _split):
         return {"images": [{"height": height, "width": width} for height, width in self.image_sizes]}
+
+
+def _exited(signal_name, exit_code):
+    """Builds the exception torch raises when a spawned worker dies by signal or by a non-zero exit code."""
+    return ProcessExitedException(
+        f"process 0 terminated with {signal_name or exit_code}",
+        error_index=0,
+        error_pid=4242,
+        exit_code=exit_code,
+        signal_name=signal_name,
+    )
 
 
 # TrainingSummary.describe
@@ -111,7 +130,7 @@ def test_training_summary_describe_cpu_no_tasks_no_evaluation():
 
 
 def test_is_positive_dimension_accepts_only_positive_ints():
-    """Verifies that only positive integers are dimensions; zero, negatives, bools, floats, and strings are rejected."""
+    """Verifies that only positive integers are dimensions, rejecting zero, negatives, booleans, floats, and strings."""
     bool_value = True  # A boolean is an int subclass but must still be rejected as a dimension.
     assert _is_positive_dimension(5) is True
     assert _is_positive_dimension(0) is False
@@ -595,85 +614,178 @@ def test_run_training_worker_ddp_initializes_and_tears_down_process_group(monkey
     assert [call["task"] for call in records.train] == [Task.DETECT, Task.TOP_DOWN]
 
 
+@pytest.mark.parametrize(
+    ("progress_queue", "expected_active"),
+    [("queue", True), (None, False)],
+)
+def test_run_training_worker_redirects_its_console_whenever_the_monitor_owns_the_terminal(
+    monkeypatch, tmp_path, progress_queue, expected_active
+):
+    """Verifies that a worker redirects its own console exactly when progress reporting is on."""
+    loader = _FakeLoader(
+        model_cfg={"device": "cpu", "train_settings": {"epochs": 5, "seed": 7, "weight_init": None}},
+        pose_task=Task.BOTTOM_UP,
+        model_folder=tmp_path,
+    )
+    _patch_worker_deps(monkeypatch=monkeypatch, loader=loader)
+    redirects = []
+    monkeypatch.setattr(
+        pipeline,
+        "_redirect_worker_console",
+        lambda log_path, *, active: redirects.append((log_path, active)) or contextlib.nullcontext(),
+    )
+
+    _run_training_worker(rank=0, launch=_make_launch(_profile(device="cpu"), progress_queue=progress_queue))
+
+    assert redirects == [(tmp_path / "train.txt", expected_active)]
+
+
+def test_run_training_worker_reports_a_log_teardown_error_without_masking_the_run(monkeypatch, tmp_path):
+    """Verifies that a log-handler teardown error is warned about rather than replacing the worker's own outcome."""
+    loader = _FakeLoader(
+        model_cfg={"device": "cpu", "train_settings": {"epochs": 5, "seed": 7, "weight_init": None}},
+        pose_task=Task.BOTTOM_UP,
+        model_folder=tmp_path,
+    )
+    records = _patch_worker_deps(monkeypatch=monkeypatch, loader=loader)
+
+    def failing_destroy():
+        message = "handlers already gone"
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(pipeline, "destroy_file_logging", failing_destroy)
+    warnings = []
+    monkeypatch.setattr(pipeline, "warn", warnings.append)
+
+    _run_training_worker(rank=0, launch=_make_launch(_profile(device="cpu"), progress_queue=None))
+
+    assert any("handlers already gone" in warning for warning in warnings)
+    assert len(records.train) == 1
+
+
+def test_run_training_worker_reports_a_process_group_teardown_error(monkeypatch, tmp_path):
+    """Verifies that a distributed teardown error is warned about rather than replacing the worker's own outcome."""
+    loader = _FakeLoader(
+        model_cfg={"device": "cuda", "train_settings": {"epochs": 5, "seed": 1, "weight_init": None}},
+        pose_task=Task.BOTTOM_UP,
+        model_folder=tmp_path,
+    )
+    _patch_worker_deps(monkeypatch=monkeypatch, loader=loader)
+
+    def failing_destroy_group():
+        message = "NCCL communicator is already gone"
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(
+        pipeline,
+        "dist",
+        types.SimpleNamespace(
+            init_process_group=lambda **_kwargs: None,
+            is_initialized=lambda: True,
+            destroy_process_group=failing_destroy_group,
+            barrier=lambda: None,
+        ),
+    )
+    monkeypatch.setattr(torch.cuda, "set_device", lambda _index: None)
+    warnings = []
+    monkeypatch.setattr(pipeline, "warn", warnings.append)
+    profile = _profile(device="cuda", gpus=(0, 1), multi_gpu_strategy=MultiGpuStrategy.DDP)
+
+    _run_training_worker(rank=0, launch=_make_launch(profile, progress_queue=None, world_size=2))
+
+    assert any("NCCL communicator is already gone" in warning for warning in warnings)
+
+
+def test_run_training_worker_enables_native_crash_dumps_before_it_redirects(monkeypatch, tmp_path):
+    """Verifies that the fault handler is installed first, so a native crash dumps into the training log."""
+    loader = _FakeLoader(
+        model_cfg={"device": "cpu", "train_settings": {"epochs": 5, "seed": 7, "weight_init": None}},
+        pose_task=Task.BOTTOM_UP,
+        model_folder=tmp_path,
+    )
+    _patch_worker_deps(monkeypatch=monkeypatch, loader=loader)
+    order = []
+    monkeypatch.setattr(pipeline, "enable_native_crash_dumps", lambda: order.append("dumps"))
+    monkeypatch.setattr(
+        pipeline,
+        "_redirect_worker_console",
+        lambda log_path, *, active: order.append("redirect") or contextlib.nullcontext(),  # noqa: ARG005
+    )
+
+    _run_training_worker(rank=0, launch=_make_launch(_profile(device="cpu"), progress_queue="queue"))
+
+    assert order == ["dumps", "redirect"]
+
+
 # train_model
 
 
 def test_train_model_single_process_with_monitor_and_evaluation(monkeypatch, tmp_path):
-    """Verifies that a single-process run starts and stops the monitor, runs the rank-0 worker, and evaluates pose."""
+    """Verifies that a single-process run spawns one worker, starts and stops the monitor, and evaluates pose."""
     loader = _FakeLoader(
         model_cfg={"train_settings": {"epochs": 10}},
         pose_task=Task.BOTTOM_UP,
         model_folder=tmp_path,
     )
-    dup_stream = _FakeStream()
     evaluation = _FakeEval()
-    records = _patch_train_model_deps(
-        monkeypatch=monkeypatch,
-        loader=loader,
-        dup_stream=dup_stream,
-        evaluation=evaluation,
-    )
+    records = _patch_train_model_deps(monkeypatch=monkeypatch, loader=loader, evaluation=evaluation)
 
     summary = train_model(config=str(tmp_path / "config.yaml"), profile=_profile(device="cpu"), shuffle=2, epochs=None)
 
-    # The worker ran once in-process; DDP spawn was not used.
+    # A single-process run still goes through spawn, so the reporting process never becomes the redirected one.
+    assert len(records.spawn) == 1
+    assert records.spawn[0][2] == 1
     assert len(records.worker) == 1
     assert records.worker[0][0] == 0
-    assert records.spawn == []
-    # The monitor started and was cleanly stopped, the manager shut down, and the preserved stream was closed.
+    # The monitor started and was cleanly stopped, and the manager shut down.
     monitor = _FakeMonitor.instances[0]
     assert monitor.started
     assert monitor.stopped
     assert records.manager.shutdown_called
-    assert dup_stream.closed
     # The pose model was evaluated and folded into the summary.
     assert len(records.evaluate) == 1
     assert summary.evaluation is evaluation
+    assert summary.evaluation_error is None
     assert summary.tasks_trained == ("pose",)
     assert summary.device == "cpu"
     assert summary.precision == "fp32"
     assert summary.epochs == 10
     assert summary.world_size == 1
-    # The launch carried a preserved console because a stderr duplicate was held.
-    assert records.worker[0][1].preserve_console is True
     assert records.worker[0][1].port == 45000
 
 
 def test_train_model_retains_monitor_resources_when_renderer_outlives_join(monkeypatch, tmp_path):
-    """Verifies that a renderer still running after the join keeps its queue manager and preserved stream open."""
+    """Verifies that a renderer still running after the join keeps its queue manager open and closes the bar line."""
     loader = _FakeLoader(
         model_cfg={"train_settings": {"epochs": 10}},
         pose_task=Task.BOTTOM_UP,
         model_folder=tmp_path,
     )
-    dup_stream = _FakeStream()
 
-    def mark_monitor_alive(**_kwargs):
+    def mark_monitor_alive(*_args, **_kwargs):
         _FakeMonitor.instances[0].alive = True
 
-    records = _patch_train_model_deps(
-        monkeypatch=monkeypatch,
-        loader=loader,
-        dup_stream=dup_stream,
-        worker=mark_monitor_alive,
-    )
+    records = _patch_train_model_deps(monkeypatch=monkeypatch, loader=loader, worker=mark_monitor_alive)
+    written = []
+    monkeypatch.setattr(pipeline.sys, "stderr", types.SimpleNamespace(write=written.append, flush=lambda: None))
 
     train_model(config=str(tmp_path / "config.yaml"), profile=_profile(device="cpu"), shuffle=2, epochs=None)
 
     monitor = _FakeMonitor.instances[0]
     assert monitor.stopped
     assert not records.manager.shutdown_called
-    assert not dup_stream.closed
+    # The renderer never drew its closing newline, so the teardown supplies one.
+    assert written == ["\n"]
 
 
 def test_train_model_without_progress_skips_monitor(monkeypatch, tmp_path):
-    """Verifies that disabling the progress display skips the monitor, manager, and stderr duplicate entirely."""
+    """Verifies that disabling the progress display skips the monitor and the manager entirely."""
     loader = _FakeLoader(
         model_cfg={"train_settings": {"epochs": 3}},
         pose_task=Task.BOTTOM_UP,
         model_folder=tmp_path,
     )
-    records = _patch_train_model_deps(monkeypatch=monkeypatch, loader=loader, dup_stream=None)
+    records = _patch_train_model_deps(monkeypatch=monkeypatch, loader=loader)
 
     summary = train_model(
         config=tmp_path / "config.yaml",
@@ -686,7 +798,6 @@ def test_train_model_without_progress_skips_monitor(monkeypatch, tmp_path):
     assert records.manager.shutdown_called is False
     assert records.evaluate == []
     assert records.worker[0][1].progress_queue is None
-    assert records.worker[0][1].preserve_console is False
     assert summary.evaluation is None
 
 
@@ -697,15 +808,9 @@ def test_train_model_ddp_spawns_workers(monkeypatch, tmp_path):
         pose_task=Task.BOTTOM_UP,
         model_folder=tmp_path,
     )
-    dup_stream = _FakeStream()
     evaluation = _FakeEval()
     profile = _profile(device="cuda", gpus=(0, 1), multi_gpu_strategy=MultiGpuStrategy.DDP, amp_dtype=torch.bfloat16)
-    records = _patch_train_model_deps(
-        monkeypatch=monkeypatch,
-        loader=loader,
-        dup_stream=dup_stream,
-        evaluation=evaluation,
-    )
+    records = _patch_train_model_deps(monkeypatch=monkeypatch, loader=loader, evaluation=evaluation)
 
     summary = train_model(config=tmp_path / "config.yaml", profile=profile)
 
@@ -716,7 +821,7 @@ def test_train_model_ddp_spawns_workers(monkeypatch, tmp_path):
     assert join is True
     # The single positional argument bundled into the spawn call is the launch.
     assert isinstance(spawn_args[0], _TrainingLaunch)
-    assert records.worker == []
+    assert [rank for rank, _launch in records.worker] == [0, 1]
     assert summary.strategy == "ddp"
     assert summary.world_size == 2
     assert summary.device == "cuda"
@@ -733,7 +838,7 @@ def test_train_model_applies_detector_and_all_overrides(monkeypatch, tmp_path):
         pose_task=Task.TOP_DOWN,
         model_folder=tmp_path,
     )
-    _patch_train_model_deps(monkeypatch=monkeypatch, loader=loader, dup_stream=None)
+    _patch_train_model_deps(monkeypatch=monkeypatch, loader=loader)
 
     summary = train_model(
         config=tmp_path / "config.yaml",
@@ -779,7 +884,7 @@ def test_train_model_skips_evaluation_without_pose(monkeypatch, tmp_path):
         pose_task=Task.TOP_DOWN,
         model_folder=tmp_path,
     )
-    records = _patch_train_model_deps(monkeypatch=monkeypatch, loader=loader, dup_stream=None)
+    records = _patch_train_model_deps(monkeypatch=monkeypatch, loader=loader)
 
     summary = train_model(
         config=tmp_path / "config.yaml",
@@ -811,38 +916,114 @@ def test_train_model_rejects_memory_replay(monkeypatch, tmp_path):
         train_model(config=tmp_path / "config.yaml", profile=_profile(device="cpu"))
 
 
-def test_train_model_reports_log_on_failure(monkeypatch, tmp_path):
-    """Verifies that when the worker fails, the monitor is still cleaned up and the operator is pointed to the log."""
+def test_train_model_raises_a_report_naming_the_log_on_failure(monkeypatch, tmp_path):
+    """Verifies that a worker failure raises a report quoting the training log, with the monitor still torn down."""
     loader = _FakeLoader(
         model_cfg={"train_settings": {"epochs": 10}},
         pose_task=Task.BOTTOM_UP,
         model_folder=tmp_path,
     )
-    dup_stream = _FakeStream()
+
+    killed = _exited("SIGKILL", -signal.SIGKILL)
 
     def failing_worker(*_args, **_kwargs):
-        message = "worker crashed"
-        raise RuntimeError(message)
+        raise killed
 
-    records = _patch_train_model_deps(
-        monkeypatch=monkeypatch,
-        loader=loader,
-        dup_stream=dup_stream,
-        worker=failing_worker,
-    )
-    reported = []
-    monkeypatch.setattr(pipeline, "_report_training_log", reported.append)
-    # The training log must already exist for the failure notice to be emitted.
-    (tmp_path / "train.txt").write_text("worker output")
+    records = _patch_train_model_deps(monkeypatch=monkeypatch, loader=loader, worker=failing_worker)
+    (tmp_path / "train.txt").write_text("epoch 3 of 10\nout of memory\n")
 
-    with pytest.raises(RuntimeError, match="worker crashed"):
-        train_model(config=tmp_path / "config.yaml", profile=_profile(device="cpu"))
+    with pytest.raises(TrainingFailedError) as failure:
+        train_model(config=tmp_path / "config.yaml", profile=_profile(device="cpu"), shuffle=7)
 
-    assert reported == [tmp_path / "train.txt"]
+    report = str(failure.value)
+    assert "SIGKILL" in report
+    assert "out-of-memory killer" in report
+    assert str(tmp_path / "train.txt") in report
+    assert "shuffle:      7" in report
+    # The log tail is quoted, so the cause travels with the report rather than only with the pointer.
+    assert "out of memory" in report
     # The finally block still tore down the monitor and manager despite the failure.
     assert _FakeMonitor.instances[0].stopped
     assert records.manager.shutdown_called
-    assert dup_stream.closed
+
+
+def test_train_model_raises_an_interruption_rather_than_a_failure(monkeypatch, tmp_path):
+    """Verifies that an operator interrupt is reported as an interruption, not as a crash."""
+    loader = _FakeLoader(
+        model_cfg={"train_settings": {"epochs": 10}},
+        pose_task=Task.BOTTOM_UP,
+        model_folder=tmp_path,
+    )
+
+    def interrupted_worker(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    records = _patch_train_model_deps(monkeypatch=monkeypatch, loader=loader, worker=interrupted_worker)
+
+    with pytest.raises(TrainingInterruptedError, match="interrupted"):
+        train_model(config=tmp_path / "config.yaml", profile=_profile(device="cpu"))
+
+    assert records.manager.shutdown_called
+
+
+def test_train_model_rejects_a_run_that_plans_no_models(monkeypatch, tmp_path):
+    """Verifies that zero pose and detector epochs are rejected before any process is created."""
+    loader = _FakeLoader(
+        model_cfg={"train_settings": {"epochs": 0}, "detector": {"train_settings": {"epochs": 0}}},
+        pose_task=Task.TOP_DOWN,
+        model_folder=tmp_path,
+    )
+    records = _patch_train_model_deps(monkeypatch=monkeypatch, loader=loader)
+
+    with pytest.raises(ValueError, match="no model"):
+        train_model(config=tmp_path / "config.yaml", profile=_profile(device="cpu"), display_progress=False)
+
+    assert records.spawn == []
+
+
+def test_train_model_records_an_evaluation_failure_without_losing_the_run(monkeypatch, tmp_path):
+    """Verifies that a failed evaluation is recorded in the summary and the log, while training still succeeds."""
+    loader = _FakeLoader(
+        model_cfg={"train_settings": {"epochs": 10}},
+        pose_task=Task.BOTTOM_UP,
+        model_folder=tmp_path,
+    )
+    _patch_train_model_deps(
+        monkeypatch=monkeypatch,
+        loader=loader,
+        evaluation_error=RuntimeError("CUDA out of memory"),
+    )
+
+    summary = train_model(config=tmp_path / "config.yaml", profile=_profile(device="cpu"), display_progress=False)
+
+    assert summary.tasks_trained == ("pose",)
+    assert summary.evaluation is None
+    assert summary.evaluation_error == "RuntimeError: CUDA out of memory"
+    assert "evaluation FAILED (RuntimeError: CUDA out of memory)" in summary.describe()
+    # The traceback outlives the terminal, because DeepLabCut's teardown has already stripped every log handler.
+    log_text = (tmp_path / "train.txt").read_text()
+    assert "Post-training evaluation failed." in log_text
+    assert "CUDA out of memory" in log_text
+
+
+def test_train_model_start_up_failure_of_the_monitor_is_reported(monkeypatch, tmp_path):
+    """Verifies that a manager that fails to start raises a training failure instead of a bare EOFError."""
+    loader = _FakeLoader(
+        model_cfg={"train_settings": {"epochs": 10}},
+        pose_task=Task.BOTTOM_UP,
+        model_folder=tmp_path,
+    )
+    records = _patch_train_model_deps(monkeypatch=monkeypatch, loader=loader)
+
+    def dead_manager():
+        raise EOFError
+
+    monkeypatch.setattr(pipeline.mp, "Manager", dead_manager)
+
+    with pytest.raises(TrainingFailedError, match="progress monitor"):
+        train_model(config=tmp_path / "config.yaml", profile=_profile(device="cpu"))
+
+    assert records.spawn == []
 
 
 # _evaluate_after_training
@@ -881,6 +1062,8 @@ def test_evaluate_after_training_cuda_success(monkeypatch):
 def test_evaluate_after_training_cpu_skips_cache_empty(monkeypatch):
     """Verifies that on a CPU run the device is passed through and the CUDA cache is not touched."""
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    emptied = []
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: emptied.append(True))
     captured = {}
 
     def fake_evaluate(config, **kwargs):
@@ -901,10 +1084,11 @@ def test_evaluate_after_training_cpu_skips_cache_empty(monkeypatch):
 
     assert result == "cpu-summary"
     assert captured["device"] == "cpu"
+    assert emptied == []
 
 
-def test_evaluate_after_training_swallows_failure(monkeypatch, caplog):
-    """Verifies that a failing evaluation is logged and swallowed so the completed training run is not lost."""
+def test_evaluate_after_training_propagates_failure(monkeypatch):
+    """Verifies that a failing evaluation propagates to its caller, which owns the record-rather-than-fail contract."""
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
 
     def boom(*_args, **_kwargs):
@@ -913,8 +1097,8 @@ def test_evaluate_after_training_swallows_failure(monkeypatch, caplog):
 
     monkeypatch.setattr(pipeline, "evaluate_trained_model", boom)
 
-    with caplog.at_level(logging.WARNING):
-        result = _evaluate_after_training(
+    with pytest.raises(RuntimeError, match="evaluation blew up"):
+        _evaluate_after_training(
             config=Path("config.yaml"),
             profile=_profile(device="cpu"),
             shuffle=1,
@@ -923,11 +1107,169 @@ def test_evaluate_after_training_swallows_failure(monkeypatch, caplog):
             confidence_cutoff=None,
         )
 
-    assert result is None
-    assert any("Post-training evaluation failed" in record.message for record in caplog.records)
+
+# Failure classification and reporting
 
 
-# _find_free_port / _route_logging_to_file / _duplicate_stderr / _redirect_worker_console / _report_training_log
+def test_is_operator_interrupt_classification():
+    """Verifies that only a keyboard interrupt and the deliberate-stop signals count as an operator interrupt."""
+    assert _is_operator_interrupt(KeyboardInterrupt()) is True
+    assert _is_operator_interrupt(_exited("SIGINT", -signal.SIGINT)) is True
+    assert _is_operator_interrupt(_exited("SIGTERM", -signal.SIGTERM)) is True
+    assert _is_operator_interrupt(_exited("SIGKILL", -signal.SIGKILL)) is False
+    assert _is_operator_interrupt(_exited("SIGSEGV", -signal.SIGSEGV)) is False
+    assert _is_operator_interrupt(RuntimeError("boom")) is False
+
+
+def test_describe_worker_failure_classifies_each_end_of_a_worker():
+    """Verifies that each failure class is named exactly, with a shell status on the signal deaths."""
+    killed = _describe_worker_failure(_exited("SIGKILL", -signal.SIGKILL))
+    assert "SIGKILL" in killed
+    assert "shell status 137" in killed
+    assert "out-of-memory killer" in killed
+
+    crashed = _describe_worker_failure(_exited("SIGSEGV", -signal.SIGSEGV))
+    assert "shell status 139" in crashed
+    assert "native backend" in crashed
+
+    exited = _describe_worker_failure(_exited(None, 3))
+    assert "exited with status 3" in exited
+
+    raised = _describe_worker_failure(ProcessRaisedException("traceback text", 0, 4242))
+    assert "raised an exception" in raised
+
+    other = _describe_worker_failure(RuntimeError("pickling failed"))
+    assert "RuntimeError: pickling failed" in other
+
+
+def test_describe_worker_failure_names_an_unclassified_signal():
+    """Verifies that a signal outside the interrupt and native-crash sets is still named with its shell status."""
+    described = _describe_worker_failure(_exited("SIGHUP", -signal.SIGHUP))
+    assert "SIGHUP" in described
+    assert f"shell status {128 + signal.SIGHUP}" in described
+
+
+def test_format_training_failure_quotes_the_log_tail(tmp_path):
+    """Verifies that a signal death report carries the project context and the tail of the training log."""
+    training_log = tmp_path / "train.txt"
+    training_log.write_text("".join(f"line {index}\n" for index in range(100)))
+
+    report = _format_training_failure(
+        _exited("SIGSEGV", -signal.SIGSEGV),
+        config=tmp_path / "config.yaml",
+        shuffle=2,
+        model_folder=tmp_path,
+        training_log=training_log,
+    )
+
+    assert "line 99" in report
+    assert "line 60" in report
+    # Only the trailing window is quoted, so the report stays readable.
+    assert "line 59" not in report
+    assert str(tmp_path / "config.yaml") in report
+
+
+def test_format_training_failure_embeds_the_child_traceback_instead_of_the_tail(tmp_path):
+    """Verifies that a worker that raised has its own traceback quoted rather than the log it already wrote."""
+    training_log = tmp_path / "train.txt"
+    training_log.write_text("redirected worker output\n")
+
+    report = _format_training_failure(
+        ProcessRaisedException("\n\n-- Process 0 terminated with the following error:\nBackendCompilerFailed\n", 0, 7),
+        config=tmp_path / "config.yaml",
+        shuffle=1,
+        model_folder=tmp_path,
+        training_log=training_log,
+    )
+
+    assert "BackendCompilerFailed" in report
+    assert "redirected worker output" not in report
+
+
+def test_format_training_failure_states_that_the_log_is_empty(tmp_path):
+    """Verifies that a worker that died before logging anything is reported as such rather than with empty markers."""
+    report = _format_training_failure(
+        _exited("SIGKILL", -signal.SIGKILL),
+        config=tmp_path / "config.yaml",
+        shuffle=1,
+        model_folder=tmp_path,
+        training_log=tmp_path / "train.txt",
+    )
+
+    assert "holds no output" in report
+    assert "last 40 lines" not in report
+
+
+def test_append_training_log_preserves_existing_content(tmp_path):
+    """Verifies that the appended block follows the existing log rather than replacing it."""
+    training_log = tmp_path / "train.txt"
+    training_log.write_text("worker output\n")
+
+    _append_training_log(training_log=training_log, text="Post-training evaluation failed.")
+
+    text = training_log.read_text()
+    assert text.startswith("worker output\n")
+    assert "Post-training evaluation failed." in text
+
+
+def test_append_training_log_survives_an_unwritable_path(tmp_path):
+    """Verifies that a log that cannot be written does not turn a failure report into a second failure."""
+    _append_training_log(training_log=tmp_path / "missing-directory" / "train.txt", text="anything")
+
+
+def test_start_progress_monitor_releases_a_manager_it_created_before_failing(monkeypatch):
+    """Verifies that a manager created before the queue fails is shut down rather than left running."""
+    manager = _FakeManager()
+
+    def failing_queue():
+        message = "queue server is gone"
+        raise EOFError(message)
+
+    manager.Queue = failing_queue
+    monkeypatch.setattr(pipeline, "mp", types.SimpleNamespace(Manager=lambda: manager))
+
+    with pytest.raises(TrainingFailedError, match="progress monitor"):
+        pipeline._start_progress_monitor()
+
+    assert manager.shutdown_called
+
+
+def test_stop_progress_monitor_reports_a_manager_that_will_not_shut_down(monkeypatch):
+    """Verifies that a manager refusing to shut down is warned about rather than allowed to mask the real failure."""
+
+    class ExplodingManager(_FakeManager):
+        def shutdown(self):
+            message = "manager is unreachable"
+            raise EOFError(message)
+
+    warnings = []
+    monkeypatch.setattr(pipeline, "warn", warnings.append)
+
+    _stop_progress_monitor(monitor=None, manager=ExplodingManager())
+
+    assert any("manager is unreachable" in warning for warning in warnings)
+
+
+def test_stop_progress_monitor_reports_teardown_errors_without_raising(monkeypatch):
+    """Verifies that a teardown error is warned about rather than allowed to replace the in-flight failure."""
+
+    class ExplodingMonitor(_FakeMonitor):
+        def stop(self):
+            message = "queue is gone"
+            raise EOFError(message)
+
+    monitor = ExplodingMonitor(progress_queue=None)
+    manager = _FakeManager()
+    warnings = []
+    monkeypatch.setattr(pipeline, "warn", warnings.append)
+
+    _stop_progress_monitor(monitor=monitor, manager=manager)
+
+    assert manager.shutdown_called
+    assert any("queue is gone" in warning for warning in warnings)
+
+
+# _find_free_port / _route_logging_to_file / _redirect_worker_console
 
 
 def test_find_free_port_returns_positive_port():
@@ -976,34 +1318,6 @@ def test_route_logging_to_file_keeps_console_when_not_quiet(monkeypatch, tmp_pat
     assert recorded == [tmp_path / "train.txt"]
 
 
-def test_duplicate_stderr_returns_stream(monkeypatch, tmp_path):
-    """Verifies that a distinct writable duplicate of stderr's descriptor is returned, and writes reach its file."""
-    backing_path = tmp_path / "stderr.txt"
-    with backing_path.open("w") as backing:
-        monkeypatch.setattr(pipeline.sys, "stderr", backing)
-        stream = _duplicate_stderr()
-        assert stream is not None
-        # The duplicate is a distinct descriptor, not a handle onto stderr's own file object.
-        assert stream.fileno() != backing.fileno()
-        # Because os.dup shares the underlying open file, output written through the duplicate lands in the same file
-        # the original stderr points at.
-        stream.write("duplicated-write\n")
-        stream.close()
-    assert "duplicated-write" in backing_path.read_text()
-
-
-def test_duplicate_stderr_returns_none_without_descriptor(monkeypatch):
-    """Verifies that when stderr has no usable descriptor, None is returned instead of raising."""
-
-    class NoDescriptor:
-        def fileno(self):
-            message = "no descriptor under capture"
-            raise ValueError(message)
-
-    monkeypatch.setattr(pipeline.sys, "stderr", NoDescriptor())
-    assert _duplicate_stderr() is None
-
-
 def test_redirect_worker_console_inactive_is_noop(tmp_path):
     """Verifies that when inactive, the context manager runs its body without touching descriptors."""
     ran = False
@@ -1034,14 +1348,6 @@ def test_redirect_worker_console_records_traceback_in_log(tmp_path):
     assert "RuntimeError" in content
     assert "worker exploded" in content
     assert "Traceback" in content
-
-
-def test_report_training_log_writes_notice(capsys):
-    """Verifies that the failure notice names the training log and explains what it captured."""
-    _report_training_log(Path("/models/run/train.txt"))
-    err = capsys.readouterr().err
-    assert "Training did not complete" in err
-    assert str(Path("/models/run/train.txt")) in err
 
 
 # Private helpers and fakes
@@ -1085,7 +1391,6 @@ def _make_launch(profile, **overrides) -> _TrainingLaunch:
         "load_head_weights": True,
         "maximum_snapshots_to_keep": None,
         "progress_queue": None,
-        "preserve_console": False,
         "port": 12345,
         "world_size": 1,
     }
@@ -1261,38 +1566,33 @@ class _FakeManager:
         self.shutdown_called = True
 
 
-class _FakeStream:
-    """Stands in for a preserved-stderr duplicate, recording that it was closed."""
-
-    def __init__(self):
-        self.closed = False
-
-    def close(self):
-        self.closed = True
-
-
-def _patch_train_model_deps(monkeypatch, loader, *, dup_stream, worker=None, evaluation=None):
-    """Replaces train_model's process management, monitor, stderr duplicate, worker, and evaluation with recorders."""
+def _patch_train_model_deps(monkeypatch, loader, *, worker=None, evaluation=None, evaluation_error=None):
+    """Replaces train_model's process management, monitor, worker, and evaluation with recorders."""
     _FakeMonitor.instances = []
     records = types.SimpleNamespace(spawn=[], worker=[], evaluate=[], manager=_FakeManager())
     monkeypatch.setattr(pipeline, "DLCLoader", lambda **_kwargs: loader)
     monkeypatch.setattr(pipeline, "_find_free_port", lambda: 45000)
-    monkeypatch.setattr(pipeline, "_duplicate_stderr", lambda: dup_stream)
     monkeypatch.setattr(pipeline, "TrainingMonitor", _FakeMonitor)
-
-    fake_mp = types.SimpleNamespace(
-        Manager=lambda: records.manager,
-        spawn=lambda fn, args, nprocs, join: records.spawn.append((fn, args, nprocs, join)),
-    )
-    monkeypatch.setattr(pipeline, "mp", fake_mp)
 
     def default_worker(rank, launch):
         records.worker.append((rank, launch))
 
     monkeypatch.setattr(pipeline, "_run_training_worker", worker or default_worker)
 
+    # Stands in for torch's spawn, which the pipeline uses for every strategy. It runs each rank in-process so a
+    # test may inject a worker failure, while still recording the spawn call itself.
+    def fake_spawn(fn, args, nprocs, join):
+        records.spawn.append((fn, args, nprocs, join))
+        for rank in range(nprocs):
+            fn(rank, *args)
+
+    fake_mp = types.SimpleNamespace(Manager=lambda: records.manager, spawn=fake_spawn)
+    monkeypatch.setattr(pipeline, "mp", fake_mp)
+
     def fake_evaluate(**kwargs):
         records.evaluate.append(kwargs)
+        if evaluation_error is not None:
+            raise evaluation_error
         return evaluation
 
     monkeypatch.setattr(pipeline, "_evaluate_after_training", fake_evaluate)

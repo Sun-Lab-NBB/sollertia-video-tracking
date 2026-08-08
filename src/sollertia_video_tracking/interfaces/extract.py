@@ -5,10 +5,13 @@ from dataclasses import dataclass
 
 import click
 
+from ..hardware import warn
 from ..frame_extraction import (
     TrackingMethod,
     OutlierAlgorithm,
     ExtractionAlgorithm,
+    PipelineFailedError,
+    PipelineInterruptedError,
     purge_labeled_data,
     extract_frames_kmeans,
     summarize_refinement_status,
@@ -72,13 +75,22 @@ class _SharedExtractionParameters:
     """Determines whether to re-roll across the whole project, clearing removable frames first instead of topping up."""
 
     def require_config_path(self) -> Path:
-        """Returns the config.yaml path, raising a Click usage error when ``--config-path`` was not supplied.
+        """Returns the config.yaml path the subcommand operates on.
 
         The ``extract`` group leaves ``--config-path`` optional so that subcommand help stays reachable without it, so
         each subcommand calls this to enforce the option only when it actually runs.
+
+        Returns:
+            The path to the DeepLabCut project's config.yaml.
+
+        Raises:
+            click.UsageError: When ``--config-path`` was omitted from the ``extract`` group.
         """
         if self.config_path is None:
-            message = "Missing option '-cfg' / '--config-path'."
+            message = (
+                "Unable to run 'slvt extract SUBCOMMAND'. Missing option '-cfg' / '--config-path', which names the "
+                "DeepLabCut project's config.yaml the subcommand operates on."
+            )
             raise click.UsageError(message=message)
         return self.config_path
 
@@ -98,7 +110,7 @@ _pass_shared_parameters = click.make_pass_decorator(_SharedExtractionParameters)
 @click.option(
     "-w",
     "--workers",
-    type=int,
+    type=click.IntRange(min=-1),
     default=-1,
     show_default=True,
     help="How many videos to process at the same time. Set to -1 to launch about one worker per four usable cores, "
@@ -107,7 +119,7 @@ _pass_shared_parameters = click.make_pass_decorator(_SharedExtractionParameters)
 @click.option(
     "-c",
     "--cores",
-    type=int,
+    type=click.IntRange(min=-1),
     default=-1,
     show_default=True,
     help="How many CPU cores to devote to each video being processed. Set to -1 to give each worker a saturating block "
@@ -118,27 +130,28 @@ _pass_shared_parameters = click.make_pass_decorator(_SharedExtractionParameters)
 @click.option(
     "-fpv",
     "--frames-per-video",
-    type=int,
+    type=click.IntRange(min=-1),
     default=-1,
     show_default=True,
     help="How many frames to keep from each processed video. Set to -1 to use the project's configured amount. Any "
-    "other value is written into config.yaml as the project's numframes2pick before extraction starts, so it becomes "
-    "the default for later runs and for the DeepLabCut GUI.",
+    "other value must be at least one, and is written into config.yaml as the project's numframes2pick before "
+    "extraction starts, so it becomes the default for later runs and for the DeepLabCut GUI.",
 )
 @click.option(
     "-cs",
     "--clustering-stride",
-    type=int,
+    type=click.IntRange(min=1),
     default=1,
     show_default=True,
     metavar="N",
     help="How far apart, in frames, to sample before clustering. The default of 1 uses every frame. For 'frames' this "
-    "strides the whole video; for 'outliers' it strides the flagged candidate frames. Raise it to cluster fewer frames "
-    "trading coverage for processing speed.",
+    "strides the whole video, and for 'outliers' it strides the flagged candidate frames. Raise it to cluster fewer "
+    "frames trading coverage for processing speed.",
 )
 @click.option(
     "-crw",
     "--clustering-resize-width",
+    type=click.IntRange(min=1),
     default=30,
     show_default=True,
     help="The width, in pixels, that frames are shrunk to before they are compared for similarity. Smaller values are "
@@ -238,13 +251,13 @@ def extract_group(
 @click.option(
     "-tf",
     "--total-frames",
-    type=int,
+    type=click.IntRange(min=-1),
     default=200,
     show_default=True,
     help="The total number of extracted frames you want across the whole project. When set, videos are selected until "
-    "this many frames are reached, preferring not-yet-extracted videos and falling back to below-ceiling ones; each "
+    "this many frames are reached, preferring not-yet-extracted videos and falling back to below-ceiling ones. Each "
     "is topped up to --frames-per-video frames (a fresh video by a full set, a partly-extracted one by its remainder). "
-    "Set to -1 to top up every below-ceiling selected video instead.",
+    "Set to -1 to top up every below-ceiling selected video instead. Any other value must be at least one.",
 )
 @click.option(
     "-bg",
@@ -317,7 +330,12 @@ def frames_command(
             reset=shared.reset,
             display_progress=shared.display_progress,
         )
-    except (ValueError, FileNotFoundError) as error:
+    except PipelineInterruptedError as error:
+        warn(str(error))
+        click.get_current_context().exit(130)
+    # EOFError is funneled here because Click reduces it to a bare 'Aborted!' that reads exactly like an operator
+    # interrupt, which hides a manager process that failed to start.
+    except (PipelineFailedError, ValueError, FileNotFoundError, EOFError) as error:
         raise click.ClickException(message=str(error)) from error
 
     for video, traceback_text in summary.errors:
@@ -354,14 +372,16 @@ def frames_command(
 @click.option(
     "-s",
     "--shuffle",
+    type=click.IntRange(min=1),
     default=1,
     show_default=True,
-    help="The shuffle index whose trained model produced the predictions. It is the only model-selection option; "
-    "everything else is taken from the project configuration.",
+    help="The shuffle index whose trained model produced the predictions. It is the only model-selection option. "
+    "Everything else is taken from the project configuration.",
 )
 @click.option(
     "-pdt",
     "--pixel-distance-threshold",
+    type=click.FloatRange(min=0.0),
     default=20.0,
     show_default=True,
     help="How far, in pixels, a bodypart may move (for 'jump') or depart from its fitted trajectory (for 'fitting') "
@@ -370,6 +390,7 @@ def frames_command(
 @click.option(
     "-mc",
     "--minimum-confidence",
+    type=click.FloatRange(min=0.0, max=1.0),
     default=0.01,
     show_default=True,
     help="The confidence below which a prediction is treated as unreliable: 'uncertain' flags a frame holding one, and "
@@ -380,14 +401,14 @@ def frames_command(
     "--comparison-bodyparts",
     multiple=True,
     metavar="BODYPART",
-    help="A bodypart the detectors consider. Provide the option several times to restrict to several; omit to "
+    help="A bodypart the detectors consider. Provide the option several times to restrict to several. Omit to "
     "consider every bodypart.",
 )
 @click.option(
     "-fi",
     "--frame-index",
     multiple=True,
-    type=int,
+    type=click.IntRange(min=0),
     metavar="FRAME",
     help="An explicit frame index to extract when --outlier-algorithm list is used. Provide the option several "
     "times to extract multiple frames.",
@@ -395,6 +416,7 @@ def frames_command(
 @click.option(
     "-ad",
     "--autoregressive-degree",
+    type=click.IntRange(min=0),
     default=3,
     show_default=True,
     help="How many past frames the 'fitting' detector's motion model uses to predict the next position.",
@@ -402,6 +424,7 @@ def frames_command(
 @click.option(
     "-mad",
     "--moving-average-degree",
+    type=click.IntRange(min=0),
     default=1,
     show_default=True,
     help="How many past prediction errors the 'fitting' detector's motion model smooths over.",
@@ -422,7 +445,7 @@ def frames_command(
 @click.option(
     "-fw",
     "--fit-workers",
-    type=int,
+    type=click.IntRange(min=-1),
     default=-1,
     show_default=True,
     help="How many SARIMAX keypoint-trajectory fits to run in parallel during 'fitting' detection, the most expensive "
@@ -484,7 +507,12 @@ def outliers_command(
             reset=shared.reset,
             display_progress=shared.display_progress,
         )
-    except (ValueError, FileNotFoundError) as error:
+    except PipelineInterruptedError as error:
+        warn(str(error))
+        click.get_current_context().exit(130)
+    # EOFError is funneled here because Click reduces it to a bare 'Aborted!' that reads exactly like an operator
+    # interrupt, which hides a manager process that failed to start.
+    except (PipelineFailedError, ValueError, FileNotFoundError, EOFError) as error:
         raise click.ClickException(message=str(error)) from error
 
     for video in summary.unanalyzed_videos:
@@ -525,7 +553,10 @@ def purge_command(
             videos=tuple(shared.videos),
             execute=yes,
         )
-    except (ValueError, FileNotFoundError) as error:
+    except PipelineInterruptedError as error:
+        warn(str(error))
+        click.get_current_context().exit(130)
+    except (PipelineFailedError, ValueError, FileNotFoundError) as error:
         raise click.ClickException(message=str(error)) from error
 
     for video in summary.unmatched_videos:
@@ -566,7 +597,10 @@ def pending_command(shared: _SharedExtractionParameters) -> None:
             config_path=shared.require_config_path(),
             videos=tuple(shared.videos),
         )
-    except (ValueError, FileNotFoundError) as error:
+    except PipelineInterruptedError as error:
+        warn(str(error))
+        click.get_current_context().exit(130)
+    except (PipelineFailedError, ValueError, FileNotFoundError) as error:
         raise click.ClickException(message=str(error)) from error
 
     for video in summary.unmatched_videos:

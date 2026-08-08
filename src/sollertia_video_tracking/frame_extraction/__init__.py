@@ -8,6 +8,7 @@ from .utilities import (
     purge_labeled_data,
     summarize_refinement_status,
 )
+from ..reporting import PipelineFailedError, PipelineInterruptedError
 from .cpu_allocation import plan_core_allocation
 from .outlier_pipeline import (
     TrackingMethod,
@@ -24,6 +25,8 @@ __all__ = [
     "FrameExtractionSummary",
     "OutlierAlgorithm",
     "OutlierExtractionSummary",
+    "PipelineFailedError",
+    "PipelineInterruptedError",
     "PurgeSummary",
     "RefinementDirectoryStatus",
     "RefinementStatusSummary",

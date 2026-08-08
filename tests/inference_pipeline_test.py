@@ -10,6 +10,7 @@ JPEG clip through real OpenCV, and skip when the environment ships no encoder fo
 import sys
 import queue
 from types import SimpleNamespace
+import signal
 from pathlib import Path
 import contextlib
 from collections import deque
@@ -20,6 +21,7 @@ import torch
 import pytest
 
 from sollertia_video_tracking.inference import pipeline
+from sollertia_video_tracking.reporting import WorkerExit
 from sollertia_video_tracking.inference.optimization import InferenceProfile
 
 
@@ -40,6 +42,24 @@ def _make_profile(**overrides):
     }
     defaults.update(overrides)
     return InferenceProfile(**defaults)
+
+
+# InferenceSummary.successful
+def test_inference_summary_reports_partial_success():
+    """Verifies that a run with any failed video reports itself as unsuccessful so the CLI can exit non-zero."""
+    common = {
+        "config": Path("cfg.yaml"),
+        "video_count": 2,
+        "destinations": None,
+        "device": "cuda",
+        "workers": 2,
+        "precision": "bfloat16",
+    }
+    complete = pipeline.InferenceSummary(outputs=(Path("a.h5"), Path("b.h5")), failures=(), **common)
+    partial = pipeline.InferenceSummary(outputs=(Path("a.h5"),), failures=(("b.mp4", "boom"),), **common)
+
+    assert complete.successful is True
+    assert partial.successful is False
 
 
 # InferenceSummary.describe
@@ -361,9 +381,9 @@ def test_usable_cpu_cores_threads_none_and_zero_workers(monkeypatch):
 def test_collect_results_success_and_failures():
     """Verifies that _collect_results separates successful outputs from explicit and empty-file failures."""
     results_queue = _FakeQueue()
-    results_queue.put((0, "/out/a.h5", None))  # success
-    results_queue.put((1, None, "RuntimeError: boom"))  # explicit error
-    results_queue.put((2, None, None))  # reported but produced no file
+    results_queue.put(("result", 0, ("/out/a.h5", None)))  # success
+    results_queue.put(("result", 1, (None, "RuntimeError: boom")))  # explicit error
+    results_queue.put(("result", 2, (None, None)))  # reported but produced no file
     video_paths = [Path("a.mp4"), Path("b.mp4"), Path("c.mp4")]
     outputs, failures = pipeline._collect_results(results_queue=results_queue, video_paths=video_paths)
     assert outputs == {0: Path("/out/a.h5")}
@@ -372,15 +392,113 @@ def test_collect_results_success_and_failures():
     assert len(failures) == 2
 
 
-def test_collect_results_worker_died_missing_result():
-    """Verifies that _collect_results reports a never-arriving result as a worker-exited failure."""
+def test_collect_results_unclaimed_video_is_reported_as_never_started():
+    """Verifies that a video no worker ever claimed is reported as never analyzed rather than as a crash."""
     results_queue = _FakeQueue()
-    results_queue.put((0, "/out/a.h5", None))
+    results_queue.put(("result", 0, ("/out/a.h5", None)))
     video_paths = [Path("a.mp4"), Path("b.mp4")]
-    # The second result never arrives, so the drain loop times out and the missing video is reported as a failure.
     outputs, failures = pipeline._collect_results(results_queue=results_queue, video_paths=video_paths)
     assert outputs == {0: Path("/out/a.h5")}
-    assert failures == [("b.mp4", "the worker process exited before reporting a result")]
+    assert failures == [("b.mp4", "no worker started this video, so it was never analyzed.")]
+
+
+def test_collect_results_classifies_the_death_of_the_worker_that_claimed_the_video():
+    """Verifies that a claimed but unreported video is explained by its own worker's exit status."""
+    results_queue = _FakeQueue()
+    results_queue.put(("claim", 0, 4242))
+    video_paths = [Path("a.mp4")]
+    exits = (
+        WorkerExit(name="cuda:0", pid=4242, exit_code=-signal.SIGKILL, signal_name="SIGKILL"),
+        WorkerExit(name="cuda:1", pid=4243, exit_code=0, signal_name=None),
+    )
+    outputs, failures = pipeline._collect_results(results_queue=results_queue, video_paths=video_paths, exits=exits)
+    assert outputs == {}
+    assert len(failures) == 1
+    video, detail = failures[0]
+    assert video == "a.mp4"
+    assert "SIGKILL" in detail
+    assert "shell status 137" in detail
+    assert "out-of-memory killer" in detail
+
+
+def test_collect_results_interrupted_run_explains_the_gap_without_blaming_a_crash():
+    """Verifies that an interrupted run reports its unfinished videos as interrupted rather than as failures."""
+    results_queue = _FakeQueue()
+    results_queue.put(("claim", 0, 4242))
+    outputs, failures = pipeline._collect_results(
+        results_queue=results_queue, video_paths=[Path("a.mp4")], interrupted=True
+    )
+    assert outputs == {}
+    assert failures == [
+        ("a.mp4", "the run was interrupted while this video was being analyzed, so its predictions were not written.")
+    ]
+
+
+def test_collect_results_reports_an_unstarted_video_after_an_interrupt():
+    """Verifies that an interrupted run distinguishes a video nothing started from one it stopped mid-analysis."""
+    _outputs, failures = pipeline._collect_results(
+        results_queue=_FakeQueue(), video_paths=[Path("a.mp4")], interrupted=True
+    )
+    assert failures == [("a.mp4", "the run ended before any worker started this video.")]
+
+
+def test_collect_results_falls_back_when_the_claiming_worker_is_unknown():
+    """Verifies that a claim whose worker has no exit record still produces an explanatory failure."""
+    results_queue = _FakeQueue()
+    results_queue.put(("claim", 0, 9999))
+    _outputs, failures = pipeline._collect_results(results_queue=results_queue, video_paths=[Path("a.mp4")])
+    assert failures == [("a.mp4", "the worker process ended before reporting a result for this video.")]
+
+
+# _start_inference_manager
+def test_start_inference_manager_reports_a_manager_that_will_not_start(monkeypatch):
+    """Verifies that a manager that cannot start raises a named failure rather than a bare EOFError."""
+
+    def dead_manager():
+        raise EOFError
+
+    monkeypatch.setattr(pipeline.mp, "Manager", dead_manager)
+
+    with pytest.raises(pipeline.PipelineFailedError, match="inference worker queues"):
+        pipeline._start_inference_manager()
+
+
+# _warn_inference_stalled
+def test_warn_inference_stalled_names_the_elapsed_silence(monkeypatch):
+    """Verifies that a stalled run is called out with its elapsed silence and stated as not terminated."""
+    warnings: list[str] = []
+    monkeypatch.setattr(pipeline, "warn", warnings.append)
+
+    pipeline._warn_inference_stalled(1500.0)
+
+    assert len(warnings) == 1
+    assert "25:00" in warnings[0]
+    assert "Nothing was terminated." in warnings[0]
+
+
+# _format_inference_interruption
+def test_format_inference_interruption_names_the_completed_predictions(tmp_path):
+    """Verifies that an interrupted run's report names what was written and how to resume."""
+    report = pipeline._format_inference_interruption(
+        config=tmp_path / "cfg.yaml",
+        shuffle=3,
+        video_paths=[Path("a.mp4"), Path("b.mp4")],
+        outputs={0: tmp_path / "a.h5"},
+    )
+
+    assert "2 submitted, 1 complete" in report
+    assert "shuffle: 3" in report
+    assert str(tmp_path / "a.h5") in report
+    assert "Re-run naming only the videos" in report
+
+
+def test_format_inference_interruption_states_when_nothing_was_written(tmp_path):
+    """Verifies that an interrupted run that wrote nothing says so rather than listing an empty set."""
+    report = pipeline._format_inference_interruption(
+        config=tmp_path / "cfg.yaml", shuffle=1, video_paths=[Path("a.mp4")], outputs={}
+    )
+
+    assert "No prediction file was written" in report
 
 
 # _suppress_stdout
@@ -537,7 +655,7 @@ def test_analyze_one_video_success_with_progress(monkeypatch, tmp_path):
 
     pipeline._analyze_one_video(slot=slot, launch=launch, item=item)
 
-    index, path, error = results_queue._items.popleft()
+    _kind, index, (path, error) = results_queue._items.popleft()
     assert index == 3
     assert error is None
     assert Path(path) == destination / f"clip{scorer}.h5"
@@ -573,7 +691,7 @@ def test_analyze_one_video_failure_without_progress(monkeypatch, tmp_path):
 
     pipeline._analyze_one_video(slot=slot, launch=launch, item=item)
 
-    index, path, error = results_queue._items.popleft()
+    _kind, index, (path, error) = results_queue._items.popleft()
     assert index == 0
     assert path is None
     assert error == "RuntimeError: bad"
@@ -595,7 +713,7 @@ def test_analyze_one_video_success_without_output_file(monkeypatch, tmp_path):
 
     pipeline._analyze_one_video(slot=slot, launch=launch, item=item)
 
-    index, path, error = results_queue._items.popleft()
+    _kind, index, (path, error) = results_queue._items.popleft()
     assert index == 2
     assert path is None  # no file was produced, so the output resolves to None
     assert error is None
@@ -651,6 +769,9 @@ def test_run_inference_full_success_with_overrides(monkeypatch, tmp_path):
         def join(self, **_kwargs):
             self.joined = True
 
+        def seconds_since_progress(self):
+            return 0.0
+
     monkeypatch.setattr(pipeline, "AggregateBar", _FakeBar)
 
     def worker(_slot, launch):
@@ -660,7 +781,7 @@ def test_run_inference_full_success_with_overrides(monkeypatch, tmp_path):
                 break
             index, _video, _total, crop, destination = item
             assert crop == [0, 10, 0, 20]  # supplied crop override is forwarded verbatim
-            launch.results_queue.put((index, f"{destination}/pred_{index}.h5", None))
+            launch.results_queue.put(("result", index, (f"{destination}/pred_{index}.h5", None)))
 
     manager = _install_fake_mp(monkeypatch, worker)
 
@@ -711,9 +832,9 @@ def test_run_inference_partial_failure_no_overrides(monkeypatch, tmp_path):
             assert crop == [0, 100, 0, 80]  # resolved from the project's project-wide crop rectangle
             assert destination is None  # no destination override means write beside the video
             if index == 0:
-                launch.results_queue.put((index, f"{video}.h5", None))
+                launch.results_queue.put(("result", index, (f"{video}.h5", None)))
             else:
-                launch.results_queue.put((index, None, "RuntimeError: kaboom"))
+                launch.results_queue.put(("result", index, (None, "RuntimeError: kaboom")))
 
     manager = _install_fake_mp(monkeypatch, worker)
 
@@ -733,6 +854,35 @@ def test_run_inference_partial_failure_no_overrides(monkeypatch, tmp_path):
     assert len(summary.failures) == 1
     assert summary.failures[0][0] == "b.mp4"
     assert manager.shutdown_called is True
+
+
+def test_run_inference_interrupt_reports_the_completed_predictions(monkeypatch, tmp_path):
+    """Verifies that an interrupted run raises an interruption naming what was written rather than losing the report."""
+    videos = [tmp_path / "a.mp4", tmp_path / "b.mp4"]
+    for video in videos:
+        video.write_bytes(b"")
+    monkeypatch.setattr(pipeline, "_probe_frame_count", lambda _video: 10)
+    monkeypatch.setattr(pipeline, "read_config", lambda _path: {})
+    monkeypatch.setattr(pipeline, "_resolve_video_cropping", lambda **_kwargs: None)
+
+    def worker(_slot, launch):
+        # The first video completes, then the operator stops the run.
+        launch.results_queue.put(("result", 0, (str(tmp_path / "a.h5"), None)))
+        raise KeyboardInterrupt
+
+    _install_fake_mp(monkeypatch, worker)
+
+    with pytest.raises(pipeline.PipelineInterruptedError) as interruption:
+        pipeline.run_inference(
+            config=tmp_path / "cfg.yaml",
+            videos=list(videos),
+            profile=_make_profile(device="cpu", cpu_workers=1),
+            display_progress=False,
+        )
+
+    report = str(interruption.value)
+    assert "2 submitted, 1 complete" in report
+    assert str(tmp_path / "a.h5") in report
 
 
 # _partition_frame_ranges
@@ -973,12 +1123,26 @@ class _FakeProcess:
         self.target = target
         self.args = args
         self._worker_fn = worker_fn
+        self.pid = None
+        self.exitcode = None
+        self.terminated = False
 
     def start(self):
+        self.pid = 4242
         self._worker_fn(*self.args)
+        self.exitcode = 0
 
     def join(self, timeout=None):
         pass
+
+    def is_alive(self):
+        return self.pid is not None and self.exitcode is None
+
+    def terminate(self):
+        self.terminated = True
+
+    def kill(self):
+        self.terminated = True
 
 
 class _FakeContext:
@@ -1079,3 +1243,31 @@ def _chunk_item(task_id, video_index, chunk_index, video, frame_start, frame_end
         crop=None,
         destination=None,
     )
+
+
+def test_collect_results_reports_a_stopped_worker_as_an_interruption():
+    """Verifies that a worker a termination signal ended is reported as stopped rather than as a crash."""
+    results_queue = _FakeQueue()
+    results_queue.put(("claim", 0, 4242))
+    exits = (WorkerExit(name="cuda:0", pid=4242, exit_code=-signal.SIGTERM, signal_name="SIGTERM"),)
+
+    _outputs, failures = pipeline._collect_results(
+        results_queue=results_queue, video_paths=[Path("a.mp4")], exits=exits
+    )
+
+    assert failures == [
+        ("a.mp4", "the worker was stopped while analyzing this video, so its predictions were not written.")
+    ]
+
+
+def test_collect_results_reports_a_clean_exit_that_never_reported():
+    """Verifies that a worker that exited cleanly without a result is not blamed on a crash."""
+    results_queue = _FakeQueue()
+    results_queue.put(("claim", 0, 4242))
+    exits = (WorkerExit(name="cuda:0", pid=4242, exit_code=0, signal_name=None),)
+
+    _outputs, failures = pipeline._collect_results(
+        results_queue=results_queue, video_paths=[Path("a.mp4")], exits=exits
+    )
+
+    assert failures == [("a.mp4", "the worker exited without reporting a result for this video.")]

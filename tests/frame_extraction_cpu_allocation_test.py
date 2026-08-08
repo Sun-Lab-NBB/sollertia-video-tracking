@@ -1,12 +1,11 @@
 """Contains tests for the CPU-core allocation planner used to pin parallel frame-extraction workers."""
 
 import sys
-import queue
 
 import pytest
 
 from sollertia_video_tracking.frame_extraction.cpu_allocation import (
-    pin_worker_to_cores,
+    pin_process_to_cores,
     plan_core_allocation,
 )
 
@@ -108,14 +107,11 @@ def test_oversubscription_raises_value_error() -> None:
         )
 
 
-def test_pin_worker_binds_to_claimed_core_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verifies that the worker claims a core set from the shared queue and pins its CPU affinity to it.
+def test_pin_process_binds_to_its_assigned_core_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies that a worker pins its CPU affinity to the core block it was constructed with.
 
-    macOS exposes no CPU-affinity API, so its workers still claim their core set but run unpinned.
+    macOS exposes no CPU-affinity API, so its workers run unpinned.
     """
-    core_queue: queue.Queue[set[int]] = queue.Queue()
-    core_queue.put({1, 2, 3})
-
     recorded: list[list[int]] = []
 
     class _FakeProcess:
@@ -123,18 +119,22 @@ def test_pin_worker_binds_to_claimed_core_set(monkeypatch: pytest.MonkeyPatch) -
             recorded.append(cores)
 
     monkeypatch.setattr("sollertia_video_tracking.frame_extraction.cpu_allocation.psutil.Process", _FakeProcess)
-    pin_worker_to_cores(core_queue)
+    pin_process_to_cores({1, 2, 3})
 
-    # The core set is claimed on every platform, so the queue is drained even where no pinning happens.
-    assert core_queue.empty()
     assert recorded == ([] if sys.platform == "darwin" else [[1, 2, 3]])
 
 
-def test_pin_worker_empty_queue_is_silent() -> None:
-    """Verifies that an empty queue (more workers than slots) degrades to an unpinned worker without raising."""
-    empty_queue: queue.Queue[set[int]] = queue.Queue()
-    # Must not raise even though there is no core set to claim.
-    pin_worker_to_cores(empty_queue)
+def test_pin_process_survives_an_unsupported_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies that a platform whose affinity call raises degrades to an unpinned worker rather than aborting."""
+
+    class _FakeProcess:
+        def cpu_affinity(self, cores: list[int]) -> None:
+            message = "cpu_affinity is unavailable here"
+            raise NotImplementedError(message)
+
+    monkeypatch.setattr("sollertia_video_tracking.frame_extraction.cpu_allocation.psutil.Process", _FakeProcess)
+    # Must not raise even though the affinity call is unsupported.
+    pin_process_to_cores({0})
 
 
 def _assert_disjoint_within_usable(core_sets: list[set[int]], usable_core_count: int) -> None:

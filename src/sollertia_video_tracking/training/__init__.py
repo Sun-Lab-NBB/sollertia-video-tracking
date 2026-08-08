@@ -10,7 +10,13 @@ from .dataset import (
     get_available_object_detectors,
     build_conditional_top_down_conditions,
 )
-from .pipeline import TrainingSummary, train_model, detect_fixed_input_size
+from .pipeline import (
+    TrainingSummary,
+    TrainingFailedError,
+    TrainingInterruptedError,
+    train_model,
+    detect_fixed_input_size,
+)
 from ..hardware import Toggle, AmpMode, DeviceType
 from .optimization import (
     MultiGpuStrategy,
@@ -25,6 +31,8 @@ __all__ = [
     "OptimizationProfile",
     "Toggle",
     "TrainingDatasetSummary",
+    "TrainingFailedError",
+    "TrainingInterruptedError",
     "TrainingSummary",
     "WeightInitializationMethod",
     "build_conditional_top_down_conditions",

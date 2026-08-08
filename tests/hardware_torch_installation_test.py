@@ -573,3 +573,22 @@ def test_verify_installation_warns_when_the_probe_cannot_run(
 
     assert torch_installation._verify_installation() == (None, None, False)
     assert "did not run" in capsys.readouterr().err
+
+
+def test_validate_torch_version_accepts_the_supported_series():
+    """Verifies that a supported dotted version is accepted with a pre-release segment, a build tag, or neither."""
+    torch_installation._validate_torch_version("2.9.1")
+    torch_installation._validate_torch_version("2.9.1+cu126")
+    torch_installation._validate_torch_version("2.10.0rc1")
+
+
+def test_validate_torch_version_rejects_a_malformed_version():
+    """Verifies that a value that is not a dotted version is rejected before anything is uninstalled."""
+    with pytest.raises(ValueError, match="dotted version"):
+        torch_installation._validate_torch_version("latest")
+
+
+def test_validate_torch_version_rejects_an_unsupported_major_series():
+    """Verifies that a version outside the supported major series is rejected before anything is uninstalled."""
+    with pytest.raises(ValueError, match=r"2\.x series only"):
+        torch_installation._validate_torch_version("1.13.1")

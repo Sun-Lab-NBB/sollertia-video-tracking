@@ -1,6 +1,8 @@
 """Contains tests for the shared frame-extraction utilities the k-means and outlier pipelines both build on."""
 
+import os
 import queue
+import signal
 from typing import ClassVar
 from pathlib import Path
 
@@ -9,12 +11,14 @@ import pandas as pd
 import pytest
 from ruamel.yaml import YAML
 
+from sollertia_video_tracking.reporting import WorkerExit, PipelineFailedError, PipelineInterruptedError
 from sollertia_video_tracking.frame_extraction import utilities
 from sollertia_video_tracking.frame_extraction.utilities import (
     PurgeSummary,
     RefinementStatusSummary,
     RefinementDirectoryStatus,
     purge_labeled_data,
+    run_supervised_tasks,
     extracted_frame_paths,
     frame_names_from_index,
     iter_pinned_extraction,
@@ -159,10 +163,10 @@ def test_iter_pinned_extraction_with_progress(monkeypatch):
     assert bar.joined is True
     assert bar.total_video_count == 2
 
-    # The pool is pinned with the core-set queue and the real pinning initializer.
-    pool = fake_context.pools[-1]
-    assert pool.processes == 2
-    assert pool.initializer is utilities.pin_worker_to_cores
+    # One worker process is created per core block, each pinned to its own block by construction.
+    assert len(fake_context.processes) == 2
+    assert [process.args[0] for process in fake_context.processes] == [{0, 1}, {2, 3}]
+    assert all(process.target is utilities._drain_worker_tasks for process in fake_context.processes)
 
     # A completion message is enqueued for each finished video.
     progress_queue = captured["progress_queue"]
@@ -172,12 +176,8 @@ def test_iter_pinned_extraction_with_progress(monkeypatch):
     assert ("done", 0) in drained
     assert ("done", 1) in drained
 
-    # The core-set queue was primed with one set per worker.
-    core_set_queue = fake_context.manager.queues[1]
-    remaining = []
-    while not core_set_queue.empty():
-        remaining.append(core_set_queue.get_nowait())
-    assert remaining == [{0, 1}, {2, 3}]
+    # Every task was consumed, so no work was left stranded on the shared task queue.
+    assert fake_context.manager.queues[1].empty()
 
     assert fake_context.manager.shutdown_called is True
 
@@ -261,6 +261,297 @@ def test_iter_pinned_extraction_tears_down_when_consumption_stops_early(monkeypa
     assert fake_context.manager.shutdown_called is True
 
 
+def test_iter_pinned_extraction_reports_a_worker_that_died_mid_video(monkeypatch):
+    """Verifies that a video whose worker died without reporting yields a classified error instead of hanging."""
+    fake_context = _patch_pinned_extraction(monkeypatch)
+
+    def make_tasks(_progress_queue):
+        return [("/v/a.mp4",), ("/v/b.mp4",)]
+
+    def worker(task):
+        # The second video's worker claims its task and then ends without reporting a result.
+        if task[0].endswith("b.mp4"):
+            raise SystemExit
+        return (task[0], 3, "ok")
+
+    results = {
+        video: status
+        for video, _written, status in iter_pinned_extraction(
+            videos=["/v/a.mp4", "/v/b.mp4"],
+            make_tasks=make_tasks,
+            worker=worker,
+            worker_count=1,
+            core_sets=[{0}],
+            frame_totals={0: 1, 1: 1},
+            display_progress=False,
+        )
+    }
+
+    assert results["/v/a.mp4"] == "ok"
+    assert results["/v/b.mp4"].startswith("error:")
+    assert "No frames were written for this video." in results["/v/b.mp4"]
+    assert fake_context.manager.shutdown_called is True
+
+
+def test_iter_pinned_extraction_reports_a_task_the_worker_could_not_run(monkeypatch):
+    """Verifies that a task the worker raised on is reported as that video's failure rather than lost."""
+    _patch_pinned_extraction(monkeypatch)
+
+    def worker(_task):
+        message = "unusable work item"
+        raise RuntimeError(message)
+
+    results = list(
+        iter_pinned_extraction(
+            videos=["/v/a.mp4"],
+            make_tasks=lambda _q: [("/v/a.mp4",)],
+            worker=worker,
+            worker_count=1,
+            core_sets=[{0}],
+            frame_totals={0: 1},
+            display_progress=False,
+        )
+    )
+
+    assert len(results) == 1
+    video, written, status = results[0]
+    assert video == "/v/a.mp4"
+    assert written == 0
+    assert "unusable work item" in status
+
+
+def test_iter_pinned_extraction_reports_a_manager_that_will_not_start(monkeypatch):
+    """Verifies that a manager that cannot start raises a named failure rather than a bare EOFError."""
+    fake_context = _patch_pinned_extraction(monkeypatch)
+
+    def dead_manager():
+        raise EOFError
+
+    fake_context.Manager = dead_manager
+
+    with pytest.raises(PipelineFailedError, match="frame-extraction worker queues"):
+        list(
+            iter_pinned_extraction(
+                videos=["/v/a.mp4"],
+                make_tasks=lambda _q: [("/v/a.mp4",)],
+                worker=lambda task: (task[0], 1, "ok"),
+                worker_count=1,
+                core_sets=[{0}],
+                frame_totals={0: 1},
+                display_progress=False,
+            )
+        )
+
+
+def test_iter_pinned_extraction_waits_while_a_quiet_worker_is_still_alive(monkeypatch):
+    """Verifies that an empty results queue does not end the run while a worker is still running."""
+    fake_context = _patch_pinned_extraction(monkeypatch, alive_polls=2, run_target=False)
+
+    results = list(
+        iter_pinned_extraction(
+            videos=["/v/a.mp4"],
+            make_tasks=lambda _q: [("/v/a.mp4",)],
+            worker=lambda task: (task[0], 1, "ok"),
+            worker_count=1,
+            core_sets=[{0}],
+            frame_totals={0: 1},
+            display_progress=False,
+        )
+    )
+
+    # The worker never reported, so its video is reported as unprocessed once the worker is gone.
+    assert len(results) == 1
+    assert "never processed" in results[0][2]
+    # The parent polled while the worker was still alive rather than ending on the first empty read.
+    assert fake_context.processes[0].alive_polls_used >= 1
+
+
+def test_iter_pinned_extraction_reports_an_operator_stop_as_an_interruption(monkeypatch):
+    """Verifies that stopping a run mid-drain is reported as a deliberate stop rather than as a worker failure."""
+    _patch_pinned_extraction(monkeypatch)
+
+    def interrupting_worker(_task):
+        raise KeyboardInterrupt
+
+    with pytest.raises(PipelineInterruptedError, match="interrupted before it finished"):
+        list(
+            iter_pinned_extraction(
+                videos=["/v/a.mp4"],
+                make_tasks=lambda _q: [("/v/a.mp4",)],
+                worker=interrupting_worker,
+                worker_count=1,
+                core_sets=[{0}],
+                frame_totals={0: 1},
+                display_progress=False,
+            )
+        )
+
+
+def test_lost_video_result_reports_a_stopped_worker_as_an_interruption():
+    """Verifies that a worker a termination signal ended is reported as stopped rather than as a crash."""
+    stopped = WorkerExit(name="0", pid=7, exit_code=-signal.SIGTERM, signal_name="SIGTERM")
+
+    _video, _written, status = utilities._lost_task_result(task=("/v/a.mp4",), exit_record=stopped)
+
+    assert "was stopped before it finished this video" in status
+
+
+def test_lost_video_result_reports_a_clean_exit_that_never_reported():
+    """Verifies that a worker that exited cleanly without a result is not blamed on a crash."""
+    clean = WorkerExit(name="0", pid=7, exit_code=0, signal_name=None)
+
+    _video, _written, status = utilities._lost_task_result(task=("/v/a.mp4",), exit_record=clean)
+
+    assert "exited without reporting a result" in status
+
+
+# run_supervised_tasks
+def test_run_supervised_tasks_returns_results_in_task_order(monkeypatch):
+    """Verifies that every task's result is returned at its own task index."""
+    _patch_pinned_extraction(monkeypatch)
+
+    results = run_supervised_tasks(
+        tasks=[("a", 0), ("b", 1), ("c", 2)],
+        worker=lambda task: task[0].upper(),
+        worker_count=2,
+        role="trajectory-fit worker",
+        memory_remedy="Lower the fit-worker count.",
+    )
+
+    assert results == ["A", "B", "C"]
+
+
+def test_run_supervised_tasks_reports_a_worker_that_died_without_a_result(monkeypatch):
+    """Verifies that a lost task ends the run with a classified report rather than a silent placeholder."""
+    _patch_pinned_extraction(monkeypatch)
+
+    def worker(task):
+        if task[0] == "b":
+            raise SystemExit
+        return task[0]
+
+    with pytest.raises(PipelineFailedError, match="trajectory-fit worker"):
+        run_supervised_tasks(
+            tasks=[("a", 0), ("b", 1)],
+            worker=worker,
+            worker_count=1,
+            role="trajectory-fit worker",
+            memory_remedy="Lower the fit-worker count.",
+        )
+
+
+def test_run_supervised_tasks_reports_an_operator_stop_as_an_interruption(monkeypatch):
+    """Verifies that stopping the non-streaming runner is reported as a deliberate stop rather than a task failure."""
+    _patch_pinned_extraction(monkeypatch)
+
+    def interrupting_worker(_task):
+        raise KeyboardInterrupt
+
+    with pytest.raises(PipelineInterruptedError, match="interrupted before it finished"):
+        run_supervised_tasks(
+            tasks=[("a", 0)],
+            worker=interrupting_worker,
+            worker_count=1,
+            role="trajectory-fit worker",
+            memory_remedy="Lower the fit-worker count.",
+        )
+
+
+def test_run_supervised_tasks_reports_a_task_the_worker_raised_on(monkeypatch):
+    """Verifies that a task whose worker raised carries its traceback into the report."""
+    _patch_pinned_extraction(monkeypatch)
+
+    def worker(_task):
+        message = "fit did not converge"
+        raise RuntimeError(message)
+
+    with pytest.raises(PipelineFailedError, match="fit did not converge"):
+        run_supervised_tasks(
+            tasks=[("a", 0)],
+            worker=worker,
+            worker_count=1,
+            role="trajectory-fit worker",
+            memory_remedy="Lower the fit-worker count.",
+        )
+
+
+def test_run_supervised_tasks_waits_while_a_quiet_worker_is_still_alive(monkeypatch):
+    """Verifies that the non-streaming runner also polls rather than ending on the first empty read."""
+    _patch_pinned_extraction(monkeypatch, alive_polls=2, run_target=False)
+
+    with pytest.raises(PipelineFailedError, match="No worker reported a result"):
+        run_supervised_tasks(
+            tasks=[("a", 0)],
+            worker=lambda task: task[0],
+            worker_count=1,
+            role="trajectory-fit worker",
+            memory_remedy="Lower the fit-worker count.",
+        )
+
+
+# _describe_lost_supervised_task
+def test_lost_task_report_names_the_exit_status_of_the_worker_that_claimed_it():
+    """Verifies that a lost supervised task is explained by its own worker's exit status."""
+    exit_record = WorkerExit(name="0", pid=4242, exit_code=-signal.SIGKILL, signal_name="SIGKILL")
+
+    report = utilities._describe_lost_supervised_task(
+        task=("video.mp4", 3),
+        failure=None,
+        exit_record=exit_record,
+        role="trajectory-fit worker",
+        memory_remedy="Lower the fit-worker count.",
+    )
+
+    assert "SIGKILL" in report
+    assert "Lower the fit-worker count." in report
+
+
+def test_lost_task_report_states_when_nothing_claimed_the_task():
+    """Verifies that a task no worker ever claimed is reported as unstarted rather than blamed on a crash."""
+    report = utilities._describe_lost_supervised_task(
+        task=("video.mp4", 3),
+        failure=None,
+        exit_record=None,
+        role="trajectory-fit worker",
+        memory_remedy="Lower the fit-worker count.",
+    )
+
+    assert "No worker reported a result for it." in report
+
+
+# _next_extraction_message
+def test_next_extraction_message_treats_a_dead_queue_as_no_message():
+    """Verifies that a queue whose manager died reads as no-message, letting the caller reach its liveness check."""
+
+    class _DeadQueue:
+        def get(self, timeout=None):
+            self.timeout = timeout
+            message = "manager is gone"
+            raise EOFError(message)
+
+    assert utilities._next_extraction_message(_DeadQueue()) is None
+
+
+# _exit_for_claim
+def test_exit_for_claim_returns_nothing_for_an_unclaimed_task():
+    """Verifies that an unclaimed task resolves to no exit record rather than to an arbitrary worker's."""
+    exits = (WorkerExit(name="0", pid=7, exit_code=0, signal_name=None),)
+    assert utilities._exit_for_claim(exits, None) is None
+    assert utilities._exit_for_claim(exits, 9999) is None
+    assert utilities._exit_for_claim(exits, 7) is exits[0]
+
+
+# _lost_task_result
+def test_lost_video_result_states_when_no_worker_ever_claimed_it():
+    """Verifies that a video no worker claimed is reported as never processed rather than blamed on a crash."""
+    video, written, status = utilities._lost_task_result(task=("/v/a.mp4",), exit_record=None)
+
+    assert video == "/v/a.mp4"
+    assert written == 0
+    assert "never processed" in status
+    assert "No frames were written for this video." in status
+
+
 # prune_empty_labeled_data_directories
 def test_prune_no_labeled_data_directory(tmp_path):
     """Verifies that a project without a labeled-data tree prunes nothing and reports zero."""
@@ -293,6 +584,29 @@ def test_prune_removes_only_empty_real_directories(tmp_path, capsys):
     assert (labeled / "linkdir").exists()
     assert (labeled / "afile.txt").exists()
     assert "pruned 1 empty labeled-data directory(ies)" in capsys.readouterr().err
+
+
+def test_prune_empty_labeled_data_directories_warns_on_an_unremovable_directory(monkeypatch, tmp_path):
+    """Verifies that a directory that cannot be removed is warned about rather than aborting a completed run."""
+    labeled_data = tmp_path / "labeled-data"
+    (labeled_data / "video_a").mkdir(parents=True)
+    (labeled_data / "video_b").mkdir()
+    warnings: list[str] = []
+    monkeypatch.setattr(utilities, "warn", warnings.append)
+    original_rmdir = Path.rmdir
+
+    def selective_rmdir(self):
+        if self.name == "video_a":
+            message = "directory is read-only"
+            raise PermissionError(message)
+        original_rmdir(self)
+
+    monkeypatch.setattr(Path, "rmdir", selective_rmdir)
+
+    removed = prune_empty_labeled_data_directories(project_directory=tmp_path)
+
+    assert removed == 1
+    assert any("video_a" in warning for warning in warnings)
 
 
 # extracted_frame_paths
@@ -626,8 +940,8 @@ def _write_config(path, data) -> None:
 def _write_label_table(path, frame_names, *, finite_names=None, video="vid") -> None:
     """Writes a DeepLabCut-style label table keyed by ``df_with_missing`` with per-frame finite or all-NaN rows.
 
-    Frames listed in ``finite_names`` receive finite coordinates; every other frame receives an all-NaN placeholder
-    row, mirroring what the labeling GUI writes for opened-but-untouched frames.
+    Frames listed in ``finite_names`` receive finite coordinates, and every other frame receives an all-NaN
+    placeholder row, mirroring what the labeling GUI writes for opened-but-untouched frames.
     """
     if finite_names is None:
         finite_names = set(frame_names)
@@ -695,39 +1009,76 @@ class _FakeManager:
         self.shutdown_called = True
 
 
-class _FakePool:
-    """Stands in for a process pool, running the worker synchronously in-process and preserving task order."""
+class _FakeProcess:
+    """Stands in for a spawned worker process, optionally running its target inline on start and reporting a
+    configurable number of alive polls before it exits.
+    """
 
-    def __init__(self, *, processes, initializer, initargs):
-        self.processes = processes
-        self.initializer = initializer
-        self.initargs = initargs
+    def __init__(self, *, target, args, daemon, alive_polls=0, run_target=True):
+        self.target = target
+        self.args = args
+        self.daemon = daemon
+        self.pid = None
+        self.exitcode = None
+        self.terminated = False
+        self.killed = False
+        self.join_timeout = None
+        self._alive_polls = alive_polls
+        self._run_target = run_target
+        self.alive_polls_used = 0
 
-    def __enter__(self):
-        return self
+    def start(self):
+        self.pid = os.getpid()
+        if not self._run_target:
+            return
+        try:
+            self.target(*self.args)
+        except SystemExit:
+            # A worker that dies without unwinding reports a signal exit code, exactly as a real spawned process does,
+            # so a test raises SystemExit inside its worker to simulate that death.
+            self.exitcode = -signal.SIGKILL
+        else:
+            self.exitcode = 0
 
-    def __exit__(self, *_exc):
+    def join(self, timeout=None):
+        self.join_timeout = timeout
+
+    def is_alive(self):
+        if self.pid is None:
+            return False
+        if self._alive_polls > 0:
+            self._alive_polls -= 1
+            self.alive_polls_used += 1
+            return True
+        if self.exitcode is None:
+            self.exitcode = 0
         return False
 
-    def imap_unordered(self, *, func, iterable):
-        for task in iterable:
-            yield func(task)
+    def terminate(self):
+        self.terminated = True
+
+    def kill(self):
+        self.killed = True
 
 
 class _FakeContext:
-    """Stands in for a spawn context, vending the fake manager and pool."""
+    """Stands in for a spawn context, vending the fake manager and the fake worker processes."""
 
-    def __init__(self):
+    def __init__(self, *, alive_polls=0, run_target=True):
         self.manager = _FakeManager()
-        self.pools = []
+        self.processes = []
+        self.alive_polls = alive_polls
+        self.run_target = run_target
 
     def Manager(self):  # noqa: N802 - mirrors multiprocessing context's capitalized factory name.
         return self.manager
 
-    def Pool(self, *, processes, initializer, initargs):  # noqa: N802 - mirrors the capitalized factory name.
-        pool = _FakePool(processes=processes, initializer=initializer, initargs=initargs)
-        self.pools.append(pool)
-        return pool
+    def Process(self, *, target, args, daemon):  # noqa: N802 - mirrors the capitalized factory name.
+        process = _FakeProcess(
+            target=target, args=args, daemon=daemon, alive_polls=self.alive_polls, run_target=self.run_target
+        )
+        self.processes.append(process)
+        return process
 
 
 class _FakeMultiprocessing:
@@ -773,10 +1124,10 @@ class _FakeBar:
         self._alive = False
 
 
-def _patch_pinned_extraction(monkeypatch):
+def _patch_pinned_extraction(monkeypatch, *, alive_polls=0, run_target=True):
     """Swaps the module's multiprocessing and AggregateBar references for synchronous fakes and returns the context."""
     _FakeBar.instances.clear()
-    fake_context = _FakeContext()
+    fake_context = _FakeContext(alive_polls=alive_polls, run_target=run_target)
     monkeypatch.setattr(utilities, "multiprocessing", _FakeMultiprocessing(fake_context))
     monkeypatch.setattr(utilities, "AggregateBar", _FakeBar)
     return fake_context

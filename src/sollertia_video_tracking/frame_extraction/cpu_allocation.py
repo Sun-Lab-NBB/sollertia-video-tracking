@@ -1,7 +1,6 @@
 """Provides the CPU-core allocation logic that distributes parallel frame-extraction workers across the machine."""
 
 import sys
-from typing import Any
 import contextlib
 
 import psutil
@@ -107,18 +106,19 @@ def plan_core_allocation(
     return worker_count, core_sets
 
 
-def pin_worker_to_cores(core_set_queue: Any) -> None:
-    """Pins the calling pool worker to the next free core block, called once per worker at start.
+def pin_process_to_cores(core_set: set[int]) -> None:
+    """Pins the calling worker process to its assigned core block, called once per worker at start.
 
-    Each worker claims one core set from the shared queue and binds its CPU affinity to it, so the worker and every
-    thread its decoder spawns stay within a disjoint block of cores. CPU affinity is supported on Linux and Windows.
-    macOS exposes no affinity API, so its workers run unpinned. The binding is best-effort, so a missing slot or an
-    unsupported platform degrades to an unpinned worker rather than aborting the run.
+    Each worker binds its CPU affinity to the block it was constructed with, so the worker and every thread its
+    decoder spawns stay within a disjoint set of cores. CPU affinity is supported on Linux and Windows. macOS exposes
+    no affinity API, so its workers run unpinned. The binding is best-effort, so an unsupported platform degrades to an
+    unpinned worker rather than aborting the run.
 
     Args:
-        core_set_queue: The shared queue holding one core-id set per worker, produced by an extraction pipeline.
+        core_set: The core ids this worker is confined to. An empty set leaves the worker unpinned.
     """
+    if not core_set:
+        return
     with contextlib.suppress(Exception):
-        core_set = core_set_queue.get_nowait()
         if sys.platform != "darwin":
             psutil.Process().cpu_affinity(list(core_set))

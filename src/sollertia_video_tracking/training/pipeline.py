@@ -3,8 +3,9 @@
 import os
 import sys
 import copy
+import time
 import socket
-from typing import Any, TextIO
+from typing import Any
 import logging
 from pathlib import Path
 import traceback
@@ -16,6 +17,7 @@ import torch
 from torch.utils.data import DataLoader, DistributedSampler
 import torch.distributed as dist
 import torch.multiprocessing as mp
+from torch.multiprocessing import ProcessExitedException, ProcessRaisedException
 from deeplabcut.core.weight_init import WeightInitialization
 from deeplabcut.pose_estimation_pytorch.data import DLCLoader, build_transforms
 from deeplabcut.pose_estimation_pytorch.task import Task
@@ -26,11 +28,37 @@ from deeplabcut.pose_estimation_pytorch.runners.logger import setup_file_logging
 
 from .monitor import TrainingMonitor, QueueTrainingLogger
 from .runners import build_optimized_training_runner
+from ..hardware import warn
+from ..reporting import (
+    PipelineFailedError,
+    PipelineInterruptedError,
+    read_file_tail,
+    is_interrupt_signal,
+    describe_process_exit,
+    enable_native_crash_dumps,
+)
 from .evaluation import EvaluationSummary, evaluate_trained_model, resolve_evaluation_batch_size
 from .optimization import MultiGpuStrategy, OptimizationProfile, apply_runtime_optimizations
 
 _logger = logging.getLogger(__name__)
 """The module logger. Its records propagate to DeepLabCut's root training-log handlers (``train.txt``)."""
+
+_TRAINING_LOG_TAIL_LINES: int = 40
+"""The number of trailing training-log lines quoted in a failure report. It is long enough to carry a native crash
+message and the epoch it interrupted, and short enough to keep the report readable."""
+
+_TRAINING_MEMORY_REMEDY: str = (
+    "Lower the batch size, lower the dataloader worker count, or free host memory, then re-run."
+)
+"""The advice offered when the out-of-memory killer ends a training worker."""
+
+
+class TrainingFailedError(PipelineFailedError):
+    """Indicates that a training run did not complete, carrying the whole operator-facing report as its message."""
+
+
+class TrainingInterruptedError(PipelineInterruptedError):
+    """Indicates that a training run was stopped by the operator or by a termination signal rather than by a fault."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,19 +93,27 @@ class TrainingSummary:
 
     evaluation: EvaluationSummary | None = None
     """The post-training evaluation summary, or None when evaluation was skipped or failed."""
+    evaluation_error: str | None = None
+    """The type and message of the post-training evaluation failure, or None when evaluation ran or was skipped."""
 
     def describe(self) -> str:
-        """Builds a human-readable summary of the training run, and the evaluation when one ran, for the CLI.
+        """Builds a human-readable summary of the training run, and the evaluation outcome, for the CLI.
 
         Returns:
             A compact description of what was trained and the hardware configuration used, with the evaluation
-            summary appended on a second line when a post-training evaluation ran.
+            summary appended on a second line when a post-training evaluation ran, or the evaluation failure when
+            one was attempted and failed.
         """
         trained = "+".join(self.tasks_trained) if self.tasks_trained else "nothing"
         where = f"{self.device}:{self.strategy}x{self.world_size}" if self.device == "cuda" else self.device
         summary = f"trained {trained} ({self.epochs} epochs) on {where} in {self.precision} -> {self.model_folder}"
         if self.evaluation is not None:
             summary = f"{summary}\n{self.evaluation.describe()}"
+        elif self.evaluation_error is not None:
+            summary = (
+                f"{summary}\nevaluation FAILED ({self.evaluation_error}). The trained snapshots are intact, see "
+                f"{self.model_folder / 'train.txt'}"
+            )
         return summary
 
 
@@ -103,9 +139,6 @@ class _TrainingLaunch:
     """The maximum number of snapshots to retain, or None to use the configured value."""
     progress_queue: Any
     """The shared monitor queue workers report progress to, or None when progress reporting is disabled."""
-    preserve_console: bool
-    """Determines whether the parent holds a preserved stderr duplicate, letting the single-process worker redirect
-    its console."""
     port: int
     """The free TCP port reserved for the DistributedDataParallel rendezvous."""
     world_size: int
@@ -142,6 +175,12 @@ def train_model(
     single-process path covers one GPU, the CPU, MPS, and DataParallel across multiple GPUs. For top-down shuffles the
     detector is trained before the pose model.
 
+    Notes:
+        Training always runs in spawned worker processes, so this process keeps its own standard output and error.
+        That leaves it able to report a worker that dies without unwinding, such as one killed by the out-of-memory
+        killer or by a crash inside a native backend. The workers divert their console into the training log while the
+        monitor owns the terminal, and a failure report quotes the tail of that log.
+
     Args:
         config: The path of the DeepLabCut project configuration file.
         profile: The resolved optimization profile describing the device, precision, and parallelism to use.
@@ -171,9 +210,15 @@ def train_model(
 
     Raises:
         ValueError: When the shuffle requests SuperAnimal memory-replay fine-tuning, which this trainer does not
-            support.
+            support, or when the resolved epoch budgets leave no model to train.
+        TrainingFailedError: When the progress monitor cannot be started, or when a training worker fails or dies,
+            carrying the operator-facing failure report.
+        TrainingInterruptedError: When the operator stops the run before it completes.
     """
     config = Path(config)
+    # Installs the fault handler in this process before any worker exists, so a native crash on this side of the
+    # launch leaves a readable dump on the terminal instead of ending the run without a word.
+    enable_native_crash_dumps()
     loader = DLCLoader(config=config, shuffle=shuffle, trainset_index=training_set_index, modelprefix="")
 
     weight_init_config = loader.model_cfg["train_settings"].get("weight_init")
@@ -214,24 +259,27 @@ def train_model(
     tasks_trained = _plan_training_tasks(loader)
     model_folder = loader.model_folder
     pose_epochs = loader.model_cfg["train_settings"]["epochs"]
+    if not tasks_trained:
+        detector = loader.model_cfg.get("detector")
+        detector_epochs_planned = detector["train_settings"]["epochs"] if detector is not None else 0
+        message = (
+            f"Unable to train shuffle {shuffle} of the project at {config}. The resolved epoch budgets leave no model "
+            f"to train, because the pose budget is {pose_epochs} and the detector budget is {detector_epochs_planned}. "
+            f"Request a positive epoch count, or a positive detector epoch count to train a top-down shuffle's "
+            f"detector alone."
+        )
+        raise ValueError(message)
 
-    progress_queue = None
-    monitor = None
-    manager = None
-    monitor_stream = None
+    progress_queue: Any = None
+    monitor: TrainingMonitor | None = None
+    manager: Any = None
     if display_progress:
-        manager = mp.Manager()
-        progress_queue = manager.Queue()
-        # Render the monitor to a preserved duplicate of stderr so it keeps reaching the terminal even when the
-        # single-process training path later redirects this process's stdout and stderr to the training log.
-        monitor_stream = _duplicate_stderr()
-        monitor = TrainingMonitor(progress_queue=progress_queue, stream=monitor_stream)
-        monitor.start()
+        manager, progress_queue, monitor = _start_progress_monitor()
 
     world_size = profile.world_size
     # Worker chatter is diverted into DeepLabCut's train.txt log while the monitor owns the console. The log is always
-    # retained, and the operator is pointed to it when a run fails.
-    training_log = model_folder / "train.txt" if display_progress else None
+    # retained, and its tail is quoted back to the operator when a run fails.
+    training_log = model_folder / "train.txt"
     launch = _TrainingLaunch(
         config=config,
         shuffle=shuffle,
@@ -242,45 +290,53 @@ def train_model(
         load_head_weights=load_head_weights,
         maximum_snapshots_to_keep=maximum_snapshots_to_keep,
         progress_queue=progress_queue,
-        preserve_console=monitor_stream is not None,
         port=_find_free_port(),
         world_size=world_size,
     )
-    succeeded = False
     try:
-        if profile.use_ddp:
-            mp.spawn(_run_training_worker, args=(launch,), nprocs=world_size, join=True)
-        else:
-            _run_training_worker(rank=0, launch=launch)
-        succeeded = True
+        # Every strategy launches through spawn, including the single-process ones, so the process that has to report
+        # a failure is never the process that gave its descriptors to the training log. A worker killed by a signal
+        # runs no Python at all, and only a surviving parent is able to turn that death into a report.
+        mp.spawn(_run_training_worker, args=(launch,), nprocs=world_size, join=True)
+    except (Exception, KeyboardInterrupt) as error:
+        if _is_operator_interrupt(error):
+            message = (
+                f"Training was interrupted before it completed. Snapshots already written to {model_folder} are "
+                f"intact, so the run can be resumed from the most recent one."
+            )
+            raise TrainingInterruptedError(message) from error
+        message = _format_training_failure(
+            error,
+            config=config,
+            shuffle=shuffle,
+            model_folder=model_folder,
+            training_log=training_log,
+        )
+        raise TrainingFailedError(message) from error
     finally:
-        if monitor is not None:
-            monitor.stop()
-            monitor.join(timeout=3)
-        # The manager owns the queue the monitor reads and the duplicate is the stream it writes, so both are released
-        # only once the renderer has actually exited. A renderer still running past the join keeps them, because
-        # leaking a descriptor until the process exits costs less than a live writer reaching a closed handle.
-        monitor_released = monitor is None or not monitor.is_alive()
-        if manager is not None and monitor_released:
-            manager.shutdown()
-        if monitor_stream is not None and monitor_released:
-            with contextlib.suppress(Exception):
-                monitor_stream.close()
-        # The monitor has released the terminal, so on failure the operator can be pointed to the training log that
-        # captured the worker output.
-        if not succeeded and training_log is not None and training_log.exists():
-            _report_training_log(training_log)
+        _stop_progress_monitor(monitor=monitor, manager=manager)
 
     evaluation = None
+    evaluation_error = None
     if evaluate and "pose" in tasks_trained:
-        evaluation = _evaluate_after_training(
-            config=config,
-            profile=profile,
-            shuffle=shuffle,
-            training_set_index=training_set_index,
-            batch_size=evaluation_batch_size,
-            confidence_cutoff=evaluation_confidence_cutoff,
-        )
+        try:
+            evaluation = _evaluate_after_training(
+                config=config,
+                profile=profile,
+                shuffle=shuffle,
+                training_set_index=training_set_index,
+                batch_size=evaluation_batch_size,
+                confidence_cutoff=evaluation_confidence_cutoff,
+            )
+        except Exception as error:
+            # A completed training run is never lost to an evaluation error, so the failure is recorded rather than
+            # raised. DeepLabCut's teardown has already stripped every root log handler, so the traceback is appended
+            # to the training log directly to leave a record that outlives the terminal.
+            evaluation_error = f"{type(error).__name__}: {error}"
+            _append_training_log(
+                training_log=training_log,
+                text=f"Post-training evaluation failed.\n{traceback.format_exc()}",
+            )
 
     precision = str(profile.amp_dtype).removeprefix("torch.") if profile.amp_dtype is not None else "fp32"
     return TrainingSummary(
@@ -294,6 +350,7 @@ def train_model(
         precision=precision,
         epochs=pose_epochs,
         evaluation=evaluation,
+        evaluation_error=evaluation_error,
     )
 
 
@@ -392,12 +449,11 @@ def _evaluate_after_training(
     training_set_index: int,
     batch_size: int,
     confidence_cutoff: float | None,
-) -> EvaluationSummary | None:
-    """Scores the freshly trained snapshot on one device, never failing a completed training run.
+) -> EvaluationSummary:
+    """Scores the freshly trained snapshot on one device.
 
     Evaluation runs in the main process after the training workers have exited, on the first configured GPU (or the
     base non-CUDA device, the CPU or MPS), so it never re-scores redundantly across the DistributedDataParallel ranks.
-    Any failure is logged and swallowed, since a completed training run must not be lost to an evaluation error.
 
     Args:
         config: The path of the DeepLabCut project configuration file.
@@ -408,23 +464,22 @@ def _evaluate_after_training(
         confidence_cutoff: The confidence cutoff for the cutoff-filtered metrics, or None for the default.
 
     Returns:
-        The evaluation summary, or None when evaluation failed.
+        The evaluation summary.
+
+    Raises:
+        Exception: Whatever the underlying evaluation raised, propagated unchanged.
     """
     device = f"cuda:{profile.gpus[0]}" if profile.device == "cuda" else profile.device
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    try:
-        return evaluate_trained_model(
-            config=config,
-            shuffle=shuffle,
-            training_set_index=training_set_index,
-            batch_size=batch_size,
-            confidence_cutoff=confidence_cutoff,
-            device=device,
-        )
-    except Exception:
-        _logger.warning("Post-training evaluation failed and was skipped.", exc_info=True)
-        return None
+    return evaluate_trained_model(
+        config=config,
+        shuffle=shuffle,
+        training_set_index=training_set_index,
+        batch_size=batch_size,
+        confidence_cutoff=confidence_cutoff,
+        device=device,
+    )
 
 
 def _find_free_port() -> int:
@@ -454,22 +509,62 @@ def _route_logging_to_file(model_folder: Path, *, quiet_console: bool) -> None:
             root.removeHandler(handler)
 
 
-def _duplicate_stderr() -> TextIO | None:
-    """Returns a writable stream on a duplicate of the standard error descriptor, or None when it has none.
-
-    The duplicate refers to the same terminal as the original stderr but is a distinct descriptor, so it survives a
-    later ``os.dup2`` redirection of descriptor 2. The progress monitor renders through it to keep the console while
-    the single-process training path routes descriptors 1 and 2 to the training log.
+def _start_progress_monitor() -> tuple[Any, Any, TrainingMonitor]:
+    """Creates the shared progress queue and starts the monitor thread that renders the training progress bar.
 
     Returns:
-        A stream wrapping a duplicate of the stderr descriptor, or None when stderr exposes no descriptor, such as
-        under output capture.
+        A tuple of the manager owning the queue, the queue itself, and the started monitor.
+
+    Raises:
+        TrainingFailedError: When the manager process or the monitor thread cannot be started.
     """
+    manager = None
     try:
-        descriptor = os.dup(sys.stderr.fileno())
-    except (OSError, ValueError):
-        return None
-    return os.fdopen(descriptor, "w")
+        manager = mp.Manager()
+        progress_queue = manager.Queue()
+        monitor = TrainingMonitor(progress_queue=progress_queue)
+        monitor.start()
+    except Exception as error:
+        if manager is not None:
+            with contextlib.suppress(Exception):
+                manager.shutdown()
+        # The manager runs a spawned child that re-imports this package, so its failure is reported here rather than
+        # left to reach the CLI as the bare EOFError that a dead manager raises.
+        message = (
+            f"Unable to start the training progress monitor, so training was not launched. Its manager process "
+            f"failed with {type(error).__name__}: {error}. Re-run without the progress monitor to train anyway."
+        )
+        raise TrainingFailedError(message) from error
+    return manager, progress_queue, monitor
+
+
+def _stop_progress_monitor(monitor: TrainingMonitor | None, manager: Any) -> None:
+    """Tears the progress monitor down without ever masking the failure that reached the enclosing block.
+
+    Args:
+        monitor: The started monitor, or None when progress reporting is disabled.
+        manager: The manager owning the progress queue, or None when progress reporting is disabled.
+    """
+    renderer_running = False
+    if monitor is not None:
+        try:
+            monitor.stop()
+            monitor.join(timeout=3)
+        except Exception as error:
+            warn(f"The training progress monitor did not stop cleanly ({type(error).__name__}: {error}).")
+        renderer_running = monitor.is_alive()
+    # The manager owns the queue the monitor reads, so it is released only once the renderer has actually exited. A
+    # renderer still running past the join keeps it, because leaking it until the process exits costs less than a live
+    # reader reaching a torn-down queue.
+    if manager is not None and not renderer_running:
+        try:
+            manager.shutdown()
+        except Exception as error:
+            warn(f"The training progress monitor's queue manager did not shut down ({type(error).__name__}: {error}).")
+    if renderer_running:
+        # The renderer never drew its closing newline, so anything printed next would otherwise start mid-bar.
+        sys.stderr.write("\n")
+        sys.stderr.flush()
 
 
 @contextlib.contextmanager
@@ -516,17 +611,94 @@ def _redirect_worker_console(log_path: Path, *, active: bool) -> Iterator[None]:
         os.close(log_descriptor)
 
 
-def _report_training_log(training_log: Path) -> None:
-    """Writes a console notice pointing the operator to the training log after a failed run.
+def _is_operator_interrupt(error: BaseException) -> bool:
+    """Determines whether a failed training launch was a deliberate stop rather than a fault.
 
     Args:
-        training_log: The training-log file that captured the worker's diverted stdout and stderr.
+        error: The exception that ended the training launch.
+
+    Returns:
+        True when the run was stopped by the operator or by a termination signal, False otherwise.
     """
-    sys.stderr.write(
-        f"\nTraining did not complete. The worker output (DeepLabCut, Hugging Face, and distributed-backend messages) "
-        f"was captured in the training log at {training_log}. Review it for the underlying cause.\n"
+    if isinstance(error, KeyboardInterrupt):
+        return True
+    return isinstance(error, ProcessExitedException) and is_interrupt_signal(error.signal_name)
+
+
+def _format_training_failure(
+    error: BaseException,
+    *,
+    config: Path,
+    shuffle: int,
+    model_folder: Path,
+    training_log: Path,
+) -> str:
+    """Builds the operator-facing report for a training run that did not complete.
+
+    Args:
+        error: The exception that ended the training launch.
+        config: The path of the DeepLabCut project configuration file training ran for.
+        shuffle: The shuffle index that was being trained.
+        model_folder: The directory holding the shuffle's snapshots and training statistics.
+        training_log: The training-log file that captured the workers' diverted output.
+
+    Returns:
+        The report naming how the run ended, where its artifacts are, and the evidence for the cause.
+    """
+    report = [
+        f"slvt train failed: {_describe_worker_failure(error)}",
+        f"  project:      {config}",
+        f"  shuffle:      {shuffle}",
+        f"  model folder: {model_folder}",
+        f"  training log: {training_log}",
+    ]
+    # A worker that raised carries its own traceback, and the console redirection has already written that same text
+    # into the training log, so quoting the traceback alone keeps the report from printing the cause twice.
+    if isinstance(error, ProcessRaisedException):
+        report.append(error.msg.rstrip("\n"))
+        return "\n".join(report)
+
+    tail = read_file_tail(training_log, lines=_TRAINING_LOG_TAIL_LINES)
+    if not tail:
+        report.append(f"The training log at {training_log} holds no output, so the worker died before it logged any.")
+        return "\n".join(report)
+    report.append(f"--- last {_TRAINING_LOG_TAIL_LINES} lines of {training_log.name} ---")
+    report.append(tail)
+    report.append(f"--- end of {training_log.name} ---")
+    return "\n".join(report)
+
+
+def _describe_worker_failure(error: BaseException) -> str:
+    """Builds the sentences naming how a training worker ended and what the operator should do about it.
+
+    Args:
+        error: The exception that ended the training launch.
+
+    Returns:
+        The reason the run ended, followed by the remediation for the failure classes that have one.
+    """
+    if isinstance(error, ProcessRaisedException):
+        return "the training worker raised an exception, reproduced below."
+    if not isinstance(error, ProcessExitedException):
+        return f"the training launch failed with {type(error).__name__}: {error}."
+    return describe_process_exit(
+        error.exit_code,
+        pid=error.error_pid,
+        role="training worker",
+        memory_remedy=_TRAINING_MEMORY_REMEDY,
     )
-    sys.stderr.flush()
+
+
+def _append_training_log(training_log: Path, text: str) -> None:
+    """Appends a timestamped block to the training log, treating a failed write as non-fatal.
+
+    Args:
+        training_log: The training-log file the block is appended to.
+        text: The block to append.
+    """
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    with contextlib.suppress(OSError), training_log.open("a", encoding="utf-8") as log_file:
+        log_file.write(f"\n[{stamp}] {text}\n")
 
 
 def _plan_training_tasks(loader: DLCLoader) -> tuple[str, ...]:
@@ -637,7 +809,7 @@ def _build_dataloaders(
     worker_count = run_config["train_settings"]["dataloader_workers"]
     pin_memory = run_config["train_settings"]["dataloader_pin_memory"]
 
-    # Retains the worker processes across epochs. Windows and macOS spawn each worker rather than forking it, so a
+    # Retains the worker processes across epochs. The package forces the spawn start method on every platform, so a
     # worker rebuilt every epoch re-imports this package and the DeepLabCut backend it loads, starving the GPU for
     # several seconds per worker per epoch.
     if ddp:
@@ -673,8 +845,8 @@ def _build_dataloaders(
     # resolutions, which default collation cannot stack.
     valid_batch_size = resolve_evaluation_batch_size(loader=loader, requested=batch_size)
     # Validation decodes little, so worker processes add a second pool whose spawn cost is not repaid. Loading it in
-    # the training process keeps that pool off the platforms that spawn rather than fork, where each worker pays a
-    # full interpreter start.
+    # the training process keeps that pool off a run whose every worker pays a full interpreter start, which the
+    # package-wide spawn start method makes true on every platform.
     valid_dataloader = DataLoader(
         dataset=valid_dataset,
         batch_size=valid_batch_size,
@@ -773,6 +945,9 @@ def _run_training_worker(rank: int, launch: _TrainingLaunch) -> None:
         rank: The global rank of this process (0 for the single-process path).
         launch: The bundle of picklable per-run parameters shared by every worker process.
     """
+    # Installs the fault handler before the console is redirected, so a native crash writes its dump into the training
+    # log that the parent quotes back to the operator.
+    enable_native_crash_dumps()
     profile = launch.profile
     progress_queue = launch.progress_queue
     world_size = launch.world_size
@@ -790,11 +965,10 @@ def _run_training_worker(rank: int, launch: _TrainingLaunch) -> None:
         trainset_index=launch.training_set_index,
         modelprefix="",
     )
-    # A spawned DDP worker is its own process, so redirecting its descriptors never touches the monitor in the parent.
-    # The single-process path shares this process with the monitor, so it may only redirect once the monitor holds a
-    # preserved stderr duplicate to render through.
+    # Every worker is a spawned process, so redirecting its descriptors never touches the monitor rendering in the
+    # parent. The redirection is needed only while the monitor owns the terminal.
     quiet_console = progress_queue is not None
-    redirect_console = quiet_console and (ddp or launch.preserve_console)
+    redirect_console = quiet_console
     try:
         with _redirect_worker_console(loader.model_folder / "train.txt", active=redirect_console):
             if ddp:
@@ -844,7 +1018,15 @@ def _run_training_worker(rank: int, launch: _TrainingLaunch) -> None:
                     progress_queue=progress_queue,
                 )
     finally:
+        # Teardown runs while a training failure may already be propagating toward the parent's error queue, so an
+        # error raised here is reported rather than allowed to replace the failure the operator needs to see.
         if rank == 0:
-            destroy_file_logging()
+            try:
+                destroy_file_logging()
+            except Exception as error:
+                warn(f"The training log handlers did not detach cleanly ({type(error).__name__}: {error}).")
         if ddp and dist.is_initialized():
-            dist.destroy_process_group()
+            try:
+                dist.destroy_process_group()
+            except Exception as error:
+                warn(f"The distributed process group did not tear down cleanly ({type(error).__name__}: {error}).")

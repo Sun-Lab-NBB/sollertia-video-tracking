@@ -4,11 +4,14 @@ from pathlib import Path
 
 import click
 
+from ..hardware import warn
 from ..training import (
     Toggle,
     AmpMode,
     DeviceType,
     MultiGpuStrategy,
+    TrainingFailedError,
+    TrainingInterruptedError,
     train_model,
     detect_fixed_input_size,
     resolve_optimization_profile,
@@ -29,6 +32,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 @click.option(
     "-s",
     "--shuffle",
+    type=click.IntRange(min=1),
     default=1,
     show_default=True,
     help="The index of the shuffle to train. A shuffle pairs a train/test split with a model architecture, both fixed "
@@ -37,15 +41,16 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 @click.option(
     "-e",
     "--epochs",
-    type=int,
+    type=click.IntRange(min=0),
     default=None,
     help="The maximum number of passes over the training set for the pose model. Higher values train longer, but may "
-    "be necessary to achieve model convergence on complex datasets. Omit to use the model's default value.",
+    "be necessary to achieve model convergence on complex datasets. Set to 0 to skip pose training and fit only a "
+    "top-down shuffle's detector. Omit to use the model's default value.",
 )
 @click.option(
     "-b",
     "--batch-size",
-    type=int,
+    type=click.IntRange(min=1),
     default=None,
     help="The number of frames the pose model processes per optimization step. Larger batches use more GPU memory and "
     "can speed up training. Omit to use the model's default value.",
@@ -53,7 +58,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 @click.option(
     "-se",
     "--save-epochs",
-    type=int,
+    type=click.IntRange(min=1),
     default=None,
     help="The number of epochs between saved pose-model snapshots. Smaller values checkpoint more often at the cost of "
     "disk space. Omit to use the model's default value.",
@@ -61,7 +66,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 @click.option(
     "-di",
     "--display-iterations",
-    type=int,
+    type=click.IntRange(min=1),
     default=None,
     help="The number of training iterations between loss readouts within each epoch. Omit to use the model's default "
     "value.",
@@ -69,7 +74,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 @click.option(
     "-ms",
     "--maximum-snapshots",
-    type=int,
+    type=click.IntRange(min=1),
     default=None,
     help="The maximum number of recent snapshots to retain per model. Older snapshots beyond this count are deleted. "
     "Omit to use the model's default value.",
@@ -92,7 +97,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 @click.option(
     "-dbs",
     "--detector-batch-size",
-    type=int,
+    type=click.IntRange(min=1),
     default=None,
     help="The number of frames the object detector processes per step, for top-down models. Omit to use the model's "
     "default value.",
@@ -100,7 +105,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 @click.option(
     "-de",
     "--detector-epochs",
-    type=int,
+    type=click.IntRange(min=0),
     default=None,
     help="The maximum number of training passes for the object detector, for top-down models. Set to 0 to skip "
     "detector training and fit only the pose model.",
@@ -108,7 +113,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 @click.option(
     "-dse",
     "--detector-save-epochs",
-    type=int,
+    type=click.IntRange(min=1),
     default=None,
     help="The number of epochs between saved detector snapshots, for top-down models. Omit to use the model's default "
     "value.",
@@ -191,7 +196,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 @click.option(
     "-dw",
     "--dataloader-workers",
-    type=int,
+    type=click.IntRange(min=-1),
     default=-1,
     show_default=True,
     help="The number of worker processes each training process uses to load and augment data. More workers feed the "
@@ -218,7 +223,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 @click.option(
     "-ebs",
     "--evaluation-batch-size",
-    type=int,
+    type=click.IntRange(min=1),
     default=1,
     show_default=True,
     help="The number of frames scored per forward pass during the post-training evaluation, which runs in float32 on "
@@ -227,7 +232,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 @click.option(
     "-ecc",
     "--evaluation-confidence-cutoff",
-    type=float,
+    type=click.FloatRange(min=0.0, max=1.0),
     default=None,
     help="The confidence cutoff for the evaluation's cutoff-filtered metrics. Predictions the model makes below this "
     "confidence are excluded from the cutoff-filtered error, so it reflects accuracy on only the keypoints the model "
@@ -278,6 +283,11 @@ def train_command(
     default, since multi-GPU training is often slower for DeepLabCut workloads. Select two or more GPUs with ``--gpus``
     to train across them, as a DistributedDataParallel process group (``--multi-gpu ddp``, the default for multiple
     GPUs) or the slower DataParallel (``--multi-gpu dp``). Single-process training also covers the CPU and Apple MPS.
+
+    Training always runs in worker processes. A worker that fails, crashes, or is killed by the out-of-memory killer
+    ends the command with an error naming the cause, the model folder, and the training log. A worker that raised
+    quotes its traceback, and one that died without unwinding quotes the log's tail. An interrupted run exits with
+    status 130 and leaves its snapshots intact.
     """
     try:
         gpu_indices = tuple(int(part) for part in gpus.split(",")) if gpus else None
@@ -324,7 +334,20 @@ def train_command(
             evaluation_confidence_cutoff=evaluation_confidence_cutoff,
             display_progress=progress,
         )
-    except (ValueError, FileNotFoundError) as error:
+    except TrainingInterruptedError as error:
+        warn(str(error))
+        click.get_current_context().exit(130)
+    # EOFError is funneled here because Click reduces it to a bare 'Aborted!' that reads exactly like an operator
+    # interrupt, which hides a manager process that failed to start.
+    except (TrainingFailedError, ValueError, FileNotFoundError, EOFError) as error:
         raise click.ClickException(message=str(error)) from error
 
     click.echo(message=summary.describe())
+    if summary.evaluation_error is not None:
+        message = (
+            f"Training completed and its snapshots are intact, but the post-training evaluation failed, so the "
+            f"evaluation feather and its provenance sidecar were not written. The full traceback was appended to "
+            f"{summary.model_folder / 'train.txt'}. Lower --evaluation-batch-size and re-run, or pass --no-evaluate "
+            f"to accept the run without an evaluation."
+        )
+        raise click.ClickException(message=message)

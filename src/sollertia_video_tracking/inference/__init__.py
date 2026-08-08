@@ -2,6 +2,7 @@
 
 from .pipeline import InferenceSummary, run_inference, resolve_project_videos, detect_fixed_input_size
 from ..hardware import Toggle, AmpMode, DeviceType
+from ..reporting import PipelineFailedError, PipelineInterruptedError
 from .optimization import InferenceProfile, resolve_inference_profile
 
 __all__ = [
@@ -9,6 +10,8 @@ __all__ = [
     "DeviceType",
     "InferenceProfile",
     "InferenceSummary",
+    "PipelineFailedError",
+    "PipelineInterruptedError",
     "Toggle",
     "detect_fixed_input_size",
     "resolve_inference_profile",

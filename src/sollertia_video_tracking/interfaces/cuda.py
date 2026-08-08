@@ -20,15 +20,16 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "-tv",
     "--torch-version",
     default=None,
-    help="The exact torch version to install, for example '2.9.1'. Omit to install the newest version the wheel index "
-    "carries within the 'torch>=2,<3' range this library supports.",
+    help="The exact torch version to install, for example '2.9.1'. It must be in the 'torch>=2,<3' range this library "
+    "supports, since the pinned DeepLabCut release is built against it. Omit to install the newest version the wheel "
+    "index carries within that range.",
 )
 @click.option(
     "-iu",
     "--index-url",
     default=None,
-    help="The wheel index to install from, which bypasses both the driver query and the CUDA version resolution. Omit "
-    "to derive the index from the resolved CUDA version.",
+    help="The wheel index to install from, which bypasses the CUDA version resolution. The local driver is still "
+    "queried, and its GPUs are still reported. Omit to derive the index from the resolved CUDA version.",
 )
 @click.option(
     "-i",
