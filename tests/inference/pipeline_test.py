@@ -3,13 +3,14 @@
 These tests drive the whole pipeline module without a GPU, network, or real DeepLabCut runtime. Heavy handoffs
 (``analyze_videos``, the multiprocessing manager/context, the aggregate progress bar, OpenCV decode) are replaced with
 lightweight in-process fakes, and the worker/collector helpers are exercised directly so every branch runs on a
-headless CPU box. The two bounded-iterator seek-accuracy tests are the exception: they write and read a short Motion
-JPEG clip through real OpenCV, and skip when the environment ships no encoder for it.
+headless CPU box. The three bounded-iterator tests are the exception: they write and read a short Motion JPEG clip
+through real OpenCV, and skip when the environment ships no encoder for it.
 """
 
 import sys
 import queue
 from types import SimpleNamespace
+import pickle
 import signal
 from pathlib import Path
 import contextlib
@@ -828,27 +829,7 @@ def test_run_inference_full_success_with_overrides(monkeypatch, tmp_path):
         lambda **_kwargs: [pipeline._Slot(device="cuda:0", cores=None), pipeline._Slot(device="cuda:1", cores=None)],
     )
 
-    bars = []
-
-    class _FakeBar:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-            self.started = self.stopped = self.joined = False
-            bars.append(self)
-
-        def start(self):
-            self.started = True
-
-        def stop(self):
-            self.stopped = True
-
-        def join(self, **_kwargs):
-            self.joined = True
-
-        def seconds_since_progress(self):
-            return 0.0
-
-    monkeypatch.setattr(pipeline, "AggregateBar", _FakeBar)
+    bars = _install_fake_bar(monkeypatch)
 
     def worker(_slot, launch):
         while True:
@@ -987,6 +968,160 @@ def test_run_inference_emits_the_optimization_report(monkeypatch, tmp_path, caps
     assert "workers" in report
 
 
+# _run_inference_chunked
+def test_run_inference_chunked_stitches_each_video_from_its_own_chunks(monkeypatch, tmp_path):
+    """Verifies that a chunked run splits every video, forwards the overrides, and writes one file per video."""
+    videos = [tmp_path / "a.mp4", tmp_path / "b.mp4"]
+    destination = tmp_path / "out"
+    monkeypatch.setattr(pipeline, "_build_analysis_plan", lambda **_kwargs: _make_plan())
+    monkeypatch.setattr(pipeline, "read_config", lambda _c: {"cropping": False})
+    monkeypatch.setattr(pipeline, "_probe_frame_count", lambda _video: 4)
+    monkeypatch.setattr(pipeline, "_build_slots", lambda **_kwargs: [pipeline._Slot(device="cuda:0", cores=None)])
+    bars = _install_fake_bar(monkeypatch)
+
+    dispatched = []
+
+    def worker(_slot, launch):
+        while True:
+            item = launch.video_queue.get()
+            if item is None:
+                break
+            dispatched.append(item)
+            frames = [f"{Path(item.video).stem}{index}" for index in range(item.frame_start, item.frame_end)]
+            launch.results_queue.put((item.task_id, item.video_index, item.chunk_index, frames, None))
+
+    manager = _install_fake_mp(monkeypatch, worker)
+
+    stitched = {}
+
+    def fake_stitch(*, video, predictions, destination, **_kwargs):
+        stitched[Path(video).name] = list(predictions)
+        return Path(destination) / f"{Path(video).stem}.h5"
+
+    monkeypatch.setattr(pipeline, "_stitch_and_write", fake_stitch)
+
+    summary = pipeline.run_inference(
+        config=tmp_path / "cfg.yaml",
+        videos=list(videos),
+        profile=_make_profile(device="cuda", gpus=(0,), gpu_processes=1, chunks=2, amp_dtype=torch.bfloat16),
+        destination_override=[destination, destination],
+        crop_override=[(0, 10, 0, 20), (0, 10, 0, 20)],
+        display_progress=True,
+    )
+
+    # Each video is split into its own contiguous ranges, and every chunk carries the supplied crop and destination.
+    assert [(item.video_index, item.chunk_index, item.frame_start, item.frame_end) for item in dispatched] == [
+        (0, 0, 0, 2),
+        (0, 1, 2, 4),
+        (1, 0, 0, 2),
+        (1, 1, 2, 4),
+    ]
+    assert all(item.crop == [0, 10, 0, 20] for item in dispatched)
+    assert all(item.destination == str(destination) for item in dispatched)
+    assert stitched == {"a.mp4": ["a0", "a1", "a2", "a3"], "b.mp4": ["b0", "b1", "b2", "b3"]}
+    assert summary.outputs == (destination / "a.h5", destination / "b.h5")
+    assert summary.failures == ()
+    assert summary.destinations == (destination,)
+    assert summary.precision == "bfloat16"
+    assert summary.workers == 1
+    # The bar tracks one key per chunk and rolls each key up to the video it belongs to.
+    assert bars[0].kwargs["frame_totals"] == {0: 2, 1: 2, 2: 2, 3: 2}
+    assert bars[0].kwargs["key_video"] == {0: 0, 1: 0, 2: 1, 3: 1}
+    assert bars[0].kwargs["total_video_count"] == 2
+    assert bars[0].started
+    assert bars[0].stopped
+    assert bars[0].joined
+    assert manager.shutdown_called is True
+
+
+def test_run_inference_chunked_rejects_a_multi_animal_project(monkeypatch, tmp_path):
+    """Verifies that a chunked run refuses a multi-animal project, whose output the stitch path cannot assemble."""
+    monkeypatch.setattr(pipeline, "_build_analysis_plan", lambda **_kwargs: _make_plan(multi_animal=True))
+
+    with pytest.raises(ValueError, match="--chunks 1"):
+        pipeline.run_inference(
+            config=tmp_path / "cfg.yaml",
+            videos=[tmp_path / "a.mp4"],
+            profile=_make_profile(chunks=2),
+            display_progress=False,
+        )
+
+
+def test_run_inference_chunked_rejects_a_model_that_is_not_bottom_up(monkeypatch, tmp_path):
+    """Verifies that a chunked run refuses a top-down model, whose per-frame predictions do not stitch by frame."""
+    monkeypatch.setattr(
+        pipeline, "_build_analysis_plan", lambda **_kwargs: _make_plan(pose_task=pipeline.Task.TOP_DOWN)
+    )
+
+    with pytest.raises(ValueError, match="--chunks 1"):
+        pipeline.run_inference(
+            config=tmp_path / "cfg.yaml",
+            videos=[tmp_path / "a.mp4"],
+            profile=_make_profile(chunks=2),
+            display_progress=False,
+        )
+
+
+def test_run_inference_chunked_fails_a_video_with_an_unreadable_frame_count(monkeypatch, tmp_path):
+    """Verifies that a video whose header yields no frame count is failed rather than split into one short range."""
+    videos = [tmp_path / "a.mp4", tmp_path / "bad.mp4"]
+    counts = {str(videos[0]): 3, str(videos[1]): None}
+    project_config = {"cropping": True, "video_sets": {}, "x1": 0, "x2": 100, "y1": 0, "y2": 80}
+    monkeypatch.setattr(pipeline, "_build_analysis_plan", lambda **_kwargs: _make_plan())
+    monkeypatch.setattr(pipeline, "read_config", lambda _c: project_config)
+    monkeypatch.setattr(pipeline, "_probe_frame_count", lambda video: counts[str(video)])
+    monkeypatch.setattr(pipeline, "_build_slots", lambda **_kwargs: [pipeline._Slot(device="cpu", cores=(0,))])
+
+    def worker(_slot, launch):
+        while True:
+            item = launch.video_queue.get()
+            if item is None:
+                break
+            assert item.crop == [0, 100, 0, 80]  # resolved from the project's project-wide crop rectangle
+            assert item.destination is None  # no destination override means write beside the video
+            frames = ["p"] * (item.frame_end - item.frame_start)
+            launch.results_queue.put((item.task_id, item.video_index, item.chunk_index, frames, None))
+
+    _install_fake_mp(monkeypatch, worker)
+    monkeypatch.setattr(pipeline, "_stitch_and_write", lambda **kwargs: Path(kwargs["video"]).with_suffix(".h5"))
+
+    summary = pipeline.run_inference(
+        config=tmp_path / "cfg.yaml",
+        videos=list(videos),
+        profile=_make_profile(chunks=2),
+        display_progress=False,
+    )
+
+    # The readable video is still analyzed, and the unreadable one is reported once rather than split.
+    assert summary.outputs == (tmp_path / "a.h5",)
+    assert summary.failures == (("bad.mp4", "the frame count could not be read from the container header"),)
+
+
+def test_run_inference_chunked_interrupt_states_that_nothing_was_written(monkeypatch, tmp_path):
+    """Verifies that an interrupted chunked run reports that no partially analyzed video reached the disk."""
+    monkeypatch.setattr(pipeline, "_build_analysis_plan", lambda **_kwargs: _make_plan())
+    monkeypatch.setattr(pipeline, "read_config", lambda _c: {"cropping": False})
+    monkeypatch.setattr(pipeline, "_probe_frame_count", lambda _video: 8)
+    monkeypatch.setattr(pipeline, "_build_slots", lambda **_kwargs: [pipeline._Slot(device="cpu", cores=(0,))])
+
+    def worker(_slot, _launch):
+        raise KeyboardInterrupt
+
+    _install_fake_mp(monkeypatch, worker)
+
+    with pytest.raises(pipeline.PipelineInterruptedError) as interruption:
+        pipeline.run_inference(
+            config=tmp_path / "cfg.yaml",
+            videos=[tmp_path / "a.mp4"],
+            profile=_make_profile(chunks=2),
+            display_progress=False,
+        )
+
+    report = str(interruption.value)
+    assert "1 submitted, 0 complete" in report
+    assert "no partially analyzed video was written" in report
+
+
 # _partition_frame_ranges
 def test_partition_single_chunk_covers_whole_video():
     """Verifies that a single chunk yields one range spanning the whole video."""
@@ -1032,6 +1167,114 @@ def test_partition_single_frame_video():
     assert pipeline._partition_frame_ranges(total_frames=1, chunks=4) == [(0, 1)]
 
 
+# _build_analysis_plan
+def test_build_analysis_plan_resolves_the_scorer_and_the_project_batch_size(monkeypatch, tmp_path):
+    """Verifies that the plan names its output files from the resolved snapshot and takes the project's batch size."""
+    _install_fake_dlc_loader(monkeypatch)
+    monkeypatch.setattr(pipeline, "read_plainconfig", lambda path: {"read_from": str(path)})
+
+    plan = pipeline._build_analysis_plan(
+        config=tmp_path / "cfg.yaml", shuffle=2, snapshot_index=None, detector_snapshot_index=None, batch_size=None
+    )
+
+    assert plan.scorer == "DLC_snapshot-050"
+    assert plan.train_fraction == 0.95
+    assert plan.batch_size == 8  # resolved from the project configuration, which no explicit batch size overrode
+    assert plan.multi_animal is False
+    assert plan.pose_task is pipeline.Task.BOTTOM_UP
+    # The pose configuration is read from the shuffle's test directory, beside the model folder.
+    assert plan.pose_config == {"read_from": str(_FAKE_MODEL_FOLDER.parent / "test" / "pose_cfg.yaml")}
+
+
+def test_build_analysis_plan_prefers_an_explicit_batch_size(monkeypatch, tmp_path):
+    """Verifies that an explicitly requested batch size is recorded in the metadata instead of the project's own."""
+    _install_fake_dlc_loader(monkeypatch)
+    monkeypatch.setattr(pipeline, "read_plainconfig", lambda _path: {})
+
+    plan = pipeline._build_analysis_plan(
+        config=tmp_path / "cfg.yaml", shuffle=1, snapshot_index=-1, detector_snapshot_index=None, batch_size=16
+    )
+
+    assert plan.batch_size == 16
+
+
+# _run_chunk_worker
+def test_run_chunk_worker_builds_one_runner_and_drains_every_chunk(monkeypatch):
+    """Verifies that a chunk worker pins its cores, builds its runner once, and analyzes every chunk it pulls.
+
+    macOS exposes no CPU-affinity API, so its workers drain the queue but run unpinned.
+    """
+    affinity_calls = []
+
+    class _FakePsutilProcess:
+        def cpu_affinity(self, cores):
+            affinity_calls.append(cores)
+
+    monkeypatch.setattr(pipeline.psutil, "Process", _FakePsutilProcess)
+    applied = []
+    monkeypatch.setattr(pipeline, "apply_runtime_optimizations", applied.append)
+    monkeypatch.setattr(pipeline, "patch_dlc_runner_builders", lambda _profile: contextlib.nullcontext())
+    built = []
+
+    def fake_build_runner(**_kwargs):
+        built.append("runner")
+        return f"runner {len(built)}"
+
+    monkeypatch.setattr(pipeline, "_build_pose_runner", fake_build_runner)
+    analyzed = []
+    monkeypatch.setattr(
+        pipeline, "_analyze_one_chunk", lambda runner, item, **_kwargs: analyzed.append((runner, item.task_id))
+    )
+
+    video_queue = _FakeQueue()
+    video_queue.put(_chunk_item(task_id=0, video_index=0, chunk_index=0, video="v.mp4", frame_start=0, frame_end=5))
+    video_queue.put(_chunk_item(task_id=1, video_index=0, chunk_index=1, video="v.mp4", frame_start=5, frame_end=10))
+    video_queue.put(None)
+    launch = _make_launch(video_queue=video_queue)
+
+    pipeline._run_chunk_worker(slot=pipeline._Slot(device="cpu", cores=(2, 3)), launch=launch)
+
+    assert affinity_calls == ([] if sys.platform == "darwin" else [[2, 3]])
+    assert len(applied) == 1
+    # The runner is built once and reused, since rebuilding it per chunk would pay the model load on every range.
+    assert analyzed == [("runner 1", 0), ("runner 1", 1)]
+
+
+# _build_pose_runner
+def test_build_pose_runner_builds_on_its_own_slot_device(monkeypatch):
+    """Verifies that the runner is built on the worker's device through the patched apis-utils builder."""
+    _install_fake_dlc_loader(monkeypatch)
+    captured = {}
+
+    def fake_builder(**kwargs):
+        captured.update(kwargs)
+        return "the runner"
+
+    monkeypatch.setattr(pipeline.dlc_apis_utils, "get_pose_inference_runner", fake_builder)
+
+    runner = pipeline._build_pose_runner(
+        slot=pipeline._Slot(device="cuda:1", cores=None), launch=_make_launch(shuffle=2, batch_size=16)
+    )
+
+    assert runner == "the runner"
+    assert captured["device"] == "cuda:1"
+    assert captured["batch_size"] == 16
+    assert captured["max_individuals"] == 1
+    assert captured["snapshot_path"] == _FAKE_SNAPSHOT_PATH
+    assert captured["inference_cfg"] == pipeline._STOCK_ACCELERATION_DISABLED
+
+
+def test_build_pose_runner_falls_back_to_the_project_batch_size(monkeypatch):
+    """Verifies that a worker given no explicit batch size builds its runner with the project's configured one."""
+    _install_fake_dlc_loader(monkeypatch)
+    captured = {}
+    monkeypatch.setattr(pipeline.dlc_apis_utils, "get_pose_inference_runner", lambda **kwargs: captured.update(kwargs))
+
+    pipeline._build_pose_runner(slot=pipeline._Slot(device="cpu", cores=None), launch=_make_launch(batch_size=None))
+
+    assert captured["batch_size"] == 8
+
+
 # _BoundedVideoIterator
 def test_bounded_iterator_reads_only_its_range(tmp_path):
     """Verifies that a bounded iterator seeks to its start and emits exactly the frames a sequential read gives."""
@@ -1059,7 +1302,79 @@ def test_bounded_iterator_partition_reassembles_whole_video(tmp_path):
     assert stitched == reference[:total]
 
 
+def test_bounded_iterator_stops_when_the_video_ends_before_its_range(tmp_path):
+    """Verifies that a range reaching past the end of the video stops at the last frame the decoder returns."""
+    clip = tmp_path / "clip.avi"
+    _write_identifiable_clip(clip, frames=10)
+    reference = _sequential_frame_levels(clip)
+    iterator = pipeline._BoundedVideoIterator(str(clip), frame_start=5, frame_end=30)
+
+    levels = [int(frame[0, 0, 0]) for frame in iterator]
+
+    assert levels == reference[5:]
+    # The declared count stays the range length, so the shortfall surfaces as the frame-count mismatch a chunk reports.
+    assert iterator.get_n_frames() == 25
+
+
 # _analyze_one_chunk
+def test_analyze_one_chunk_reports_its_predictions_and_marks_the_chunk_done(monkeypatch):
+    """Verifies that a completed chunk reports its predictions under its own task id and publishes a done marker."""
+    built = {}
+
+    def fake_iterator(video, *, frame_start, frame_end, cropping):
+        built.update(video=video, frame_start=frame_start, frame_end=frame_end, cropping=cropping)
+        return "iterator"
+
+    def fake_inference(*, video, pose_runner):
+        built.update(analyzed=video, runner=pose_runner)
+        return ["p0", "p1", "p2"]
+
+    monkeypatch.setattr(pipeline, "_BoundedVideoIterator", fake_iterator)
+    monkeypatch.setattr(pipeline, "video_inference", fake_inference)
+    monkeypatch.setattr(pipeline.dlc_videos, "tqdm", object(), raising=False)
+
+    launch = _make_launch(display_progress=True)
+    item = pipeline._ChunkItem(
+        task_id=7,
+        video_index=1,
+        chunk_index=2,
+        video="v.mp4",
+        frame_start=4,
+        frame_end=7,
+        crop=[0, 10, 0, 20],
+        destination=None,
+    )
+
+    pipeline._analyze_one_chunk(runner="runner", launch=launch, item=item)
+
+    # The bounded iterator receives the chunk's own range and crop, and the worker's runner analyzes it.
+    assert built == {
+        "video": "v.mp4",
+        "frame_start": 4,
+        "frame_end": 7,
+        "cropping": [0, 10, 0, 20],
+        "analyzed": "iterator",
+        "runner": "runner",
+    }
+    assert launch.results_queue.get() == (7, 1, 2, ["p0", "p1", "p2"], None)
+    assert launch.progress_queue._items[-1] == ("done", 7)
+
+
+def test_analyze_one_chunk_fails_a_short_read_rather_than_misaligning_the_stitch(monkeypatch):
+    """Verifies that a chunk decoding fewer frames than its range is failed instead of shifting every later frame."""
+    monkeypatch.setattr(pipeline, "_BoundedVideoIterator", lambda *_args, **_kwargs: "iterator")
+    monkeypatch.setattr(pipeline, "video_inference", lambda **_kwargs: ["p0", "p1"])
+
+    launch = _make_launch()
+    item = _chunk_item(task_id=4, video_index=0, chunk_index=1, video="v.mp4", frame_start=0, frame_end=5)
+
+    pipeline._analyze_one_chunk(runner="runner", launch=launch, item=item)
+
+    task_id, video_index, chunk_index, predictions, error = launch.results_queue.get()
+    assert (task_id, video_index, chunk_index, predictions) == (4, 0, 1, None)
+    assert "covers 5 frames but decoded 2" in error
+
+
 def test_analyze_one_chunk_resets_runner_queue_on_failure(monkeypatch):
     """Verifies that a chunk failing inside inference discards the runner's already-preprocessed batches.
 
@@ -1157,6 +1472,102 @@ def test_collect_chunk_results_reports_failed_chunk(monkeypatch):
     assert failures == [("a.mp4", "RuntimeError: boom")]
 
 
+def test_collect_chunk_results_fails_a_video_whose_chunk_never_reported(monkeypatch):
+    """Verifies that a video is failed, and never stitched, when a worker died before reporting one of its chunks."""
+    work_items = [
+        _chunk_item(task_id=0, video_index=0, chunk_index=0, video="a.mp4", frame_start=0, frame_end=2),
+        _chunk_item(task_id=1, video_index=0, chunk_index=1, video="a.mp4", frame_start=2, frame_end=4),
+    ]
+    results_queue = _FakeQueue()
+    results_queue.put((0, 0, 0, ["a0", "a1"], None))
+
+    def fail_if_called(**_kwargs):
+        message = "a video missing a chunk must never be stitched"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(pipeline, "_stitch_and_write", fail_if_called)
+    outputs, failures = pipeline._collect_chunk_results(
+        results_queue=results_queue, video_paths=[Path("a.mp4")], work_items=work_items, plan=None
+    )
+
+    # Draining stops once the queue runs dry, so the second chunk is missing rather than reported with an error.
+    assert outputs == {}
+    assert failures == [("a.mp4", "a chunk worker exited before reporting a result")]
+
+
+def test_collect_chunk_results_reports_a_failed_stitch(monkeypatch):
+    """Verifies that a video whose stitched write raises is reported as failed rather than ending the collection."""
+    work_items = [
+        _chunk_item(task_id=0, video_index=0, chunk_index=0, video="a.mp4", frame_start=0, frame_end=2),
+        _chunk_item(task_id=1, video_index=1, chunk_index=0, video="b.mp4", frame_start=0, frame_end=2),
+    ]
+    results_queue = _FakeQueue()
+    results_queue.put((0, 0, 0, ["a0", "a1"], None))
+    results_queue.put((1, 1, 0, ["b0", "b1"], None))
+
+    def stitch(*, video, **_kwargs):
+        if Path(video).name == "a.mp4":
+            message = "no space left on device"
+            raise OSError(message)
+        return Path(video).with_suffix(".h5")
+
+    monkeypatch.setattr(pipeline, "_stitch_and_write", stitch)
+    outputs, failures = pipeline._collect_chunk_results(
+        results_queue=results_queue, video_paths=[Path("a.mp4"), Path("b.mp4")], work_items=work_items, plan=None
+    )
+
+    # The failed write is attributed to its own video, and the remaining video is still written.
+    assert outputs == {1: Path("b.h5")}
+    assert failures == [("a.mp4", "OSError: no space left on device")]
+
+
+# _stitch_and_write
+def test_stitch_and_write_writes_the_prediction_files_beside_the_video(monkeypatch, tmp_path):
+    """Verifies that a stitched video writes its metadata, full pickle, and prediction table beside the video."""
+    _install_fake_output_writers(monkeypatch)
+    written = {}
+    monkeypatch.setattr(pipeline, "create_df_from_prediction", lambda **kwargs: written.update(kwargs))
+
+    output = pipeline._stitch_and_write(
+        plan=_make_plan(),
+        video=str(tmp_path / "clip.mp4"),
+        destination=None,
+        crop=[0, 10, 0, 20],
+        predictions=["p0", "p1"],
+    )
+
+    assert output == tmp_path / "clipDLCscorer.h5"
+    with (tmp_path / "clipDLCscorer_meta.pickle").open("rb") as handle:
+        # The metadata records the crop the video was analyzed at, which the whole-video path also stores.
+        assert pickle.load(handle) == {"cropping": [0, 10, 0, 20]}  # noqa: S301 - reads back the file just written.
+    with (tmp_path / "clipDLCscorer_full.pickle").open("rb") as handle:
+        assert pickle.load(handle) == {"frames": 2}  # noqa: S301 - reads back the file just written.
+    assert written["dlc_scorer"] == "DLCscorer"
+    assert written["output_path"] == tmp_path
+    assert written["output_prefix"] == "clipDLCscorer"
+    assert written["multi_animal"] is False
+    assert written["save_as_csv"] is False
+
+
+def test_stitch_and_write_creates_the_requested_output_directory(monkeypatch, tmp_path):
+    """Verifies that a stitched video writes into the requested output directory, creating it when it does not exist."""
+    _install_fake_output_writers(monkeypatch)
+    monkeypatch.setattr(pipeline, "create_df_from_prediction", lambda **_kwargs: None)
+    destination = tmp_path / "predictions"
+
+    output = pipeline._stitch_and_write(
+        plan=_make_plan(),
+        video=str(tmp_path / "clip.mp4"),
+        destination=str(destination),
+        crop=None,
+        predictions=["p0"],
+    )
+
+    assert output == destination / "clipDLCscorer.h5"
+    assert (destination / "clipDLCscorer_meta.pickle").is_file()
+    assert (destination / "clipDLCscorer_full.pickle").is_file()
+
+
 # _report_inference_optimizations
 def test_optimization_report_states_the_spawned_worker_count_and_the_ceiling_it_missed(capsys):
     """Verifies that a run with less work than its worker ceiling reports the spawned count and the configured one."""
@@ -1184,6 +1595,13 @@ def test_optimization_report_appends_the_worker_row_after_the_resolved_state(cap
 
 
 # Shared fakes and helpers
+_FAKE_MODEL_FOLDER = Path("/proj/dlc-models-pytorch/iteration-0/task/train")
+"""The model folder the fake DeepLabCut loader reports, whose sibling test directory holds the pose configuration."""
+
+_FAKE_SNAPSHOT_PATH = Path("/proj/dlc-models-pytorch/iteration-0/task/train/snapshot-050.pt")
+"""The snapshot path the fake snapshot resolution returns, which names the scorer and loads the model weights."""
+
+
 class _FakeCapture:
     """Stands in for cv2.VideoCapture, reporting fixed header values without opening a file."""
 
@@ -1303,6 +1721,88 @@ def _install_fake_mp(monkeypatch, worker_fn):
     manager = _FakeManager()
     monkeypatch.setattr(pipeline, "mp", _FakeMp(manager, worker_fn))
     return manager
+
+
+class _FakeBar:
+    """Stands in for the aggregate progress bar, recording its construction arguments and its lifecycle calls."""
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.started = self.stopped = self.joined = False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+    def join(self, **_kwargs):
+        self.joined = True
+
+    def seconds_since_progress(self):
+        return 0.0
+
+
+def _install_fake_bar(monkeypatch):
+    """Replaces the aggregate progress bar with an in-process fake and returns the list every built bar lands in."""
+    bars = []
+
+    def build(**kwargs):
+        bar = _FakeBar(**kwargs)
+        bars.append(bar)
+        return bar
+
+    monkeypatch.setattr(pipeline, "AggregateBar", build)
+    return bars
+
+
+class _FakeLoader:
+    """Stands in for the DeepLabCut project loader, exposing the configuration the chunked path reads from it."""
+
+    def __init__(self, config, shuffle):
+        self.config = config
+        self.shuffle = shuffle
+        self.project_cfg = {"TrainingFraction": [0.95], "batch_size": 8, "multianimalproject": False}
+        self.model_cfg = {"metadata": {"individuals": ["single"]}}
+        self.model_folder = _FAKE_MODEL_FOLDER
+        self.pose_task = pipeline.Task.BOTTOM_UP
+
+    def scorer(self, snapshot, **_kwargs):
+        return f"DLC_{Path(snapshot.path).stem}"
+
+
+def _install_fake_dlc_loader(monkeypatch):
+    """Replaces the DeepLabCut loader and the snapshot resolution the chunked path drives with in-process fakes."""
+    monkeypatch.setattr(pipeline, "DLCLoader", _FakeLoader)
+    monkeypatch.setattr(pipeline.dlc_apis_utils, "parse_snapshot_index_for_analysis", lambda **_kwargs: (-1, None))
+    monkeypatch.setattr(
+        pipeline.dlc_apis_utils,
+        "get_model_snapshots",
+        lambda **_kwargs: [SimpleNamespace(path=_FAKE_SNAPSHOT_PATH)],
+    )
+
+
+def _install_fake_output_writers(monkeypatch):
+    """Replaces the DeepLabCut metadata and full-pickle builders with fakes that record what the stitch passed them."""
+    monkeypatch.setattr(pipeline, "VideoIterator", lambda path, cropping: SimpleNamespace(path=path, crop=cropping))
+    monkeypatch.setattr(pipeline, "_generate_metadata", lambda **kwargs: {"cropping": kwargs["cropping"]})
+    monkeypatch.setattr(pipeline, "_generate_output_data", lambda **kwargs: {"frames": len(kwargs["predictions"])})
+
+
+def _make_plan(**overrides):
+    """Builds an _AnalysisPlan for the chunked-path tests, overriding only the fields a test cares about."""
+    defaults = {
+        "scorer": "DLCscorer",
+        "project_config": {"multianimalproject": False},
+        "model_config": {"metadata": {"individuals": ["single"]}},
+        "pose_config": {"all_joints_names": ["snout"]},
+        "train_fraction": 0.95,
+        "batch_size": 1,
+        "multi_animal": False,
+        "pose_task": pipeline.Task.BOTTOM_UP,
+    }
+    defaults.update(overrides)
+    return pipeline._AnalysisPlan(**defaults)
 
 
 def _make_launch(**overrides):
