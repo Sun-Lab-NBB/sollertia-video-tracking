@@ -28,6 +28,16 @@ from deeplabcut.pose_estimation_pytorch.apis.videos import (
 )
 
 from .runners import patch_dlc_runner_builders, reset_inference_runner_queue
+from ..hardware import warn
+from ..reporting import (
+    WorkerExit,
+    ProcessSupervisor,
+    PipelineFailedError,
+    PipelineInterruptedError,
+    format_duration,
+    describe_process_exit,
+    enable_native_crash_dumps,
+)
 from .optimization import InferenceProfile, apply_runtime_optimizations
 from ..frame_extraction import AggregateBar, plan_core_allocation, make_progress_reporter
 
@@ -48,7 +58,19 @@ _CROP_FIELD_COUNT: int = 4
 """The number of comma-separated integers, ``x1,x2,y1,y2``, in a video's config.yaml crop specification."""
 
 _RESULT_POLL_TIMEOUT_SECONDS: float = 5.0
-"""The per-result wait when draining the worker results queue. A worker that misses this window is treated as dead."""
+"""The per-result wait when draining the worker results queue after every worker has already ended. It bounds the
+drain so a message lost with a dead worker cannot block the report."""
+
+_INFERENCE_MEMORY_REMEDY: str = (
+    "Lower the batch size, lower the number of processes per GPU, or free host memory, then re-run."
+)
+"""The advice offered when the out-of-memory killer ends an inference worker."""
+
+_STALL_WARNING_SECONDS: float = 1200.0
+"""The silence, in seconds, past which a run that is still alive but reporting no progress is called out.
+
+A long decode legitimately looks like this, so crossing the threshold only warns. It exists because a wedged worker
+and a slow one are otherwise indistinguishable in a polled log."""
 
 _BAR_JOIN_TIMEOUT_SECONDS: int = 3
 """The grace period to let the aggregate progress-bar thread finish its final render before the run returns."""
@@ -81,6 +103,11 @@ class InferenceSummary:
     """The produced DeepLabCut ``.h5`` prediction files, one per successfully processed video."""
     failures: tuple[tuple[str, str], ...]
     """The videos that failed, each paired with its error message."""
+
+    @property
+    def successful(self) -> bool:
+        """Returns whether every submitted video produced a prediction file."""
+        return not self.failures
 
     def describe(self) -> str:
         """Builds a one-line human-readable summary of the inference run for the CLI.
@@ -136,8 +163,10 @@ class _InferenceLaunch:
     progress_queue: Any
     """The shared queue workers publish per-work-unit progress updates to."""
     results_queue: Any
-    """The shared queue workers report per-work-unit results to, as a (video index, output path, error) triple on the
-    whole-video path and a (task id, video index, chunk index, predictions, error) tuple on the chunked path."""
+    """The shared queue workers report per-work-unit results to. The whole-video path sends a ``("claim", video index,
+    process identifier)`` triple before it starts a video and a ``("result", video index, (output path, error))``
+    triple when it finishes. The chunked path sends a ``(task id, video index, chunk index, predictions, error)``
+    tuple."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,6 +323,9 @@ def run_inference(
             resolves no GPU indices to build worker slots from. Raised when an explicit CPU worker/thread configuration
             cannot be pinned to disjoint core blocks. Raised when ``profile.chunks`` exceeds one and the project is
             multi-animal or the model is not bottom-up.
+        PipelineInterruptedError: When the operator stops the run before every video has been analyzed, carrying the
+            report of what was completed.
+        PipelineFailedError: When the manager process backing the shared worker queues cannot be started.
     """
     config = Path(config)
     video_paths = [Path(video) for video in videos]
@@ -349,7 +381,7 @@ def run_inference(
     # analyzed at a chosen crop. Otherwise the crop is resolved from the project's cropping configuration.
     project_config = read_config(str(config))
 
-    manager = mp.Manager()
+    manager = _start_inference_manager()
     video_queue = manager.Queue()
     progress_queue = manager.Queue()
     results_queue = manager.Queue()
@@ -389,19 +421,34 @@ def run_inference(
 
     context = mp.get_context("spawn")
     processes = [context.Process(target=_run_inference_worker, args=(slot, launch)) for slot in slots]
-    outputs: dict[int, Path] = {}
-    failures: list[tuple[str, str]] = []
+    supervisor = ProcessSupervisor(processes=processes, names=[slot.device for slot in slots])
+    exits: tuple[WorkerExit, ...] = ()
+    interrupted = False
     try:
-        for process in processes:
-            process.start()
-        for process in processes:
-            process.join()
-        outputs, failures = _collect_results(results_queue=results_queue, video_paths=video_paths)
+        supervisor.start()
+        exits = supervisor.supervise(
+            stall_probe=bar.seconds_since_progress if bar is not None else None,
+            stall_timeout=_STALL_WARNING_SECONDS,
+            on_stall=_warn_inference_stalled,
+        )
+    except KeyboardInterrupt:
+        interrupted = True
     finally:
+        supervisor.terminate_all()
         if bar is not None:
             bar.stop()
             bar.join(timeout=_BAR_JOIN_TIMEOUT_SECONDS)
+    # Drains outside the wait, so an interrupted run still reports the videos that finished before it was stopped.
+    outputs, failures = _collect_results(
+        results_queue=results_queue, video_paths=video_paths, exits=exits, interrupted=interrupted
+    )
+    with contextlib.suppress(Exception):
         manager.shutdown()
+    if interrupted:
+        message = _format_inference_interruption(
+            config=config, shuffle=shuffle, video_paths=video_paths, outputs=outputs
+        )
+        raise PipelineInterruptedError(message)
 
     precision = _describe_precision(profile)
     return InferenceSummary(
@@ -535,6 +582,10 @@ def _build_slots(profile: InferenceProfile, video_count: int, *, chunks: int = 1
 
     Returns:
         The list of worker slots to spawn.
+
+    Raises:
+        ValueError: When the profile selects CUDA but resolves no GPU indices, or when an explicit CPU worker and
+            thread configuration cannot be pinned to disjoint core blocks.
     """
     if profile.on_cuda:
         # Round-robins the device order (cuda:0, cuda:1, cuda:0, ...) rather than grouping by device
@@ -615,9 +666,9 @@ def _probe_frame_count(video: Path) -> int | None:
     """Reads a video's frame count from its container header.
 
     A failure is reported as None rather than folded into a small count, because the two consumers need it differently.
-    The aggregate progress bar only needs a positive total and substitutes one, while a chunked run partitions this
-    count into the frame ranges its workers analyze, so accepting an unreadable header there would silently analyze one
-    frame and write a one-row prediction file that every later check accepts as complete.
+    The aggregate progress bar only needs a positive total and substitutes one. A chunked run instead partitions this
+    count into the frame ranges its workers analyze, so an unreadable header there would silently analyze one frame
+    and write a one-row prediction file that every later check accepts as complete.
 
     Args:
         video: The path of the video whose frame count is read.
@@ -636,12 +687,21 @@ def _probe_frame_count(video: Path) -> int | None:
 def _collect_results(
     results_queue: Any,
     video_paths: list[Path],
+    exits: tuple[WorkerExit, ...] = (),
+    *,
+    interrupted: bool = False,
 ) -> tuple[dict[int, Path], list[tuple[str, str]]]:
     """Drains the results queue into successful outputs and failures, keyed and ordered by video index.
 
+    A worker announces the video it has claimed before analyzing it, so a video left unreported is attributed to the
+    worker that owned it and explained by that worker's exit status.
+
     Args:
-        results_queue: The shared queue workers report per-video results to.
+        results_queue: The shared queue workers report their claims and per-video results to.
         video_paths: The submitted videos, used to name failures and bound the number of results awaited.
+        exits: How each worker process ended, used to explain a video its worker never reported.
+        interrupted: Determines whether the run was stopped by the operator, which explains the unreported videos
+            instead of treating them as failures of their own.
 
     Returns:
         A tuple of the successful outputs keyed by video index and the list of failures as (video-name, error) pairs.
@@ -649,21 +709,125 @@ def _collect_results(
     outputs: dict[int, Path] = {}
     failures: list[tuple[str, str]] = []
     reported: set[int] = set()
-    for _ in video_paths:
+    claims: dict[int, int] = {}
+    while len(reported) < len(video_paths):
         try:
-            index, path, error = results_queue.get(timeout=_RESULT_POLL_TIMEOUT_SECONDS)
+            kind, index, payload = results_queue.get(timeout=_RESULT_POLL_TIMEOUT_SECONDS)
         except Exception:
             break
+        if kind == "claim":
+            claims[index] = int(payload)
+            continue
         reported.add(index)
+        path, error = payload
         if error is None and path is not None:
             outputs[index] = Path(path)
         else:
             failures.append((video_paths[index].name, error or "no prediction file was produced"))
 
     for index, video in enumerate(video_paths):
-        if index not in reported:
-            failures.append((video.name, "the worker process exited before reporting a result"))
+        if index in reported:
+            continue
+        failures.append(
+            (video.name, _describe_unreported_video(exits=exits, pid=claims.get(index), interrupted=interrupted))
+        )
     return outputs, failures
+
+
+def _describe_unreported_video(exits: tuple[WorkerExit, ...], pid: int | None, *, interrupted: bool) -> str:
+    """Explains why a submitted video produced no result.
+
+    Args:
+        exits: How each worker process ended.
+        pid: The process identifier the video's claim carried, or None when no worker ever claimed it.
+        interrupted: Determines whether the run was stopped by the operator.
+
+    Returns:
+        The sentence naming why the video produced no prediction file.
+    """
+    if pid is None:
+        return (
+            "the run ended before any worker started this video."
+            if interrupted
+            else "no worker started this video, so it was never analyzed."
+        )
+    if interrupted:
+        return "the run was interrupted while this video was being analyzed, so its predictions were not written."
+    exit_record = next((record for record in exits if record.pid == pid), None)
+    if exit_record is None:
+        return "the worker process ended before reporting a result for this video."
+    if exit_record.interrupted:
+        return "the worker was stopped while analyzing this video, so its predictions were not written."
+    if not exit_record.crashed:
+        return "the worker exited without reporting a result for this video."
+    return describe_process_exit(
+        exit_record.exit_code,
+        pid=exit_record.pid,
+        role="inference worker",
+        memory_remedy=_INFERENCE_MEMORY_REMEDY,
+    )
+
+
+def _start_inference_manager() -> Any:
+    """Starts the manager process backing the shared inference queues.
+
+    Returns:
+        The started manager.
+
+    Raises:
+        PipelineFailedError: When the manager process cannot be started.
+    """
+    try:
+        return mp.Manager()
+    except Exception as error:
+        # The manager runs a spawned child that re-imports this package, so its failure is reported here rather than
+        # left to reach the command line as the bare EOFError that a dead manager raises.
+        message = (
+            f"Unable to start the inference worker queues, so no video was analyzed. Their manager process failed "
+            f"with {type(error).__name__}: {error}."
+        )
+        raise PipelineFailedError(message) from error
+
+
+def _warn_inference_stalled(silence: float) -> None:
+    """Reports a run whose workers are alive but have made no observable progress for an unusually long stretch.
+
+    Args:
+        silence: The seconds elapsed since the run last reported progress.
+    """
+    warn(
+        f"No inference progress has been reported for {format_duration(silence)}. The workers are still alive, so a "
+        f"long decode looks like this too, but so does a wedged read or a hung device call. Nothing was terminated."
+    )
+
+
+def _format_inference_interruption(
+    *, config: Path, shuffle: int, video_paths: list[Path], outputs: dict[int, Path]
+) -> str:
+    """Builds the report for an inference run the operator stopped before it finished.
+
+    Args:
+        config: The path of the DeepLabCut project configuration file inference ran for.
+        shuffle: The shuffle index whose model was running.
+        video_paths: The videos the run had submitted.
+        outputs: The prediction files that were written before the run was stopped, keyed by video index.
+
+    Returns:
+        The report naming what was completed and how to resume.
+    """
+    report = [
+        "Inference was interrupted before it finished.",
+        f"  project: {config}",
+        f"  shuffle: {shuffle}",
+        f"  videos:  {len(video_paths)} submitted, {len(outputs)} complete",
+    ]
+    if outputs:
+        report.append("Predictions already written:")
+        report.extend(f"  {outputs[index]}" for index in sorted(outputs))
+        report.append("Re-run naming only the videos that are still missing predictions.")
+    else:
+        report.append("No prediction file was written, so every submitted video must be re-run.")
+    return "\n".join(report)
 
 
 @contextlib.contextmanager
@@ -690,6 +854,9 @@ def _run_inference_worker(slot: _Slot, launch: _InferenceLaunch) -> None:
         slot: The device and optional CPU-core placement for this worker.
         launch: The bundle of picklable per-run parameters shared by every worker process.
     """
+    # Installs the fault handler before the worker suppresses its own output, so a native crash inside CUDA, cuDNN,
+    # or OpenCV leaves a readable dump rather than ending the worker without a word.
+    enable_native_crash_dumps()
     if slot.cores is not None and sys.platform != "darwin":
         with contextlib.suppress(Exception):
             psutil.Process().cpu_affinity(list(slot.cores))
@@ -700,6 +867,9 @@ def _run_inference_worker(slot: _Slot, launch: _InferenceLaunch) -> None:
             item = launch.video_queue.get()
             if item is None:
                 break
+            # The claim is announced before any analysis, so a worker that dies mid-video is attributed to that video
+            # rather than leaving the parent with an unexplained gap.
+            launch.results_queue.put(("claim", item[0], os.getpid()))
             _analyze_one_video(slot=slot, launch=launch, item=item)
 
 
@@ -742,9 +912,9 @@ def _analyze_one_video(
                 inference_cfg=_STOCK_ACCELERATION_DISABLED,
             )
         output = _resolve_output(video=video, scorer=scorer, destination=output_directory)
-        launch.results_queue.put((index, str(output) if output is not None else None, None))
+        launch.results_queue.put(("result", index, (str(output) if output is not None else None, None)))
     except Exception as error:
-        launch.results_queue.put((index, None, f"{type(error).__name__}: {error}"))
+        launch.results_queue.put(("result", index, (None, f"{type(error).__name__}: {error}")))
     finally:
         dlc_videos.tqdm = original_tqdm
         if launch.display_progress:
@@ -817,6 +987,8 @@ def _run_inference_chunked(
     Raises:
         ValueError: When the project is multi-animal or the model is not bottom-up, which the single-file chunk-stitch
             path does not support.
+        PipelineInterruptedError: When the operator stops the run before every chunk has been analyzed.
+        PipelineFailedError: When the manager process backing the shared worker queues cannot be started.
     """
     plan = _build_analysis_plan(
         config=config,
@@ -878,7 +1050,7 @@ def _run_inference_chunked(
 
     slots = _build_slots(profile=profile, video_count=len(work_items), chunks=profile.chunks)
 
-    manager = mp.Manager()
+    manager = _start_inference_manager()
     video_queue = manager.Queue()
     progress_queue = manager.Queue()
     results_queue = manager.Queue()
@@ -914,22 +1086,39 @@ def _run_inference_chunked(
 
     context = mp.get_context("spawn")
     processes = [context.Process(target=_run_chunk_worker, args=(slot, launch)) for slot in slots]
-    outputs: dict[int, Path] = {}
+    supervisor = ProcessSupervisor(processes=processes, names=[slot.device for slot in slots])
     failures: list[tuple[str, str]] = list(unreadable_videos)
+    interrupted = False
     try:
-        for process in processes:
-            process.start()
-        for process in processes:
-            process.join()
-        outputs, chunk_failures = _collect_chunk_results(
-            results_queue=results_queue, video_paths=video_paths, work_items=work_items, plan=plan
+        supervisor.start()
+        supervisor.supervise(
+            stall_probe=bar.seconds_since_progress if bar is not None else None,
+            stall_timeout=_STALL_WARNING_SECONDS,
+            on_stall=_warn_inference_stalled,
         )
-        failures.extend(chunk_failures)
+    except KeyboardInterrupt:
+        interrupted = True
     finally:
+        supervisor.terminate_all()
         if bar is not None:
             bar.stop()
             bar.join(timeout=_BAR_JOIN_TIMEOUT_SECONDS)
+    outputs, chunk_failures = _collect_chunk_results(
+        results_queue=results_queue, video_paths=video_paths, work_items=work_items, plan=plan
+    )
+    failures.extend(chunk_failures)
+    with contextlib.suppress(Exception):
         manager.shutdown()
+    if interrupted:
+        # A chunked run stitches in the parent, so an interrupt leaves nothing partially written on disk.
+        report = _format_inference_interruption(
+            config=config, shuffle=shuffle, video_paths=video_paths, outputs=outputs
+        )
+        message = (
+            f"{report}\nChunked runs stitch their predictions in this process, so no partially analyzed video was "
+            f"written. Re-run the incomplete videos in full."
+        )
+        raise PipelineInterruptedError(message)
 
     return InferenceSummary(
         config=config,
@@ -1002,6 +1191,9 @@ def _run_chunk_worker(slot: _Slot, launch: _InferenceLaunch) -> None:
         slot: The device and optional CPU-core placement for this worker.
         launch: The bundle of picklable per-run parameters shared by every worker process.
     """
+    # Installs the fault handler before the worker suppresses its own output, so a native crash inside CUDA, cuDNN,
+    # or OpenCV leaves a readable dump rather than ending the worker without a word.
+    enable_native_crash_dumps()
     if slot.cores is not None and sys.platform != "darwin":
         with contextlib.suppress(Exception):
             psutil.Process().cpu_affinity(list(slot.cores))

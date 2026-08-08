@@ -43,7 +43,9 @@ from .hardware import (  # noqa: E402 - after thread-limit setup
 from .training import (  # noqa: E402 - after thread-limit setup
     TrainingSummary,
     OptimizationProfile,
+    TrainingFailedError,
     TrainingDatasetSummary,
+    TrainingInterruptedError,
     train_model,
     create_training_dataset,
     get_available_pose_models,
@@ -58,6 +60,10 @@ from .inference import (  # noqa: E402 - after thread-limit setup
     InferenceSummary,
     run_inference,
     resolve_inference_profile,
+)
+from .reporting import (  # noqa: E402 - after thread-limit setup
+    PipelineFailedError,
+    PipelineInterruptedError,
 )
 from .frame_extraction import (  # noqa: E402 - after thread-limit setup
     PurgeSummary,
@@ -82,6 +88,8 @@ __all__ = [
     "OptimizationProfile",
     "OutlierAlgorithm",
     "OutlierExtractionSummary",
+    "PipelineFailedError",
+    "PipelineInterruptedError",
     "PurgeSummary",
     "RefinementDirectoryStatus",
     "RefinementStatusSummary",
@@ -90,6 +98,8 @@ __all__ = [
     "TorchInstaller",
     "TrackingMethod",
     "TrainingDatasetSummary",
+    "TrainingFailedError",
+    "TrainingInterruptedError",
     "TrainingSummary",
     "build_conditional_top_down_conditions",
     "build_superanimal_weight_init",

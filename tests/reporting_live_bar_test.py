@@ -230,6 +230,37 @@ def test_non_tty_render_interval_constant_is_slow_cadence() -> None:
     assert _NON_TTY_RENDER_INTERVAL == 30.0
 
 
+def test_seconds_since_progress_grows_without_messages_and_resets_on_a_real_one():
+    """Verifies that a real progress message refreshes the staleness the supervisor watches."""
+    queue: Queue = Queue()
+    bar = _FakeBar(progress_queue=queue, stream=_FakeStream(is_tty=False))
+    bar._start_time -= 100.0
+    bar._last_progress_time -= 100.0
+
+    assert bar.seconds_since_progress() > 99.0
+
+    queue.put(("advance", 1))
+    queue.put(_STOP_SENTINEL)
+    bar.run()
+
+    assert bar.seconds_since_progress() < 5.0
+
+
+def test_run_ends_quietly_when_its_queue_is_torn_down_mid_run():
+    """Verifies that a queue torn down under the renderer ends the thread instead of raising an unraisable exception."""
+
+    class _TornDownQueue:
+        def get(self, timeout=None):
+            self.timeout = timeout
+            message = "manager is gone"
+            raise EOFError(message)
+
+    bar = _FakeBar(progress_queue=_TornDownQueue(), stream=_FakeStream(is_tty=False))
+
+    # Must return rather than propagate, since this thread has no caller to report to.
+    bar.run()
+
+
 class _FakeStream:
     """Serves as a minimal text stream, recording writes and reporting a configurable interactive-terminal status."""
 

@@ -1,9 +1,10 @@
 """Contains tests for the parallel outlier-frame extraction pipeline that refines a DeepLabCut model on
 likely-wrong frames.
 
-The DeepLabCut runtime boundary (``read_config``, ``load_analyzed_data``, the frame writer, the multiprocessing pool)
-is stubbed so the whole pipeline runs headless, deterministically, and without a GPU, network, or real decode. Worker
-and orchestration bodies are driven in-process: pools are replaced with fakes that run their callables synchronously.
+The DeepLabCut runtime boundary (``read_config``, ``load_analyzed_data``, and the frame writer) is stubbed so the
+whole pipeline runs headless, deterministically, and without a GPU, network, or real decode. Worker and orchestration
+bodies are driven in-process, with ``run_supervised_tasks`` and ``iter_pinned_extraction`` replaced by stand-ins that
+apply their worker synchronously.
 """
 
 from __future__ import annotations
@@ -210,8 +211,10 @@ def test_detect_all_videos_jump_flags_large_step(monkeypatch: pytest.MonkeyPatch
     assert candidates == {"v1": [2, 3]}
 
 
-def test_detect_all_videos_fitting_reduces_via_pool(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verifies that the ``fitting`` algorithm defers to the shared-pool reduction after validating numframes2pick."""
+def test_detect_all_videos_fitting_reduces_via_the_supervised_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies that the ``fitting`` algorithm defers to the supervised trajectory-fit reduction after validating
+    numframes2pick.
+    """
     monkeypatch.setattr(outlier_pipeline, "_detect_fitting_outliers", lambda **_k: {"v1": [2]})
 
     candidates, unanalyzed, errors = _detect(
@@ -247,8 +250,8 @@ def test_detect_all_videos_records_missing_and_failed_per_video(monkeypatch: pyt
         if video == "missing":
             raise FileNotFoundError
         if video == "bad":
-            detail = "boom"
-            raise ValueError(detail)
+            message = "boom"
+            raise ValueError(message)
         return good
 
     candidates, unanalyzed, errors = _detect(
@@ -271,11 +274,14 @@ def test_detect_fitting_outliers_auto_workers_reports_progress(
     """Verifies that automatic worker sizing fills the usable cores (clamped to the task count) and reduces to outlier
     frames.
     """
-    context = _FakeContext()
+    recorded_worker_counts: list[int] = []
     # Pin the visible core count so the auto worker-sizing arithmetic is deterministic and can be asserted exactly.
     monkeypatch.setattr(outlier_pipeline.os, "cpu_count", lambda: 8)
-    monkeypatch.setattr(outlier_pipeline.multiprocessing, "get_context", lambda *_a: context)
-    monkeypatch.setattr(outlier_pipeline, "_fit_video_keypoint", lambda *_a: np.array([0.0, 0.0, 100.0, 0.0, 0.0]))
+    monkeypatch.setattr(
+        outlier_pipeline,
+        "run_supervised_tasks",
+        _recording_supervised_runner(recorded_worker_counts),
+    )
 
     result = outlier_pipeline._detect_fitting_outliers(
         fitting_keypoint_counts=_fit_keypoint_counts(),
@@ -295,7 +301,7 @@ def test_detect_fitting_outliers_auto_workers_reports_progress(
 
     assert result == {"vA": [2], "vB": [2]}
     # fitting_worker_count=-1 -> auto: usable = 8 cores - 2 reserved = 6, clamped down to the 3 keypoint tasks.
-    assert context.pool_process_counts == [3]
+    assert recorded_worker_counts == [3]
     assert "fitting 3 keypoint trajectories across 2 video(s) on 3 processes" in capsys.readouterr().err
 
 
@@ -305,11 +311,14 @@ def test_detect_fitting_outliers_explicit_workers_no_progress(
     """Verifies that an explicit fitting worker count is honored verbatim and the progress line is suppressed when
     disabled.
     """
-    context = _FakeContext()
-    # With 8 - 2 = 6 usable cores the auto path would size the pool at 3 (the task count). An explicit 2 must win.
+    recorded_worker_counts: list[int] = []
+    # With 8 - 2 = 6 usable cores the auto path would size the fan-out at 3 (the task count). An explicit 2 must win.
     monkeypatch.setattr(outlier_pipeline.os, "cpu_count", lambda: 8)
-    monkeypatch.setattr(outlier_pipeline.multiprocessing, "get_context", lambda *_a: context)
-    monkeypatch.setattr(outlier_pipeline, "_fit_video_keypoint", lambda *_a: np.array([0.0, 0.0, 100.0, 0.0, 0.0]))
+    monkeypatch.setattr(
+        outlier_pipeline,
+        "run_supervised_tasks",
+        _recording_supervised_runner(recorded_worker_counts),
+    )
 
     result = outlier_pipeline._detect_fitting_outliers(
         fitting_keypoint_counts=_fit_keypoint_counts(),
@@ -329,9 +338,25 @@ def test_detect_fitting_outliers_explicit_workers_no_progress(
 
     assert result == {"vA": [2], "vB": [2]}
     # The explicit count (2) is used as-is rather than filling the usable cores.
-    assert context.pool_process_counts == [2]
+    assert recorded_worker_counts == [2]
     # display_progress=False suppresses the fitting progress line entirely.
     assert "fitting" not in capsys.readouterr().err
+
+
+# _fit_one_keypoint_task
+def test_fit_one_keypoint_task_unpacks_its_work_item(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies that the packed fitting work item is applied to the fit function as its arguments."""
+    received: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        outlier_pipeline,
+        "_fit_video_keypoint",
+        lambda *arguments: received.append(arguments) or np.array([1.0]),
+    )
+
+    result = outlier_pipeline._fit_one_keypoint_task(("vA", 0, "DLC"))
+
+    assert received == [("vA", 0, "DLC")]
+    assert result.tolist() == [1.0]
 
 
 # _fit_video_keypoint
@@ -573,8 +598,8 @@ def test_extract_one_video_captures_extraction_error(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(outlier_pipeline, "_load_sliced_predictions", lambda **_k: _predictions())
 
     def raise_boom(**_kwargs):
-        detail = "decode blew up"
-        raise RuntimeError(detail)
+        message = "decode blew up"
+        raise RuntimeError(message)
 
     monkeypatch.setattr(outlier_pipeline.dlc_outlier_frames, "ExtractFramesbasedonPreselection", raise_boom)
 
@@ -1005,33 +1030,6 @@ def _write_labels(path: Path, names: list[str], *, finite_names: set[str] | None
     pd.DataFrame({"x": coordinates}, index=index).to_hdf(path, key="df_with_missing")
 
 
-class _FakePool:
-    """Runs a multiprocessing pool's ``starmap`` synchronously in-process."""
-
-    def __init__(self, processes: int) -> None:
-        self.processes = processes
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_args: object) -> bool:
-        return False
-
-    def starmap(self, func, iterable):
-        return [func(*args) for args in iterable]
-
-
-class _FakeContext:
-    """Vends a ``Pool`` that runs work synchronously, recording each requested process count."""
-
-    def __init__(self) -> None:
-        self.pool_process_counts: list[int] = []
-
-    def Pool(self, processes: int) -> _FakePool:  # noqa: N802 - mirrors multiprocessing.Pool naming.
-        self.pool_process_counts.append(processes)
-        return _FakePool(processes)
-
-
 def _detect(monkeypatch: pytest.MonkeyPatch, load_stub, algorithm, **overrides):
     """Drives ``_detect_all_videos`` with a stubbed slice loader and sensible defaults."""
     monkeypatch.setattr(outlier_pipeline, "_load_sliced_predictions", load_stub)
@@ -1056,7 +1054,7 @@ def _detect(monkeypatch: pytest.MonkeyPatch, load_stub, algorithm, **overrides):
 
 
 def _fit_keypoint_counts() -> dict[str, int]:
-    """Builds two videos' keypoint counts for the fitting pool, three fit tasks in total."""
+    """Builds two videos' keypoint counts for the fitting fan-out, three fit tasks in total."""
     return {"vA": 2, "vB": 1}
 
 
@@ -1113,3 +1111,13 @@ def _base_config(video: str) -> dict:
         "iteration": 0,
         "scorer": "human",
     }
+
+
+def _recording_supervised_runner(recorded_worker_counts: list[int]):
+    """Builds a stand-in for the supervised task runner that records its fan-out and returns one deviation per task."""
+
+    def run(*, tasks, worker, worker_count, role, memory_remedy):
+        recorded_worker_counts.append(worker_count)
+        return [np.array([0.0, 0.0, 100.0, 0.0, 0.0]) for _ in tasks]
+
+    return run

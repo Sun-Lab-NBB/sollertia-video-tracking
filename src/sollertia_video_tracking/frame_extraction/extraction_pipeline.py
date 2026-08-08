@@ -27,6 +27,7 @@ from .utilities import (
     has_outlier_refinement_data,
     prune_empty_labeled_data_directories,
 )
+from ..reporting import enable_native_crash_dumps
 from .frame_reading import make_fast_kmeans_selector
 from .cpu_allocation import DEFAULT_RESERVED_CORE_COUNT, plan_core_allocation
 from .video_grouping import group_videos
@@ -190,6 +191,7 @@ def extract_frames_kmeans(
 
     Raises:
         FileNotFoundError: If ``config_path`` does not point to an existing file.
+        PipelineFailedError: If the manager backing the worker queues cannot be started, so no video was processed.
         ValueError: Raised when the options conflict: ``overwrite`` and ``reset`` are both set, ``exclusive`` and
             ``reset`` are both set, or ``exclusive`` is set without any ``requested_videos``. Raised when ``overwrite``
             targets a video already in outlier refinement. Raised when a value is out of range: ``clustering_stride`` is
@@ -725,6 +727,9 @@ def _extract_one_video(task: tuple[Any, ...]) -> tuple[str, int, str]:
         A tuple of the video path, the number of frames freshly written, and a status string (``"ok"``, ``"empty"``,
         or an ``"error:"`` traceback).
     """
+    # Installed before the worker redirects its own console, so a native crash inside OpenCV or a DeepLabCut backend
+    # writes a readable dump instead of ending the worker without a word.
+    enable_native_crash_dumps()
     (
         video_path,
         config_path,

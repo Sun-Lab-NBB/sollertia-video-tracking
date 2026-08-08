@@ -4,10 +4,13 @@ from pathlib import Path
 
 import click
 
+from ..hardware import warn
 from ..inference import (
     Toggle,
     AmpMode,
     DeviceType,
+    PipelineFailedError,
+    PipelineInterruptedError,
     run_inference,
     resolve_project_videos,
     detect_fixed_input_size,
@@ -53,6 +56,7 @@ _CROP_FIELD_COUNT: int = 4
 @click.option(
     "-s",
     "--shuffle",
+    type=click.IntRange(min=1),
     default=1,
     show_default=True,
     help="The shuffle index whose trained model analyzes the videos.",
@@ -75,7 +79,7 @@ _CROP_FIELD_COUNT: int = 4
 @click.option(
     "-b",
     "--batch-size",
-    type=int,
+    type=click.IntRange(min=1),
     default=None,
     help="The number of frames the pose model processes per forward pass. Larger batches use more GPU memory and can "
     "speed up analysis. Omit to use the model's default value.",
@@ -83,7 +87,7 @@ _CROP_FIELD_COUNT: int = 4
 @click.option(
     "-dbs",
     "--detector-batch-size",
-    type=int,
+    type=click.IntRange(min=1),
     default=None,
     help="The number of frames the object detector processes per step, for top-down models. Omit to use the model's "
     "default value.",
@@ -118,7 +122,7 @@ _CROP_FIELD_COUNT: int = 4
 @click.option(
     "-gp",
     "--gpu-processes",
-    type=int,
+    type=click.IntRange(min=-1),
     default=-1,
     show_default=True,
     help="The number of inference worker processes per GPU, each analyzing one video at a time. Raise it to "
@@ -128,7 +132,7 @@ _CROP_FIELD_COUNT: int = 4
 @click.option(
     "-ch",
     "--chunks",
-    type=int,
+    type=click.IntRange(min=1),
     default=1,
     show_default=True,
     help="The number of contiguous frame-range pieces each running video is split into, all analyzed concurrently. "
@@ -140,7 +144,7 @@ _CROP_FIELD_COUNT: int = 4
 @click.option(
     "-cw",
     "--cpu-workers",
-    type=int,
+    type=click.IntRange(min=-1),
     default=-1,
     show_default=True,
     help="The number of CPU inference worker processes, each pinned to a disjoint block of CPU cores. Set to -1 to "
@@ -149,7 +153,7 @@ _CROP_FIELD_COUNT: int = 4
 @click.option(
     "-ctpw",
     "--cpu-threads-per-worker",
-    type=int,
+    type=click.IntRange(min=-1),
     default=-1,
     show_default=True,
     help="The number of CPU threads (and cores) each CPU worker uses. Set to -1 to choose automatically.",
@@ -256,21 +260,9 @@ def infer_command(
         )
         raise click.ClickException(message=message) from error
 
-    if chunks < 1:
-        message = (
-            f"Unable to use the --chunks value '{chunks}'. Expected a positive whole number of frame-range pieces."
-        )
-        raise click.UsageError(message=message)
-
     whole_project = not videos
     resolved_videos: list[Path] = list(resolve_project_videos(config_path)) if whole_project else list(videos)
-    seen: set[str] = set()
-    unique_videos: list[str | Path] = []
-    for video in resolved_videos:
-        key = str(video.resolve())
-        if key not in seen:
-            seen.add(key)
-            unique_videos.append(video)
+    unique_videos: list[str | Path] = list({str(video.resolve()): video for video in resolved_videos}.values())
     if not unique_videos:
         message = (
             "Unable to run inference without videos. Provide one or more videos with --videos, or register videos "
@@ -317,10 +309,19 @@ def infer_command(
             crop_override=crop_override,
             display_progress=progress,
         )
-    except (ValueError, FileNotFoundError) as error:
+    except PipelineInterruptedError as error:
+        warn(str(error))
+        click.get_current_context().exit(130)
+    # EOFError is funneled here because Click reduces it to a bare 'Aborted!' that reads exactly like an operator
+    # interrupt, which hides a manager process that failed to start.
+    except (PipelineFailedError, ValueError, FileNotFoundError, EOFError) as error:
         raise click.ClickException(message=str(error)) from error
 
+    for failed_video, detail in summary.failures:
+        click.echo(message=f"\n--- failed: {failed_video} ---\n{detail}", err=True)
     click.echo(message=summary.describe())
+    if not summary.successful:
+        raise SystemExit(1)
 
 
 def _parse_crop_option(value: str) -> tuple[int, int, int, int]:

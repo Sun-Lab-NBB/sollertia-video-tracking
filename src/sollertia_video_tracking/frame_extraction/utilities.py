@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import sys
+from queue import Empty
 import shutil
 from typing import TYPE_CHECKING, Any, cast
 from pathlib import Path
+import traceback
+import contextlib
 from dataclasses import dataclass
 import multiprocessing
 
@@ -13,10 +17,30 @@ import pandas as pd
 from ruamel.yaml import YAML
 
 from .progress import AggregateBar
-from .cpu_allocation import pin_worker_to_cores
+from ..hardware import warn
+from ..reporting import (
+    WorkerExit,
+    ProcessSupervisor,
+    PipelineFailedError,
+    PipelineInterruptedError,
+    describe_process_exit,
+    enable_native_crash_dumps,
+)
+from .cpu_allocation import pin_process_to_cores
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
+
+_RESULT_POLL_SECONDS: float = 0.5
+"""How long the parent waits for a worker message before re-checking whether any worker is still alive.
+
+The wait is bounded so a run whose workers all died without reporting ends with their exit codes rather than blocking
+on a result no surviving process will produce."""
+
+_EXTRACTION_MEMORY_REMEDY: str = (
+    "Lower the worker count, raise the clustering stride, or free host memory, then re-run."
+)
+"""The advice offered when the out-of-memory killer ends a frame-extraction worker."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,12 +184,12 @@ def iter_pinned_extraction(
     frame_totals: dict[int, int],
     display_progress: bool,
 ) -> Iterator[tuple[str, int, str]]:
-    """Runs the workers over a pinned process pool, yielding each ``(video_path, frames_written, status)`` result.
+    """Runs the workers over pinned worker processes, yielding each ``(video_path, frames_written, status)`` result.
 
-    Owns the spawn context, the manager-backed progress and core-set queues, and the aggregate progress bar, so both
-    pipelines share one worker-pool lifecycle. Each worker claims its assigned core block for CPU-affinity pinning, and
-    the blocks are always disjoint, because a request that would need overlapping blocks raises ``ValueError`` during
-    core allocation instead. The progress queue is handed to ``make_tasks`` only when progress is displayed (None
+    Owns the spawn context, the manager-backed progress, task, and results queues, and the aggregate progress bar, so
+    both pipelines share one worker-pool lifecycle. Each worker binds its assigned core block for CPU-affinity pinning,
+    and the blocks are always disjoint, because a request that would need overlapping blocks raises ``ValueError``
+    during core allocation instead. The progress queue is handed to ``make_tasks`` only when progress is displayed (None
     otherwise), so the workers never stream to a queue nobody drains. The bar and manager are always torn down, even if
     the caller's consumption of the results raises.
 
@@ -180,38 +204,178 @@ def iter_pinned_extraction(
         display_progress: Determines whether the aggregate progress bar is rendered and progress is streamed to it.
 
     Yields:
-        Each worker's ``(video_path, frames_written, status)`` result, in completion order.
+        Each worker's ``(video_path, frames_written, status)`` result, in completion order. A worker that dies without
+        returning a result yields a synthesized ``error:`` status naming how it died.
+
+    Raises:
+        PipelineFailedError: When the manager backing the shared queues cannot be started.
+        PipelineInterruptedError: When the operator stops the run before every video has been processed.
     """
     context = multiprocessing.get_context("spawn")
-    manager = context.Manager()
-    progress_queue = manager.Queue()
-    core_set_queue = manager.Queue()
-    for core_set in core_sets:
-        core_set_queue.put(core_set)
-
-    video_indices = {video: index for index, video in enumerate(videos)}
-    tasks = make_tasks(progress_queue if display_progress else None)
-    bar = AggregateBar(
-        progress_queue=progress_queue,
-        total_video_count=len(videos),
-        frame_totals=frame_totals,
-    )
+    manager = _start_extraction_manager(context)
     try:
-        with context.Pool(processes=worker_count, initializer=pin_worker_to_cores, initargs=(core_set_queue,)) as pool:
+        progress_queue = manager.Queue()
+        task_queue = manager.Queue()
+        results_queue = manager.Queue()
+
+        video_indices = {video: index for index, video in enumerate(videos)}
+        tasks = make_tasks(progress_queue if display_progress else None)
+        for index, task in enumerate(tasks):
+            task_queue.put((index, task))
+        bar = AggregateBar(
+            progress_queue=progress_queue,
+            total_video_count=len(videos),
+            frame_totals=frame_totals,
+        )
+        processes = [
+            context.Process(
+                target=_drain_worker_tasks,
+                args=(core_sets[worker_index], task_queue, results_queue, worker),
+                daemon=False,
+            )
+            for worker_index in range(worker_count)
+        ]
+        supervisor = ProcessSupervisor(processes=processes, names=[str(index) for index in range(worker_count)])
+        # A worker that dies without unwinding never returns its task, so the parent tracks which task each worker
+        # claimed and reconciles the unreported ones against the worker exit codes once the workers are gone. Without
+        # that reconciliation the run waits on a result no surviving process will ever produce.
+        claims: dict[int, int] = {}
+        reported: set[int] = set()
+        try:
+            supervisor.start()
             if display_progress:
                 bar.start()
-            for video, written, status in pool.imap_unordered(func=worker, iterable=tasks):
+            while len(reported) < len(tasks):
+                worker_message = _next_extraction_message(results_queue)
+                if worker_message is None:
+                    if not supervisor.any_alive():
+                        break
+                    continue
+                kind, index, payload = worker_message
+                if kind == "claim":
+                    claims[index] = int(payload)
+                    continue
+                reported.add(index)
+                if kind == "failure":
+                    video, written, status = str(tasks[index][0]), 0, f"error:{payload}"
+                else:
+                    video, written, status = payload
                 yield video, written, status
                 if display_progress:
                     progress_queue.put(("done", video_indices[video]))
+            # Worker exit statuses are only needed to explain a task that produced no result. A run in which every task
+            # reported therefore skips the wait for the workers to shut down and tears them down at once.
+            if len(reported) < len(tasks):
+                exits = supervisor.collect_exits()
+                for index, task in enumerate(tasks):
+                    if index in reported:
+                        continue
+                    yield _lost_task_result(task=task, exit_record=_exit_for_claim(exits=exits, pid=claims.get(index)))
+        except KeyboardInterrupt as error:
+            message = (
+                f"Frame extraction was interrupted before it finished. {len(reported)} of {len(tasks)} videos "
+                f"completed, and their frames are in the project's labeled-data tree. Extraction is additive, so "
+                f"re-running tops up the videos that remain without re-rolling the ones already done."
+            )
+            raise PipelineInterruptedError(message) from error
+        finally:
+            supervisor.terminate_all()
+            # The bar thread is only started once the workers exist, so joining it when progress is off or when the
+            # start raised beforehand would hit an unstarted thread and mask the real error with a RuntimeError. Stops
+            # and joins it only while it is actually running.
+            if display_progress and bar.is_alive():
+                bar.stop()
+                bar.join(timeout=3)
     finally:
-        # The bar thread is only started once the pool is created, so joining it when progress is off or when pool
-        # construction raised before the start would hit an unstarted thread and mask the real error with a
-        # RuntimeError. Stops and joins it only while it is actually running.
-        if display_progress and bar.is_alive():
-            bar.stop()
-            bar.join(timeout=3)
-        manager.shutdown()
+        with contextlib.suppress(Exception):
+            manager.shutdown()
+
+
+def run_supervised_tasks(
+    *,
+    tasks: list[tuple[Any, ...]],
+    worker: Callable[[tuple[Any, ...]], Any],
+    worker_count: int,
+    role: str,
+    memory_remedy: str,
+) -> list[Any]:
+    """Runs every task across supervised spawn workers and returns their results in task order.
+
+    Unlike the streaming extraction loop, every task must succeed here, because the caller consumes the results as one
+    aligned set. A worker that dies without reporting therefore ends the run with a report naming how it died, rather
+    than leaving a placeholder that would silently degrade the caller's computation.
+
+    Args:
+        tasks: The work items, applied to the worker one at a time.
+        worker: The callable applied to each task.
+        worker_count: The number of concurrent worker processes to run.
+        role: The noun naming the worker in a failure report.
+        memory_remedy: The advice offered when the out-of-memory killer ends a worker.
+
+    Returns:
+        Each task's result, in task order.
+
+    Raises:
+        PipelineFailedError: When the queues cannot be started, when a task's worker raised, or when a task's worker
+            ended without reporting.
+        PipelineInterruptedError: When the operator stops the run before every task has completed.
+    """
+    context = multiprocessing.get_context("spawn")
+    manager = _start_extraction_manager(context)
+    try:
+        task_queue = manager.Queue()
+        results_queue = manager.Queue()
+        for index, task in enumerate(tasks):
+            task_queue.put((index, task))
+        processes = [
+            context.Process(target=_drain_worker_tasks, args=(set(), task_queue, results_queue, worker), daemon=False)
+            for _ in range(worker_count)
+        ]
+        supervisor = ProcessSupervisor(processes=processes, names=[str(index) for index in range(worker_count)])
+        results: dict[int, Any] = {}
+        failures: dict[int, str] = {}
+        claims: dict[int, int] = {}
+        try:
+            supervisor.start()
+            while len(results) + len(failures) < len(tasks):
+                worker_message = _next_extraction_message(results_queue)
+                if worker_message is None:
+                    if not supervisor.any_alive():
+                        break
+                    continue
+                kind, index, payload = worker_message
+                if kind == "claim":
+                    claims[index] = int(payload)
+                elif kind == "failure":
+                    failures[index] = str(payload)
+                else:
+                    results[index] = payload
+            # Only a run that lost a task needs its workers' exit statuses, so a complete run never waits for them
+            # to shut down.
+            exits = supervisor.collect_exits() if len(results) < len(tasks) else ()
+        except KeyboardInterrupt as error:
+            message = (
+                f"The {role} phase was interrupted before it finished. {len(results)} of {len(tasks)} tasks "
+                f"completed, and no frames were extracted from this run."
+            )
+            raise PipelineInterruptedError(message) from error
+        finally:
+            supervisor.terminate_all()
+        for index in range(len(tasks)):
+            if index in results:
+                continue
+            message = _describe_lost_supervised_task(
+                task=tasks[index],
+                failure=failures.get(index),
+                exit_record=_exit_for_claim(exits=exits, pid=claims.get(index)),
+                role=role,
+                memory_remedy=memory_remedy,
+            )
+            raise PipelineFailedError(message)
+        return [results[index] for index in range(len(tasks))]
+    finally:
+        with contextlib.suppress(Exception):
+            manager.shutdown()
 
 
 def prune_empty_labeled_data_directories(project_directory: Path, *, display_progress: bool = False) -> int:
@@ -238,7 +402,13 @@ def prune_empty_labeled_data_directories(project_directory: Path, *, display_pro
         if directory.is_symlink() or not directory.is_dir():
             continue
         if not any(directory.iterdir()):
-            directory.rmdir()
+            # Pruning is housekeeping, so a directory that cannot be removed is reported rather than allowed to turn
+            # a completed extraction into a traceback.
+            try:
+                directory.rmdir()
+            except OSError as error:
+                warn(f"Unable to prune the empty labeled-data directory {directory} ({type(error).__name__}: {error}).")
+                continue
             removed_count += 1
     if display_progress and removed_count:
         sys.stderr.write(f"pruned {removed_count} empty labeled-data directory(ies)\n")
@@ -610,3 +780,156 @@ def summarize_refinement_status(config_path: Path, *, videos: tuple[str | Path, 
         unmatched_videos=unmatched_videos,
         unreadable=tuple(unreadable),
     )
+
+
+def _drain_worker_tasks(
+    core_set: set[int],
+    task_queue: Any,
+    results_queue: Any,
+    worker: Callable[[tuple[Any, ...]], tuple[str, int, str]],
+) -> None:
+    """Pins this worker process to its core block and runs queued tasks until the queue is empty.
+
+    Each task is announced before it starts so the parent can attribute a worker that dies mid-task to the video it
+    had claimed. The fault handler is installed first, before the worker redirects its own console, so a native crash
+    still leaves a dump.
+
+    Args:
+        core_set: The core ids this worker is confined to, empty to leave it unpinned.
+        task_queue: The shared queue holding the pending ``(index, task)`` items, drained one at a time.
+        results_queue: The shared queue this worker reports its claims and results to.
+        worker: The callable applied to each task.
+    """
+    enable_native_crash_dumps()
+    pin_process_to_cores(core_set)
+    while True:
+        try:
+            index, task = task_queue.get_nowait()
+        except Exception:
+            return
+        results_queue.put(("claim", index, os.getpid()))
+        try:
+            results_queue.put(("result", index, worker(task)))
+        except Exception:
+            # Reporting a raised task keeps the parent from waiting on a result that is never coming. The per-video
+            # extraction workers funnel their own failures into an 'error:' status, so reaching here means the task
+            # itself was unusable.
+            results_queue.put(("failure", index, traceback.format_exc()))
+
+
+def _describe_lost_supervised_task(
+    task: tuple[Any, ...],
+    failure: str | None,
+    exit_record: WorkerExit | None,
+    role: str,
+    memory_remedy: str,
+) -> str:
+    """Builds the report for a supervised task that produced no result.
+
+    Args:
+        task: The work item that produced no result.
+        failure: The traceback the worker reported, or None when it produced none.
+        exit_record: The exit record of the worker that claimed the task, or None when nothing claimed it.
+        role: The noun naming the worker in the report.
+        memory_remedy: The advice offered when the out-of-memory killer ended the worker.
+
+    Returns:
+        The report naming the task and how it was lost.
+    """
+    subject = f"Unable to complete the {role} task {task[:2]}."
+    if failure is not None:
+        return f"{subject} The worker raised:\n{failure}"
+    if exit_record is None:
+        return f"{subject} No worker reported a result for it."
+    reason = describe_process_exit(
+        exit_code=exit_record.exit_code,
+        pid=exit_record.pid,
+        role=role,
+        memory_remedy=memory_remedy,
+    )
+    return f"{subject} {reason}"
+
+
+def _start_extraction_manager(context: Any) -> Any:
+    """Starts the manager process backing the shared extraction queues.
+
+    Args:
+        context: The spawn multiprocessing context the manager is started in.
+
+    Returns:
+        The started manager.
+
+    Raises:
+        PipelineFailedError: When the manager process cannot be started.
+    """
+    try:
+        return context.Manager()
+    except Exception as error:
+        # The manager runs a spawned child that re-imports this package, so its failure is reported here rather than
+        # left to reach the command line as the bare EOFError that a dead manager raises.
+        message = (
+            f"Unable to start the frame-extraction worker queues, so no video was processed. Their manager process "
+            f"failed with {type(error).__name__}: {error}."
+        )
+        raise PipelineFailedError(message) from error
+
+
+def _next_extraction_message(results_queue: Any) -> tuple[str, int, Any] | None:
+    """Waits briefly for the next worker message, returning None when none arrived.
+
+    Args:
+        results_queue: The shared queue the workers report their claims and results to.
+
+    Returns:
+        The ``(kind, index, payload)`` message, or None when the wait elapsed or the queue became unreadable.
+    """
+    try:
+        return cast("tuple[str, int, Any]", results_queue.get(timeout=_RESULT_POLL_SECONDS))
+    except Empty:
+        return None
+    except (OSError, EOFError, ConnectionError):
+        # The manager died under the parent. Treating it as no-message lets the loop fall through to the liveness
+        # check, which ends the run with the workers' exit codes rather than with a queue traceback.
+        return None
+
+
+def _exit_for_claim(exits: tuple[WorkerExit, ...], pid: int | None) -> WorkerExit | None:
+    """Finds the exit record of the worker that claimed a task.
+
+    Args:
+        exits: The exit records of every supervised worker.
+        pid: The process identifier the claim carried, or None when the task was never claimed.
+
+    Returns:
+        The matching exit record, or None when the task was never claimed or its worker is unknown.
+    """
+    if pid is None:
+        return None
+    return next((exit_record for exit_record in exits if exit_record.pid == pid), None)
+
+
+def _lost_task_result(task: tuple[Any, ...], exit_record: WorkerExit | None) -> tuple[str, int, str]:
+    """Builds the result for a task whose worker ended without reporting one.
+
+    Args:
+        task: The work item, whose first element is the video path every extraction task leads with.
+        exit_record: The exit record of the worker that claimed the task, or None when nothing claimed it.
+
+    Returns:
+        The ``(video_path, frames_written, status)`` triple carrying an ``error:`` status naming how the task was lost.
+    """
+    video = str(task[0])
+    if exit_record is None:
+        reason = "no worker reported a result for this video, so it was never processed."
+    elif exit_record.interrupted:
+        reason = "the frame-extraction worker was stopped before it finished this video."
+    elif not exit_record.crashed:
+        reason = "the frame-extraction worker exited without reporting a result for this video."
+    else:
+        reason = describe_process_exit(
+            exit_code=exit_record.exit_code,
+            pid=exit_record.pid,
+            role="frame-extraction worker",
+            memory_remedy=_EXTRACTION_MEMORY_REMEDY,
+        )
+    return video, 0, f"error:{reason} No frames were written for this video."

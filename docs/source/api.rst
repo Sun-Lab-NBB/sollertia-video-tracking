@@ -8,6 +8,7 @@ Frame Extraction
    :members:
    :undoc-members:
    :show-inheritance:
+   :exclude-members: PipelineFailedError, PipelineInterruptedError
 
 Model Training
 ==============
@@ -25,7 +26,7 @@ Video Inference
    :members:
    :undoc-members:
    :show-inheritance:
-   :exclude-members: Toggle, AmpMode, DeviceType
+   :exclude-members: Toggle, AmpMode, DeviceType, PipelineFailedError, PipelineInterruptedError
 
 Command-Line Interface
 ======================
@@ -42,8 +43,8 @@ Hardware Detection and Setup
    :undoc-members:
    :show-inheritance:
 
-Progress Reporting
-==================
+Progress Reporting and Worker Supervision
+=========================================
 
 .. automodule:: sollertia_video_tracking.reporting
    :members:

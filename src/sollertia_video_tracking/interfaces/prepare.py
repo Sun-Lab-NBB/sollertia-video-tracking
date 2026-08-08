@@ -33,7 +33,14 @@ prefix, so the prefix identifies them without loading each candidate's configura
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     help="The path to the DeepLabCut project's config.yaml to create the training shuffle for.",
 )
-@click.option("-s", "--shuffle", default=1, show_default=True, help="The shuffle index to create.")
+@click.option(
+    "-s",
+    "--shuffle",
+    type=click.IntRange(min=1),
+    default=1,
+    show_default=True,
+    help="The shuffle index to create.",
+)
 @click.option(
     "-n",
     "--network",
@@ -85,7 +92,7 @@ prefix, so the prefix identifies them without loading each candidate's configura
 @click.option(
     "-fs",
     "--from-shuffle",
-    type=int,
+    type=click.IntRange(min=1),
     default=None,
     help="An existing shuffle whose train/test split to reuse instead of drawing a fresh one.",
 )

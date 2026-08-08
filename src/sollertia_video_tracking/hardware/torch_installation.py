@@ -35,6 +35,9 @@ _DEFAULT_TORCH_REQUIREMENT: str = "torch>=2,<3"
 _NUMPY_REQUIREMENT: str = "numpy>=1.26,<2"
 """The numpy requirement pinned alongside torch, since DeepLabCut supports the 1.x series only."""
 
+_SUPPORTED_TORCH_MAJOR: int = 2
+"""The only torch major version this library supports, which an explicitly requested version must also carry."""
+
 _VERIFICATION_SCRIPT: str = (
     "import torch; print(torch.__version__); print(torch.version.cuda or ''); print(int(torch.cuda.is_available()))"
 )
@@ -48,6 +51,9 @@ _NVIDIA_SMI_TIMEOUT: float = 30.0
 
 _VERIFICATION_TIMEOUT: float = 300.0
 """The seconds to wait for the post-install verification, which pays the full torch import cost."""
+
+_TORCH_VERSION_PATTERN: re.Pattern[str] = re.compile(r"^\d+(\.\d+)*([a-z]+\d+)?(\+[0-9a-z.]+)?$")
+"""The shape an explicitly requested torch version must take, such as ``2.9.1`` or ``2.9.1+cu126``."""
 
 _CUDA_VERSION_PATTERN: re.Pattern[str] = re.compile(r"CUDA(?: UMD)? Version\s*:\s*(\d+)\.(\d+)")
 """Matches the CUDA version in both the nvidia-smi query report and the header of its summary table."""
@@ -167,8 +173,8 @@ def install_cuda_torch(
         cuda_version: The CUDA version to resolve the wheel variant from, written as ``12.6`` or ``cu126``, or None to
             read it from nvidia-smi. A version PyTorch publishes no variant for resolves to the newest variant below
             it.
-        index_url: The wheel index to install from, which bypasses both the driver query and the variant resolution,
-            or None to derive the index from the resolved variant.
+        index_url: The wheel index to install from, which bypasses the wheel-variant resolution, or None to derive the
+            index from the resolved variant.
         torch_version: The exact torch version to install, or None to install the newest version the wheel index
             carries within the range this library supports. An older variant carries only older torch versions, so an
             exact version that variant never shipped fails the installation.
@@ -180,10 +186,15 @@ def install_cuda_torch(
         The summary describing the resolved build, the resolved commands, and what the call changed.
 
     Raises:
-        ValueError: If the requested CUDA version is not a recognizable version, or if uv is requested while it is
-            absent from the system path.
+        ValueError: If the requested CUDA version is not a recognizable version, if the requested torch version is
+            malformed, carries a non-integer segment before its first dot, or falls outside the supported major
+            series, or if uv is requested while it is absent from the system path.
         RuntimeError: If an executed uninstall or install command fails.
     """
+    # Validates the requested version before anything is inspected or resolved, so a version this library cannot run
+    # is rejected even when the environment's current build would otherwise short-circuit the installation.
+    if torch_version is not None:
+        _validate_torch_version(torch_version)
     gpu_names, driver_cuda = _query_nvidia_driver()
     resolved_index = index_url
     variant: str | None = None
@@ -316,6 +327,34 @@ def _summarize_environment(
         replaced_packages=packages,
         commands=commands,
     )
+
+
+def _validate_torch_version(torch_version: str) -> None:
+    """Rejects an explicitly requested torch version the pinned DeepLabCut release cannot run against.
+
+    An explicit version bypasses the default requirement range, so a version outside the supported major series would
+    otherwise uninstall the environment's torch and install a build DeepLabCut cannot import, reporting success.
+
+    Args:
+        torch_version: The exact torch version requested.
+
+    Raises:
+        ValueError: If the version is malformed, if the segment before its first dot is not a plain integer, or if it
+            carries an unsupported major version.
+    """
+    if _TORCH_VERSION_PATTERN.match(torch_version) is None:
+        message = (
+            f"Unable to install the requested torch version. Expected a dotted version such as '2.9.1', but got "
+            f"'{torch_version}'."
+        )
+        raise ValueError(message)
+    major = int(torch_version.split(".", maxsplit=1)[0])
+    if major != _SUPPORTED_TORCH_MAJOR:
+        message = (
+            f"Unable to install torch {torch_version}. This library supports the torch {_SUPPORTED_TORCH_MAJOR}.x "
+            f"series only, because the pinned DeepLabCut release is built against it, but got major version {major}."
+        )
+        raise ValueError(message)
 
 
 def _query_nvidia_driver() -> tuple[tuple[str, ...], tuple[int, int] | None]:

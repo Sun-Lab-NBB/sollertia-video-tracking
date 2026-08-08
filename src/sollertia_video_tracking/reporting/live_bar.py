@@ -67,9 +67,10 @@ class LiveBar(Thread):
         _preparing_label: The text shown during warm-up, before the first unit of work is reported.
         _width: The width, in characters, of the rendered bar.
         _stream: The output stream the bar renders to.
-        _is_tty: True when the output stream is an interactive terminal.
+        _is_tty: Determines whether the output stream is an interactive terminal.
         _start_time: The monotonic timestamp captured when the renderer was constructed.
         _last_render_time: The monotonic timestamp of the most recent render.
+        _last_progress_time: The monotonic timestamp of the most recent real progress message.
         _spinner_index: The number of lines drawn so far, used to advance the liveness spinner on each drawn line.
     """
 
@@ -97,11 +98,20 @@ class LiveBar(Thread):
         self._is_tty = self._stream.isatty()
         self._start_time = time.monotonic()
         self._last_render_time = 0.0
+        self._last_progress_time = self._start_time
         self._spinner_index = 0
 
     def __repr__(self) -> str:
         """Returns a string representation of the LiveBar instance."""
         return f"LiveBar(width={self._width}, is_tty={self._is_tty})"
+
+    def seconds_since_progress(self) -> float:
+        """Returns the seconds elapsed since the producers last reported real progress.
+
+        A rendered line proves only that the renderer is alive, so the elapsed silence measured here is what
+        distinguishes a run whose workers are still working from one whose workers have wedged.
+        """
+        return time.monotonic() - self._last_progress_time
 
     def run(self) -> None:
         """Consumes queue messages and re-renders the bar until the shared ``stop`` sentinel arrives."""
@@ -115,6 +125,9 @@ class LiveBar(Thread):
                     continue
                 if message == _STOP_SENTINEL:
                     break
+                # Only a real message counts as progress. The stop sentinel marks the end of the run rather than work
+                # having been done, so it must not refresh the staleness the supervisor watches.
+                self._last_progress_time = time.monotonic()
                 force = self._ingest(message)
                 self._render(force=force)
             self._render(force=True)
