@@ -102,18 +102,19 @@ run `slvt COMMAND --help`, before constructing a non-trivial invocation, and ver
 
 ### Request-to-command mapping
 
-| The user asks for                                                      | Command to run                            |
-|------------------------------------------------------------------------|-------------------------------------------|
-| "get frames to label", "bootstrap the training set", "grow the set"    | `slvt extract --config-path CFG frames`   |
-| "label frames", "create the project", "correct these", "merge/advance" | `slvt gui` (workstation only)             |
-| "make a shuffle", "try a different architecture", "new split"          | `slvt prepare --config-path CFG`          |
-| "train the model", "fit the shuffle", "resume from a snapshot"         | `slvt train --config-path CFG`            |
-| "how accurate is it?", "evaluate the model"                            | `slvt train` (evaluates by default)       |
-| "analyze the videos", "get predictions", "deploy the model"            | `slvt infer --config-path CFG --videos V` |
-| "find what the model got wrong", "next refinement round"               | `slvt extract --config-path CFG outliers` |
-| "what still needs labeling?", "how much is left?"                      | `slvt extract --config-path CFG pending`  |
-| "start completely over", "I changed the crop"                          | `slvt extract --config-path CFG purge`    |
-| "torch runs on the CPU", "enable CUDA", "the GPU is not being used"    | `slvt cuda`                               |
+| The user asks for                                                      | Command to run                                      |
+|------------------------------------------------------------------------|-----------------------------------------------------|
+| "get frames to label", "bootstrap the training set", "grow the set"    | `slvt extract --config-path CFG frames`             |
+| "label frames", "create the project", "correct these", "merge/advance" | `slvt gui` (workstation only)                       |
+| "make a shuffle", "try a different architecture", "new split"          | `slvt prepare --config-path CFG`                    |
+| "train the model", "fit the shuffle", "resume from a snapshot"         | `slvt train --config-path CFG`                      |
+| "how accurate is it?", "evaluate the model"                            | `slvt train` (evaluates by default)                 |
+| "analyze the videos", "get predictions", "deploy the model"            | `slvt infer --config-path CFG --videos V`           |
+| "analyze this folder", "a directory of recordings"                     | `slvt infer --config-path CFG --videos-directory D` |
+| "find what the model got wrong", "next refinement round"               | `slvt extract --config-path CFG outliers`           |
+| "what still needs labeling?", "how much is left?"                      | `slvt extract --config-path CFG pending`            |
+| "start completely over", "I changed the crop"                          | `slvt extract --config-path CFG purge`              |
+| "torch runs on the CPU", "enable CUDA", "the GPU is not being used"    | `slvt cuda`                                         |
 
 Two requests have no `slvt` command and MUST be routed to `slvt gui`: **project creation with its `video_sets`
 registration**, and **DeepLabCut's dataset merge** that advances the project's `iteration`. There is no other way to
@@ -159,13 +160,18 @@ placeholder row the GUI wrote for an opened-but-untouched frame still reads as p
 - **`--gpus` is one comma-separated value, and `--videos` repeats.** Use `--gpus 0,1`, never `--gpus 0 --gpus 1`.
   Conversely `--videos a.mp4 --videos b.mp4`, never `--videos a.mp4,b.mp4`. The `infer` command's `--output` and
   `--crop` follow `--videos`: one value applies to every video, or give one per `--videos` file. Multiple values
-  without an explicit `--videos` is a `UsageError`, because whole-project video order is not user-controlled.
+  without an explicit `--videos` is a `UsageError`, because a discovered video order is not user-controlled.
 - **Omitting `--videos` scopes the run to the whole project, which is not the same as processing every video.** For
   `purge` and `pending` it is every project video. For `frames` the project is only the candidate pool that the
   default `--total-frames 200` budget samples from, so pass `--total-frames -1` to top up every eligible video
   instead. For `outliers` it is every registered video the current model has analyzed, and for `infer` every
-  registered video still present on disk. There is no additive "do everything" flag, and an omitted `--videos` on
-  `purge` is a project-wide deletion.
+  registered video still present on disk unless `--videos-directory` scopes it to one directory. There is no additive
+  "do everything" flag, and an omitted `--videos` on `purge` is a project-wide deletion.
+- **`slvt infer` takes one directory through `--videos-directory`, scanned one level deep.** It keeps the extensions
+  DeepLabCut recognizes, skips subdirectories and DeepLabCut's `_labeled` and `_full` companion files, and cannot
+  combine with `--videos`. Its discovered order takes a single `--crop` and a single `--output`, as a whole-project run
+  does. A directory holding no video files is a `UsageError`, so reach for it when a request names a folder rather than
+  listing each recording through `--videos`.
 - **Prefer long forms in every command shown to the user.** Short forms may be multi-letter (`-cfg`, `-ctpw`), and the
   same short flag means different things across commands. `-o` is `--overwrite` on `extract`/`prepare` but `--output`
   on `infer`. `-cb` is `--comparison-bodyparts` on `outliers` but `--cudnn-benchmark` on `train`/`infer`. `-d` is

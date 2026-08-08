@@ -131,6 +131,82 @@ def test_resolve_project_videos_no_video_sets(monkeypatch):
     assert pipeline.resolve_project_videos("cfg") == []
 
 
+# discover_directory_videos
+def test_discover_directory_videos_sorted_and_filtered(tmp_path):
+    """Verifies that discover_directory_videos returns the directory's videos sorted, dropping non-video files."""
+    for name in ("b.mp4", "a.avi", "notes.txt", "c.MOV"):
+        (tmp_path / name).write_bytes(b"")
+    assert pipeline.discover_directory_videos(tmp_path) == [tmp_path / "a.avi", tmp_path / "b.mp4", tmp_path / "c.MOV"]
+
+
+def test_discover_directory_videos_skips_deeplabcut_companions(tmp_path):
+    """Verifies that discover_directory_videos drops the labeled and full companion videos DeepLabCut writes."""
+    (tmp_path / "session.mp4").write_bytes(b"")
+    (tmp_path / "session_labeled.mp4").write_bytes(b"")
+    (tmp_path / "session_full.mp4").write_bytes(b"")
+    assert pipeline.discover_directory_videos(tmp_path) == [tmp_path / "session.mp4"]
+
+
+def test_discover_directory_videos_is_not_recursive(tmp_path):
+    """Verifies that discover_directory_videos ignores videos stored in subdirectories."""
+    (tmp_path / "top.mp4").write_bytes(b"")
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "deep.mp4").write_bytes(b"")
+    assert pipeline.discover_directory_videos(tmp_path) == [tmp_path / "top.mp4"]
+
+
+def test_discover_directory_videos_empty_directory(tmp_path):
+    """Verifies that discover_directory_videos returns an empty list for a directory holding no videos."""
+    assert pipeline.discover_directory_videos(tmp_path) == []
+
+
+# ensure_unique_prediction_targets
+def test_ensure_unique_prediction_targets_accepts_distinct_stems(tmp_path):
+    """Verifies that ensure_unique_prediction_targets accepts videos whose stems differ."""
+    pipeline.ensure_unique_prediction_targets(videos=[tmp_path / "a.mp4", tmp_path / "b.mp4"], destinations=None)
+
+
+def test_ensure_unique_prediction_targets_rejects_shared_stem_in_one_directory(tmp_path):
+    """Verifies that ensure_unique_prediction_targets rejects same-stem videos that write beside each other."""
+    with pytest.raises(ValueError, match="share the file-name stem"):
+        pipeline.ensure_unique_prediction_targets(
+            videos=[tmp_path / "session.mp4", tmp_path / "session.avi"], destinations=None
+        )
+
+
+def test_ensure_unique_prediction_targets_accepts_shared_stem_in_separate_directories(tmp_path):
+    """Verifies that ensure_unique_prediction_targets accepts same-stem videos stored in separate directories."""
+    first = tmp_path / "one"
+    second = tmp_path / "two"
+    first.mkdir()
+    second.mkdir()
+    pipeline.ensure_unique_prediction_targets(videos=[first / "session.mp4", second / "session.mp4"], destinations=None)
+
+
+def test_ensure_unique_prediction_targets_rejects_shared_stem_funneled_into_one_output(tmp_path):
+    """Verifies that ensure_unique_prediction_targets rejects same-stem videos sharing one --output directory."""
+    first = tmp_path / "one"
+    second = tmp_path / "two"
+    first.mkdir()
+    second.mkdir()
+    with pytest.raises(ValueError, match="share the file-name stem"):
+        pipeline.ensure_unique_prediction_targets(
+            videos=[first / "session.mp4", second / "session.mp4"], destinations=[tmp_path, tmp_path]
+        )
+
+
+def test_ensure_unique_prediction_targets_accepts_shared_stem_with_separate_outputs(tmp_path):
+    """Verifies that ensure_unique_prediction_targets accepts same-stem videos given separate --output directories."""
+    first = tmp_path / "one"
+    second = tmp_path / "two"
+    first.mkdir()
+    second.mkdir()
+    pipeline.ensure_unique_prediction_targets(
+        videos=[tmp_path / "session.mp4", tmp_path / "session.avi"], destinations=[first, second]
+    )
+
+
 # detect_fixed_input_size
 def test_detect_fixed_empty_videos():
     """Verifies that detect_fixed_input_size reports not-fixed for an empty video list."""

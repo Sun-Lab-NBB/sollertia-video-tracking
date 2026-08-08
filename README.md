@@ -384,15 +384,20 @@ The following command trains shuffle 1 across two GPUs for 200 epochs:
 `slvt infer` analyzes videos with a shuffle's trained model. Each worker pulls work from a shared queue, so the load is
 balanced across the run's slots, and the same command runs on multiple GPUs, one GPU, or a CPU-only machine.
 
-Providing `--videos` once per file analyzes those videos. Omitting it analyzes every video registered in the project's
-config.yaml that still exists on disk, silently skipping registered paths whose files are missing. The videos need not
-be registered in the project at all, which is what allows de-novo recordings to be analyzed. `--crop` takes an
-`x1,x2,y1,y2` rectangle that replaces the project's configured crop, given once to apply one rectangle to every video or
-once per `--videos` file for per-video crops.
+Providing `--videos` once per file analyzes those videos. `--videos-directory` instead analyzes every video stored
+directly inside one directory, scanned a single level deep for the extensions DeepLabCut recognizes, leaving
+subdirectories and the `_labeled` and `_full` companion files DeepLabCut writes beside an analyzed video out of the
+selection. Providing neither analyzes every video registered in the project's config.yaml that still exists on disk,
+silently skipping registered paths whose files are missing. The videos need not be registered in the project at all,
+which is what allows de-novo recordings to be analyzed. `--crop` takes an `x1,x2,y1,y2` rectangle that replaces the
+project's configured crop, given once to apply one rectangle to every video or once per `--videos` file for per-video
+crops. A directory run and a whole-project run both discover their video order rather than taking it from the operator,
+so each accepts a single `--crop` and a single `--output`.
 
 Predictions are written as DeepLabCut's native `.h5` files. By default, each lands beside its own video, which is where
 `slvt extract outliers` reads them, so the default keeps the refinement loop wired together. `--output` redirects them,
-taking either one shared directory or one directory per `--videos` file.
+taking either one shared directory or one directory per `--videos` file. A prediction file is named after its video's
+stem, so a run whose videos share a stem and resolve to one output directory is rejected before any analysis starts.
 
 `--device` defaults to using every visible GPU, with `--gpus` narrowing the selection. `--gpu-processes` sets the worker
 processes per GPU, defaulting to one process (one video) per GPU. Most GPUs saturate with 1 or 2 workers: raising it
@@ -410,6 +415,9 @@ machines, `--cpu-workers` and `--cpu-threads-per-worker` divide the cores into d
 The following command analyzes two de-novo videos at a chosen crop rectangle, writing each video's predictions beside
 it:
 `slvt infer --config-path /path/to/project/config.yaml --videos video1.mp4 --videos video2.mp4 --crop 0,550,0,550`
+
+The following command analyzes every video held in one directory at that same rectangle:
+`slvt infer --config-path /path/to/project/config.yaml --videos-directory /path/to/videos --crop 0,550,0,550`
 
 ***Note,*** conditional-top-down models run at stock precision, as the acceleration path does not apply to them.
 
