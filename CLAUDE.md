@@ -261,7 +261,7 @@ for the Sollertia platform through the single `slvt` command-line interface.
 | `src/sollertia_video_tracking/inference/`        | Multi-device analysis orchestration and the runner-builder patch  |
 | `src/sollertia_video_tracking/hardware/`         | Shared device and AMP detection, and the CUDA torch installer     |
 | `src/sollertia_video_tracking/reporting/`        | `LiveBar`, failure types, process exits, and `ProcessSupervisor`  |
-| `tests/`                                         | Pytest suite, one `<subpackage>_<module>_test.py` per module      |
+| `tests/`                                         | Pytest suite mirrors `src/`, one `<subpackage>/<module>_test.py`  |
 | `docs/`                                          | Sphinx API documentation sources built by `tox -e docs`           |
 
 ### Architecture
