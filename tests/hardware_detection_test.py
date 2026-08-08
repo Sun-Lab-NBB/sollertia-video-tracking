@@ -9,6 +9,7 @@ from sollertia_video_tracking.hardware.detection import (
     AmpMode,
     DeviceType,
     warn,
+    toggle_label,
     resolve_toggle,
     precision_label,
     supports_ampere,
@@ -326,3 +327,10 @@ def test_precision_label_strips_torch_prefix() -> None:
     """Verifies that a concrete autocast dtype is labeled by its bare dtype name."""
     assert precision_label(torch.bfloat16) == "bfloat16"
     assert precision_label(torch.float16) == "float16"
+
+
+# toggle_label
+def test_toggle_label_maps_the_resolved_decision_to_on_or_off() -> None:
+    """Verifies that a resolved boolean optimization is labeled as on or off for display."""
+    assert toggle_label(enabled=True) == "on"
+    assert toggle_label(enabled=False) == "off"

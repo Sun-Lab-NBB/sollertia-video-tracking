@@ -92,6 +92,18 @@ def resolve_toggle(value: Toggle, *, auto: bool) -> bool:
     return auto
 
 
+def toggle_label(*, enabled: bool) -> str:
+    """Returns the display label for a resolved boolean optimization.
+
+    Args:
+        enabled: Determines whether the optimization the label describes is enabled.
+
+    Returns:
+        The label ``"on"`` or ``"off"``.
+    """
+    return "on" if enabled else "off"
+
+
 def resolve_target_device(
     device: str | None, gpus: tuple[int, ...] | None, *, role: str, default_all_gpus: bool = True
 ) -> tuple[str, tuple[int, ...]]:

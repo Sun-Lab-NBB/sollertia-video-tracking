@@ -6,6 +6,7 @@ from .detection import (
     AmpMode,
     DeviceType,
     warn,
+    toggle_label,
     resolve_toggle,
     precision_label,
     supports_ampere,
@@ -35,5 +36,6 @@ __all__ = [
     "resolve_target_device",
     "resolve_toggle",
     "supports_ampere",
+    "toggle_label",
     "warn",
 ]

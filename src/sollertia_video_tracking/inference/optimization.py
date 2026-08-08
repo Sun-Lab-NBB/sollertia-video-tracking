@@ -12,6 +12,7 @@ from ..hardware import (
     AmpMode,
     DeviceType,
     warn,
+    toggle_label,
     resolve_toggle,
     precision_label,
     supports_ampere,
@@ -130,6 +131,31 @@ class InferenceProfile:
         ]
         suffix = f", {'+'.join(extras)}" if extras else ""
         return f"{where} | {precision} | workers={self.total_workers}{suffix}"
+
+    def report_rows(self) -> tuple[tuple[str, str], ...]:
+        """Builds the resolved state of every optimization as label and value pairs for the pre-flight report.
+
+        Returns:
+            One ``(label, value)`` pair per optimization, in display order, each labeled by the setting it reports.
+            The parallelism rows describe the selected device, so a CUDA run reports its per-device process count
+            while a CPU run reports its worker and thread budget.
+        """
+        device = f"{self.device} {list(self.gpus)}" if self.on_cuda else self.device
+        rows = [
+            ("device", device),
+            ("precision", precision_label(self.amp_dtype)),
+            ("tf32", toggle_label(enabled=self.tf32)),
+            ("cudnn.benchmark", toggle_label(enabled=self.cudnn_benchmark)),
+            ("channels_last", toggle_label(enabled=self.channels_last)),
+            ("torch.compile", toggle_label(enabled=self.torch_compile)),
+        ]
+        if self.on_cuda:
+            rows.append(("gpu processes", f"{self.gpu_processes} per gpu"))
+        elif self.device == "cpu":
+            rows.append(("cpu workers", str(self.cpu_workers)))
+            rows.append(("cpu threads", f"{self.cpu_threads_per_worker} per worker"))
+        rows.append(("chunks", f"{self.chunks} per video"))
+        return tuple(rows)
 
 
 def resolve_inference_profile(

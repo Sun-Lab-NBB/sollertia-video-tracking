@@ -36,6 +36,7 @@ from ..reporting import (
     is_interrupt_signal,
     describe_process_exit,
     enable_native_crash_dumps,
+    write_optimization_report,
 )
 from .evaluation import EvaluationSummary, evaluate_trained_model, resolve_evaluation_batch_size
 from .optimization import MultiGpuStrategy, OptimizationProfile, apply_runtime_optimizations
@@ -179,7 +180,10 @@ def train_model(
         Training always runs in spawned worker processes, so this process keeps its own standard output and error.
         That leaves it able to report a worker that dies without unwinding, such as one killed by the out-of-memory
         killer or by a crash inside a native backend. The workers divert their console into the training log while the
-        monitor owns the terminal, and a failure report quotes the tail of that log.
+        monitor owns the terminal, and a failure report quotes the tail of that log. Before the monitor takes the
+        terminal, the profile's resolved optimizations are written to the standard error stream, so a run redirected to
+        a log opens with the configuration it ran under. That report is written whatever ``display_progress`` is set
+        to, because it records the run rather than tracking its progress.
 
     Args:
         config: The path of the DeepLabCut project configuration file.
@@ -269,6 +273,8 @@ def train_model(
             f"detector alone."
         )
         raise ValueError(message)
+
+    write_optimization_report(title="training optimizations", rows=profile.report_rows())
 
     progress_queue: Any = None
     monitor: TrainingMonitor | None = None

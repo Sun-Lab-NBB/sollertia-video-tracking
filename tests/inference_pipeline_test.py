@@ -885,6 +885,32 @@ def test_run_inference_interrupt_reports_the_completed_predictions(monkeypatch, 
     assert str(tmp_path / "a.h5") in report
 
 
+def test_run_inference_emits_the_optimization_report(monkeypatch, tmp_path, capsys):
+    """Verifies that the whole-video path writes the resolved-optimization report, so deleting the call fails here."""
+    monkeypatch.setattr(pipeline, "read_config", lambda _c: {"cropping": False})
+    _install_capture(monkeypatch, lambda _p: _FakeCapture(frames=30))
+    monkeypatch.setattr(pipeline, "_build_slots", lambda **_kwargs: [pipeline._Slot(device="cpu", cores=(0,))])
+
+    def worker(_slot, launch):
+        while True:
+            item = launch.video_queue.get()
+            if item is None:
+                break
+            launch.results_queue.put(("result", item[0], (f"{tmp_path}/pred.h5", None)))
+
+    _install_fake_mp(monkeypatch, worker)
+    pipeline.run_inference(
+        config=str(tmp_path / "cfg.yaml"),
+        videos=[tmp_path / "a.mp4"],
+        profile=_make_profile(),
+        display_progress=False,
+    )
+    report = capsys.readouterr().err
+    assert "-- inference optimizations " in report
+    assert "cudnn.benchmark" in report
+    assert "workers" in report
+
+
 # _partition_frame_ranges
 def test_partition_single_chunk_covers_whole_video():
     """Verifies that a single chunk yields one range spanning the whole video."""
@@ -1053,6 +1079,32 @@ def test_collect_chunk_results_reports_failed_chunk(monkeypatch):
     )
     assert outputs == {1: Path("b.h5")}
     assert failures == [("a.mp4", "RuntimeError: boom")]
+
+
+# _report_inference_optimizations
+def test_optimization_report_states_the_spawned_worker_count_and_the_ceiling_it_missed(capsys):
+    """Verifies that a run with less work than its worker ceiling reports the spawned count and the configured one."""
+    profile = _make_profile(device="cuda", gpus=(0, 1), gpu_processes=2, chunks=4, cpu_workers=0)
+    pipeline._report_inference_optimizations(profile=profile, worker_count=4)
+    assert "4 of 16 configured" in capsys.readouterr().err
+
+
+def test_optimization_report_states_a_bare_count_when_every_worker_spawns(capsys):
+    """Verifies that a run reaching its ceiling reports the count alone, with no redundant configured figure."""
+    profile = _make_profile(cpu_workers=2, chunks=1)
+    pipeline._report_inference_optimizations(profile=profile, worker_count=2)
+    report = capsys.readouterr().err
+    assert "workers" in report
+    assert "configured" not in report
+
+
+def test_optimization_report_appends_the_worker_row_after_the_resolved_state(capsys):
+    """Verifies that the run-scoped worker count is reported after the optimizations the profile resolved."""
+    profile = _make_profile(cpu_workers=1, chunks=1)
+    pipeline._report_inference_optimizations(profile=profile, worker_count=1)
+    body = [line for line in capsys.readouterr().err.split("\n") if line and not line.startswith("-")]
+    assert body[0].split()[0] == "device"
+    assert body[-1].split()[0] == "workers"
 
 
 # Shared fakes and helpers

@@ -85,6 +85,48 @@ def test_describe_cpu_without_extras() -> None:
     assert profile.describe() == "CPU | fp32 | workers=0 pin=False"
 
 
+# OptimizationProfile.report_rows
+def test_report_rows_cuda_lists_every_optimization_with_its_resolved_value() -> None:
+    """Verifies that a CUDA profile reports each optimization's resolved state, naming the selected GPU indices."""
+    profile = _profile(
+        device="cuda",
+        gpus=(0, 1),
+        multi_gpu_strategy=MultiGpuStrategy.DDP,
+        amp_dtype=torch.bfloat16,
+        tf32=True,
+        cudnn_benchmark=True,
+        torch_compile=True,
+        dataloader_workers=4,
+        pin_memory=True,
+    )
+    assert profile.report_rows() == (
+        ("device", "cuda [0, 1]"),
+        ("strategy", "ddp"),
+        ("processes", "2"),
+        ("precision", "bfloat16"),
+        ("tf32", "on"),
+        ("cudnn.benchmark", "on"),
+        ("torch.compile", "on"),
+        ("dataloader workers", "4"),
+        ("pin_memory", "on"),
+    )
+
+
+def test_report_rows_adds_the_gradient_scaler_only_for_float16() -> None:
+    """Verifies that the gradient-scaler row appears for the one precision that requires a scaler and not otherwise."""
+    scaled = _profile(device="cuda", gpus=(0,), amp_dtype=torch.float16, use_gradient_scaler=True)
+    assert ("gradient scaler", "on") in scaled.report_rows()
+    unscaled = _profile(device="cuda", gpus=(0,), amp_dtype=torch.bfloat16, use_gradient_scaler=False)
+    assert [label for label, _value in unscaled.report_rows() if label == "gradient scaler"] == []
+
+
+def test_report_rows_adds_the_thread_count_only_for_cpu_training() -> None:
+    """Verifies that the restored intra-op thread count is reported for CPU training alone."""
+    assert ("cpu threads", "14") in _profile(device="cpu", cpu_threads=14).report_rows()
+    labels = [label for label, _value in _profile(device="cuda", gpus=(0,), cpu_threads=None).report_rows()]
+    assert "cpu threads" not in labels
+
+
 # _resolve_multi_gpu
 def test_resolve_multi_gpu_single_gpu_auto_is_silent_single(capsys: pytest.CaptureFixture[str]) -> None:
     """Verifies that a single GPU under the auto request resolves to single-device training without a warning."""

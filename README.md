@@ -47,6 +47,7 @@ ___
   optimization as an explicit flag whose automatic default never runs slower than stock DeepLabCut.
 - Analyzes videos across multiple GPUs, a single GPU, or the CPU, distributing whole videos across worker slots and
   writing DeepLabCut's native predictions, with crop overrides that analyze de-novo videos.
+- Reports the resolved state of every optimization before a training or inference run takes the terminal.
 - Renders a single aggregate progress bar across all workers, falling back to periodic greppable progress lines when its
   output is redirected to a log.
 - Apache 2.0 License.
@@ -330,6 +331,29 @@ required to pair mixed precision with multi-GPU training.
 accelerations. Two automatic defaults are deliberately conservative. `--cudnn-benchmark` engages only when the shuffle's
 training transform is detected to feed one fixed input size, since it disables deterministic training and can slow
 variable-size augmentation. `--compile-model` stays off because its one-time warm-up cost may not amortize.
+
+`slvt train` and `slvt infer` both write the resolved state of every optimization to the standard error stream before
+the progress display takes the terminal, so a run's configuration is visible while there is still time to stop it and
+start over:
+
+```text
+-- training optimizations -------
+  device              cuda [0, 1]
+  strategy            ddp
+  processes           2
+  precision           bfloat16
+  tf32                on
+  cudnn.benchmark     off
+  torch.compile       off
+  dataloader workers  8
+  pin_memory          on
+---------------------------------
+```
+
+`slvt infer` writes the same block under an `inference optimizations` title, carrying `channels_last`, the per-GPU
+process count, `chunks`, and the worker count the run actually spawns in place of the training-only rows. The report is
+written whether or not `--no-progress` is passed, so a run redirected to a log opens with the configuration it ran
+under.
 
 The run's length and checkpointing are set by `--epochs`, `--batch-size`, `--save-epochs`, and `--maximum-snapshots`.
 Omitting each uses the model's default. `--snapshot-path` resumes from an existing snapshot, and
