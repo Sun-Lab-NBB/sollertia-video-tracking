@@ -7,6 +7,7 @@ dependencies:
   - cachetools=7.1.7=pyhd8ed1ab_0
   - colorama=0.4.6=pyhd8ed1ab_1
   - distlib=0.4.3=pyhcf101f3_0
+  - filelock=3.32.2=pyhd8ed1ab_0
   - importlib-metadata=9.0.0=pyhcf101f3_0
   - libexpat=2.8.1=hac47afa_1
   - libffi=3.5.2=h3d046cb_0
@@ -34,6 +35,8 @@ dependencies:
   - vc=14.5=ha367084_41
   - vc14_runtime=14.51.36247=habf1de7_41
   - vcomp14=14.51.36247=habf1de7_41
+  - virtualenv=21.7.2=pyhcf101f3_0
+  - wheel=0.47.0=pyhd8ed1ab_0
   - zipp=4.1.0=pyhcf101f3_0
   - pip:
     - Bottleneck==1.6.0
@@ -235,8 +238,8 @@ dependencies:
     - tifffile==2026.3.3
     - timm==1.0.28
     - toolz==1.1.0
-    - torch==2.13.0+cu130
-    - torchvision==0.28.0+cu130
+    - torch==2.13.0+cu132
+    - torchvision==0.28.0+cu132
     - tornado==6.5.8
     - tox==4.20.0
     - tox-uv==1.13.1
