@@ -25,7 +25,7 @@ dependencies:
   - openssl=3.6.3=h35e630c_1
   - packaging=26.3=pyhc364b38_0
   - pip=26.2.1=pyh8b19718_0
-  - platformdirs=4.11.0=pyhcf101f3_0
+  - platformdirs=4.11.1=pyhcf101f3_0
   - pluggy=1.6.0=pyhf9edf01_1
   - pyproject-api=1.11.0=pyhcf101f3_0
   - python=3.12.13=hd63d673_0_cpython
@@ -35,7 +35,7 @@ dependencies:
   - tomli-w=1.2.0=pyhd8ed1ab_0
   - typing_extensions=4.16.0=pyhcf101f3_0
   - tzdata=2026c=h151e31d_0
-  - uv=0.12.2=h2112641_0
+  - uv=0.12.3=h2112641_0
   - zstd=1.5.7=hb78ec9c_6
   - pip:
     - Bottleneck==1.6.0
@@ -62,7 +62,7 @@ dependencies:
     - annotated-types==0.8.0
     - anyio==4.14.2
     - app-model==0.5.1
-    - ast_serialize==0.7.0
+    - ast_serialize==0.8.0
     - asttokens==3.0.2
     - ataraxis-automation==9.0.2
     - attrs==26.1.0
@@ -115,7 +115,7 @@ dependencies:
     - hsluv==5.0.4
     - httpcore==1.0.9
     - httpx==0.28.1
-    - huggingface_hub==1.26.1
+    - huggingface_hub==1.27.0
     - humanize==4.16.0
     - hyperframe==6.1.0
     - id==1.6.1
@@ -142,7 +142,7 @@ dependencies:
     - keyring==25.7.0
     - kiwisolver==1.5.0
     - lazy-loader==0.5
-    - librt==0.14.0
+    - librt==0.15.0
     - llvmlite==0.48.0
     - locket==1.0.0
     - magicgui==0.10.2
@@ -209,7 +209,7 @@ dependencies:
     - pycparser==3.0
     - pydantic==2.13.4
     - pydantic-extra-types==2.11.1
-    - pydantic-settings==2.14.2
+    - pydantic-settings==2.15.0
     - pydantic_core==2.46.4
     - pyparsing==3.3.2
     - pyproject_hooks==1.2.0
@@ -230,7 +230,7 @@ dependencies:
     - roman-numerals==4.1.0
     - rpds-py==2026.6.3
     - ruamel.yaml==0.19.1
-    - ruff==0.16.1
+    - ruff==0.16.2
     - safetensors==0.8.0
     - scikit-image==0.26.0
     - scikit-learn==1.9.0
@@ -241,7 +241,7 @@ dependencies:
     - six==1.17.0
     - slicerator==1.1.0
     - snowballstemmer==3.1.1
-    - soupsieve==2.9.1
+    - soupsieve==2.9.2
     - sphinx-autodoc-typehints==3.13.2
     - sphinx-basic-ng==1.0.0b2
     - sphinx-click==6.2.0
@@ -262,7 +262,7 @@ dependencies:
     - toolz==1.1.0
     - torch==2.13.0
     - torchvision==0.28.0
-    - tornado==6.5.7
+    - tornado==6.5.8
     - tox==4.20.0
     - tox-uv==1.13.1
     - tqdm==4.70.0
@@ -275,7 +275,7 @@ dependencies:
     - typing-inspection==0.4.2
     - tzdata==2026.3
     - urllib3==2.7.0
-    - uv==0.12.2
+    - uv==0.12.3
     - virtualenv==20.35.4
     - vispy==0.16.2
     - wcwidth==0.8.2
