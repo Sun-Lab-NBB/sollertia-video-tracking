@@ -33,6 +33,9 @@ from sollertia_video_tracking.frame_extraction.utilities import (
     prune_empty_labeled_data_directories,
 )
 
+# Windows defines no SIGKILL, so the number POSIX assigns it is spelled out rather than read off the signal module.
+_SIGKILL = 9
+
 
 # Dataclasses and their properties
 def test_purge_summary_count_properties():
@@ -492,7 +495,7 @@ def test_run_supervised_tasks_waits_while_a_quiet_worker_is_still_alive(monkeypa
 # _describe_lost_supervised_task
 def test_lost_task_report_names_the_exit_status_of_the_worker_that_claimed_it():
     """Verifies that a lost supervised task is explained by its own worker's exit status."""
-    exit_record = WorkerExit(name="0", pid=4242, exit_code=-signal.SIGKILL, signal_name="SIGKILL")
+    exit_record = WorkerExit(name="0", pid=4242, exit_code=-_SIGKILL, signal_name="SIGKILL")
 
     report = utilities._describe_lost_supervised_task(
         task=("video.mp4", 3),
@@ -1036,7 +1039,7 @@ class _FakeProcess:
         except SystemExit:
             # A worker that dies without unwinding reports a signal exit code, exactly as a real spawned process does,
             # so a test raises SystemExit inside its worker to simulate that death.
-            self.exitcode = -signal.SIGKILL
+            self.exitcode = -_SIGKILL
         else:
             self.exitcode = 0
 

@@ -25,6 +25,9 @@ from sollertia_video_tracking.inference import pipeline
 from sollertia_video_tracking.reporting import WorkerExit
 from sollertia_video_tracking.inference.optimization import InferenceProfile
 
+# Windows defines no SIGKILL, so the number POSIX assigns it is spelled out rather than read off the signal module.
+_SIGKILL = 9
+
 
 def _make_profile(**overrides):
     """Builds an InferenceProfile with sensible CPU defaults, overriding only the fields a test cares about."""
@@ -485,7 +488,7 @@ def test_collect_results_classifies_the_death_of_the_worker_that_claimed_the_vid
     results_queue.put(("claim", 0, 4242))
     video_paths = [Path("a.mp4")]
     exits = (
-        WorkerExit(name="cuda:0", pid=4242, exit_code=-signal.SIGKILL, signal_name="SIGKILL"),
+        WorkerExit(name="cuda:0", pid=4242, exit_code=-_SIGKILL, signal_name="SIGKILL"),
         WorkerExit(name="cuda:1", pid=4243, exit_code=0, signal_name=None),
     )
     outputs, failures = pipeline._collect_results(results_queue=results_queue, video_paths=video_paths, exits=exits)

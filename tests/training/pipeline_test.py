@@ -9,6 +9,7 @@ GPU, network, or long-running training.
 """
 
 import os
+import sys
 import types
 import signal
 import socket
@@ -50,6 +51,12 @@ from sollertia_video_tracking.training.pipeline import (
     _build_pose_or_detector_model,
 )
 from sollertia_video_tracking.training.optimization import MultiGpuStrategy, OptimizationProfile
+
+# Windows defines no SIGKILL, so the number POSIX assigns it is spelled out rather than read off the signal module.
+_SIGKILL = 9
+
+# The signal each host names outside the interrupt and native-crash sets, which Windows numbers differently.
+_UNCLASSIFIED_SIGNAL = signal.SIGBREAK if sys.platform == "win32" else signal.SIGHUP
 
 # Shared helpers and fakes
 
@@ -926,7 +933,7 @@ def test_train_model_raises_a_report_naming_the_log_on_failure(monkeypatch, tmp_
         model_folder=tmp_path,
     )
 
-    killed = _exited("SIGKILL", -signal.SIGKILL)
+    killed = _exited("SIGKILL", -_SIGKILL)
 
     def failing_worker(*_args, **_kwargs):
         raise killed
@@ -1134,14 +1141,14 @@ def test_is_operator_interrupt_classification():
     assert _is_operator_interrupt(KeyboardInterrupt()) is True
     assert _is_operator_interrupt(_exited("SIGINT", -signal.SIGINT)) is True
     assert _is_operator_interrupt(_exited("SIGTERM", -signal.SIGTERM)) is True
-    assert _is_operator_interrupt(_exited("SIGKILL", -signal.SIGKILL)) is False
+    assert _is_operator_interrupt(_exited("SIGKILL", -_SIGKILL)) is False
     assert _is_operator_interrupt(_exited("SIGSEGV", -signal.SIGSEGV)) is False
     assert _is_operator_interrupt(RuntimeError("boom")) is False
 
 
 def test_describe_worker_failure_classifies_each_end_of_a_worker():
     """Verifies that each failure class is named exactly, with a shell status on the signal deaths."""
-    killed = _describe_worker_failure(_exited("SIGKILL", -signal.SIGKILL))
+    killed = _describe_worker_failure(_exited("SIGKILL", -_SIGKILL))
     assert "SIGKILL" in killed
     assert "shell status 137" in killed
     assert "out-of-memory killer" in killed
@@ -1162,9 +1169,9 @@ def test_describe_worker_failure_classifies_each_end_of_a_worker():
 
 def test_describe_worker_failure_names_an_unclassified_signal():
     """Verifies that a signal outside the interrupt and native-crash sets is still named with its shell status."""
-    described = _describe_worker_failure(_exited("SIGHUP", -signal.SIGHUP))
-    assert "SIGHUP" in described
-    assert f"shell status {128 + signal.SIGHUP}" in described
+    described = _describe_worker_failure(_exited(_UNCLASSIFIED_SIGNAL.name, -_UNCLASSIFIED_SIGNAL))
+    assert _UNCLASSIFIED_SIGNAL.name in described
+    assert f"shell status {128 + _UNCLASSIFIED_SIGNAL}" in described
 
 
 def test_format_training_failure_quotes_the_log_tail(tmp_path):
@@ -1207,7 +1214,7 @@ def test_format_training_failure_embeds_the_child_traceback_instead_of_the_tail(
 def test_format_training_failure_states_that_the_log_is_empty(tmp_path):
     """Verifies that a worker that died before logging anything is reported as such rather than with empty markers."""
     report = _format_training_failure(
-        _exited("SIGKILL", -signal.SIGKILL),
+        _exited("SIGKILL", -_SIGKILL),
         config=tmp_path / "config.yaml",
         shuffle=1,
         model_folder=tmp_path,

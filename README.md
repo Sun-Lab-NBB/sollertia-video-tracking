@@ -193,9 +193,9 @@ the run with status 1. Stopping a run with Ctrl-C exits with status 130 and repo
 
 The torch distribution published for Windows carries no CUDA support, so a stock install there runs training and
 inference on the CPU. `slvt cuda` repairs that. It reads the CUDA version the local NVIDIA driver runs, resolves the
-newest PyTorch build that version supports, and replaces the installed torch, torchvision, and torchaudio distributions
-with it. The replacement runs through uv where it is available and through pip otherwise, and it targets the environment
-this library is installed into rather than whichever environment happens to be active.
+newest PyTorch build that version supports, and replaces the installed torch and torchvision distributions with it.
+The replacement runs through uv where it is available and through pip otherwise, and it targets the environment this
+library is installed into rather than whichever environment happens to be active.
 
 The command reports the driver it found, the build it resolved, and the commands it would run, changing nothing until
 `--yes` is given: `slvt cuda`

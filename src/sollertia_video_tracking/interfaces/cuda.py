@@ -66,11 +66,11 @@ def cuda_command(
 
     The torch distribution published for Windows carries no CUDA support, so a stock install there runs training and
     inference on the CPU. This reads the CUDA version the local driver runs, resolves the newest PyTorch build that
-    version supports, and replaces the installed torch, torchvision, and torchaudio distributions with it. The
-    replacement runs through uv where it is available and through pip otherwise, and it targets the environment this
-    library is installed into rather than whichever environment happens to be active. The command reports what it
-    would run and changes nothing until ``--yes`` is given. A build that already targets CUDA and reaches the local
-    GPUs is left alone unless ``--force`` is given.
+    version supports, and replaces the installed torch and torchvision distributions with it. The replacement runs
+    through uv where it is available and through pip otherwise, and it targets the environment this library is
+    installed into rather than whichever environment happens to be active. The command reports what it would run and
+    changes nothing until ``--yes`` is given. A build that already targets CUDA and reaches the local GPUs is left
+    alone unless ``--force`` is given.
     """
     try:
         summary = install_cuda_torch(

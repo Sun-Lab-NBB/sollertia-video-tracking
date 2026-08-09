@@ -2,6 +2,7 @@ from pathlib import Path
 
 _INTERRUPT_SIGNALS: frozenset[str]
 _NATIVE_CRASH_SIGNALS: frozenset[str]
+_POSIX_SIGNAL_NAMES: dict[int, str]
 _SHELL_SIGNAL_STATUS_BASE: int
 
 class PipelineFailedError(RuntimeError): ...

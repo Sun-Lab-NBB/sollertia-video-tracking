@@ -2,7 +2,8 @@
 
 import sys
 import shutil
-from typing import Any
+from typing import Any, Self
+from urllib import request
 from importlib import metadata
 import subprocess
 from dataclasses import dataclass
@@ -30,6 +31,24 @@ _QUERY_REPORT: str = """
 _HEADER_REPORT: str = "| NVIDIA-SMI 550.54.14    Driver Version: 550.54.14    CUDA Version: 12.4    |\n"
 """The header line older driver generations print in place of a query-report CUDA version."""
 
+_PUBLISHED_VARIANTS: tuple[tuple[int, int], ...] = (
+    (11, 8),
+    (12, 1),
+    (12, 4),
+    (12, 6),
+    (12, 8),
+    (12, 9),
+    (13, 0),
+    (13, 2),
+)
+"""The wheel variants the faked index publishes, so resolution does not depend on the live index."""
+
+_INDEX_LISTING: str = (
+    '<a href="cpu/">cpu</a>\n<a href="cu92/">cu92</a>\n<a href="cu118/">cu118</a>\n'
+    '<a href="cu130/">cu130</a>\n<a href="cu132/">cu132</a>\n<a href="rocm7.2/">rocm7.2</a>\n'
+)
+"""A trimmed wheel index listing carrying supported variants, an unsupported one, and non-CUDA directories."""
+
 
 @dataclass
 class _Completed:
@@ -38,6 +57,24 @@ class _Completed:
     returncode: int = 0
     stdout: str = ""
     stderr: str = ""
+
+
+@dataclass
+class _Response:
+    """Stands in for the wheel index response the variant reader opens as a context manager."""
+
+    payload: bytes = b""
+
+    def __enter__(self) -> Self:
+        """Returns this response as the managed resource."""
+        return self
+
+    def __exit__(self, *_arguments: object) -> None:
+        """Releases the managed resource, which holds nothing to close."""
+
+    def read(self) -> bytes:
+        """Returns the listing payload."""
+        return self.payload
 
 
 def _summary(**overrides: Any) -> TorchInstallationSummary:
@@ -69,6 +106,11 @@ def _fake_torch(monkeypatch: pytest.MonkeyPatch, version: str, cuda: str | None,
 def _fake_driver(monkeypatch: pytest.MonkeyPatch, gpus: tuple[str, ...], cuda: tuple[int, int] | None) -> None:
     """Fakes the nvidia-smi query so the installer sees a deterministic driver."""
     monkeypatch.setattr(torch_installation, "_query_nvidia_driver", lambda: (gpus, cuda))
+
+
+def _fake_index(monkeypatch: pytest.MonkeyPatch, variants: tuple[tuple[int, int], ...] = _PUBLISHED_VARIANTS) -> None:
+    """Fakes the wheel index read, so the resolver sees a deterministic set of published variants."""
+    monkeypatch.setattr(torch_installation, "_read_published_variants", lambda: variants)
 
 
 def _record_runs(monkeypatch: pytest.MonkeyPatch, verification: _Completed) -> list[tuple[str, ...]]:
@@ -153,6 +195,7 @@ def test_install_reports_a_prehistoric_driver_as_unavailable(monkeypatch: pytest
     """Verifies that a driver older than every published wheel variant is reported as unavailable."""
     _fake_driver(monkeypatch=monkeypatch, gpus=("NVIDIA GTX 1080",), cuda=(10, 2))
     _fake_torch(monkeypatch=monkeypatch, version="2.13.0", cuda=None, available=False)
+    _fake_index(monkeypatch=monkeypatch)
     monkeypatch.setattr(sys, "platform", "linux")
 
     summary = install_cuda_torch()
@@ -161,16 +204,33 @@ def test_install_reports_a_prehistoric_driver_as_unavailable(monkeypatch: pytest
     assert "CUDA 10.2 predates CUDA 11.8" in summary.unavailable_reason
 
 
+def test_install_aborts_when_the_wheel_index_cannot_be_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies that an unreadable wheel index aborts the run instead of resolving against a stale variant list."""
+    _fake_driver(monkeypatch=monkeypatch, gpus=("NVIDIA RTX A6000",), cuda=(13, 3))
+    _fake_torch(monkeypatch=monkeypatch, version="2.13.0", cuda=None, available=False)
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    def _raise(*_args: Any, **_kwargs: Any) -> _Response:
+        message = "the index did not answer"
+        raise OSError(message)
+
+    monkeypatch.setattr(request, "urlopen", _raise)
+
+    with pytest.raises(RuntimeError, match="must be readable to list the published variants"):
+        install_cuda_torch()
+
+
 def test_install_leaves_an_enabled_build_alone(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies that a build already targeting CUDA and reaching the GPUs is left untouched."""
     _fake_driver(monkeypatch=monkeypatch, gpus=("NVIDIA RTX A6000",), cuda=(13, 3))
     _fake_torch(monkeypatch=monkeypatch, version="2.13.0+cu130", cuda="13.0", available=True)
+    _fake_index(monkeypatch=monkeypatch)
     monkeypatch.setattr(sys, "platform", "linux")
 
     summary = install_cuda_torch()
 
     assert summary.status == TorchInstallationStatus.ENABLED
-    assert summary.wheel_variant == "cu130"
+    assert summary.wheel_variant == "cu132"
     assert summary.commands == ()
 
 
@@ -178,6 +238,7 @@ def test_install_previews_the_resolved_replacement(monkeypatch: pytest.MonkeyPat
     """Verifies that a dry run resolves the variant and the commands without running anything."""
     _fake_driver(monkeypatch=monkeypatch, gpus=("NVIDIA RTX A6000",), cuda=(12, 7))
     _fake_torch(monkeypatch=monkeypatch, version="2.13.0", cuda=None, available=False)
+    _fake_index(monkeypatch=monkeypatch)
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(torch_installation, "_is_installed", lambda _distribution_name: True)
     monkeypatch.setattr(shutil, "which", lambda _command: None)
@@ -188,9 +249,9 @@ def test_install_previews_the_resolved_replacement(monkeypatch: pytest.MonkeyPat
     assert summary.status == TorchInstallationStatus.PREVIEWED
     assert summary.wheel_variant == "cu126"
     assert summary.index_url == "https://download.pytorch.org/whl/cu126"
-    assert summary.replaced_packages == ("torch", "torchvision", "torchaudio")
+    assert summary.replaced_packages == ("torch", "torchvision")
     uninstall, install = summary.commands
-    assert uninstall == (sys.executable, "-m", "pip", "uninstall", "--yes", "torch", "torchvision", "torchaudio")
+    assert uninstall == (sys.executable, "-m", "pip", "uninstall", "--yes", "torch", "torchvision")
     assert install == (
         sys.executable,
         "-m",
@@ -200,7 +261,6 @@ def test_install_previews_the_resolved_replacement(monkeypatch: pytest.MonkeyPat
         "https://download.pytorch.org/whl/cu126",
         "torch>=2,<3",
         "torchvision",
-        "torchaudio",
         "numpy>=1.26,<2",
     )
 
@@ -209,6 +269,7 @@ def test_install_honors_an_explicit_cuda_version_and_torch_version(monkeypatch: 
     """Verifies that the explicit CUDA and torch versions override the driver query and the default requirement."""
     _fake_driver(monkeypatch=monkeypatch, gpus=("NVIDIA RTX A6000",), cuda=(13, 3))
     _fake_torch(monkeypatch=monkeypatch, version="2.13.0", cuda=None, available=False)
+    _fake_index(monkeypatch=monkeypatch)
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(torch_installation, "_is_installed", lambda _distribution_name: False)
     monkeypatch.setattr(shutil, "which", lambda _command: "/usr/bin/uv")
@@ -248,6 +309,7 @@ def test_install_replaces_an_unreachable_cuda_build(monkeypatch: pytest.MonkeyPa
     """Verifies that a CUDA build the driver cannot run is replaced without the force flag."""
     _fake_driver(monkeypatch=monkeypatch, gpus=("NVIDIA RTX A6000",), cuda=(12, 4))
     _fake_torch(monkeypatch=monkeypatch, version="2.13.0+cu130", cuda="13.0", available=False)
+    _fake_index(monkeypatch=monkeypatch)
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(torch_installation, "_is_installed", lambda _distribution_name: False)
     monkeypatch.setattr(shutil, "which", lambda _command: None)
@@ -262,6 +324,7 @@ def test_install_replaces_an_enabled_build_when_forced(monkeypatch: pytest.Monke
     """Verifies that the force flag replaces a build that already reaches the GPUs."""
     _fake_driver(monkeypatch=monkeypatch, gpus=("NVIDIA RTX A6000",), cuda=(13, 3))
     _fake_torch(monkeypatch=monkeypatch, version="2.13.0+cu130", cuda="13.0", available=True)
+    _fake_index(monkeypatch=monkeypatch)
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(torch_installation, "_is_installed", lambda _distribution_name: False)
     monkeypatch.setattr(shutil, "which", lambda _command: None)
@@ -280,6 +343,7 @@ def test_install_runs_and_verifies_the_replacement(
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(torch_installation, "_is_installed", lambda _distribution_name: False)
     monkeypatch.setattr(shutil, "which", lambda _command: None)
+    _fake_index(monkeypatch=monkeypatch)
     calls = _record_runs(monkeypatch=monkeypatch, verification=_Completed(stdout="2.13.0+cu130\n13.0\n1\n"))
 
     summary = install_cuda_torch(execute=True)
@@ -302,6 +366,7 @@ def test_install_raises_when_a_command_fails(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(torch_installation, "_is_installed", lambda _distribution_name: False)
     monkeypatch.setattr(shutil, "which", lambda _command: None)
+    _fake_index(monkeypatch=monkeypatch)
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: _Completed(returncode=2))
 
     with pytest.raises(RuntimeError, match="exited with code 2"):
@@ -421,7 +486,8 @@ def test_parse_cuda_version_rejects_unrecognized_requests(requested: str) -> Non
 @pytest.mark.parametrize(
     "cuda_version,expected",
     [
-        ((13, 3), "cu130"),
+        ((13, 3), "cu132"),
+        ((13, 2), "cu132"),
         ((13, 0), "cu130"),
         ((12, 9), "cu129"),
         ((12, 7), "cu126"),
@@ -429,14 +495,56 @@ def test_parse_cuda_version_rejects_unrecognized_requests(requested: str) -> Non
         ((11, 8), "cu118"),
     ],
 )
-def test_resolve_wheel_variant_takes_the_newest_supported_variant(cuda_version: tuple[int, int], expected: str) -> None:
+def test_resolve_wheel_variant_takes_the_newest_supported_variant(
+    monkeypatch: pytest.MonkeyPatch, cuda_version: tuple[int, int], expected: str
+) -> None:
     """Verifies that the newest variant at or below the reported version wins."""
+    _fake_index(monkeypatch=monkeypatch)
+
     assert torch_installation._resolve_wheel_variant(cuda_version) == expected
 
 
-def test_resolve_wheel_variant_reports_nothing_below_the_oldest_variant() -> None:
+def test_resolve_wheel_variant_takes_a_variant_the_fallback_omits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies that a variant published after this release resolves without appearing in the fallback tuple."""
+    _fake_index(monkeypatch=monkeypatch, variants=((13, 0), (13, 2), (14, 1)))
+
+    assert torch_installation._resolve_wheel_variant((14, 3)) == "cu141"
+
+
+def test_resolve_wheel_variant_reports_nothing_below_the_oldest_variant(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies that a version older than every published variant resolves to nothing."""
+    _fake_index(monkeypatch=monkeypatch)
+
     assert torch_installation._resolve_wheel_variant((11, 7)) is None
+
+
+# _read_published_variants
+def test_read_published_variants_parses_the_index_listing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies that the listing yields its CUDA variants in ascending order, without the unsupported ones."""
+    monkeypatch.setattr(request, "urlopen", lambda *args, **kwargs: _Response(payload=_INDEX_LISTING.encode()))
+
+    assert torch_installation._read_published_variants() == ((11, 8), (13, 0), (13, 2))
+
+
+def test_read_published_variants_rejects_a_variantless_listing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies that a listing carrying no supported variant is rejected rather than resolving to nothing."""
+    monkeypatch.setattr(request, "urlopen", lambda *args, **kwargs: _Response(payload=b'<a href="cpu/">cpu</a>'))
+
+    with pytest.raises(RuntimeError, match=r"must list a CUDA variant at or above CUDA 11\.8"):
+        torch_installation._read_published_variants()
+
+
+def test_read_published_variants_rejects_an_unreachable_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies that an unreachable index aborts the resolution and names the failure it hit."""
+
+    def _raise(*_args: Any, **_kwargs: Any) -> _Response:
+        message = "the index did not answer"
+        raise OSError(message)
+
+    monkeypatch.setattr(request, "urlopen", _raise)
+
+    with pytest.raises(RuntimeError, match="the index did not answer"):
+        torch_installation._read_published_variants()
 
 
 # _format_cuda_version
