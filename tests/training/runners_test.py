@@ -123,6 +123,9 @@ def _new_detector_runner():
 # build_optimized_training_runner: real end-to-end construction on the CPU
 
 
+# The scaler is built for the cuda device, which torch reports as unavailable on a CPU-only test host. The scaler
+# object under test is still constructed, so the report says nothing about the assertions below it.
+@pytest.mark.filterwarnings("ignore:torch.cuda.amp.GradScaler is enabled, but CUDA is not available:UserWarning")
 def test_build_pose_runner_defaults_prefix_and_gradient_scaler(tmp_path):
     """Verifies that a BOTTOM_UP task builds a pose runner that uses the task-default snapshot prefix."""
     runner = runners.build_optimized_training_runner(
@@ -264,6 +267,9 @@ def test_autocast_context_cpu_device_type_enters():
         assert (a @ b).dtype == torch.bfloat16
 
 
+# Torch reports the disabled autocast on a CPU-only test host. The context still records the cuda device type this
+# test asserts on, so the report says nothing about the assertions below it.
+@pytest.mark.filterwarnings("ignore:CUDA is not available or torch_xla is imported:UserWarning")
 def test_autocast_context_cuda_device_type_resolved():
     """Verifies that a cuda-prefixed device resolves the autocast device type to cuda."""
     runner = _new_pose_runner()

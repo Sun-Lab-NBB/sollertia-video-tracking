@@ -12,6 +12,22 @@ _INTERRUPT_SIGNALS: frozenset[str] = frozenset({"SIGINT", "SIGTERM"})
 _NATIVE_CRASH_SIGNALS: frozenset[str] = frozenset({"SIGSEGV", "SIGABRT", "SIGBUS", "SIGFPE", "SIGILL"})
 """The signal names that end a process on a crash inside a native backend such as CUDA, cuDNN, or OpenCV."""
 
+_POSIX_SIGNAL_NAMES: dict[int, str] = {
+    2: "SIGINT",
+    4: "SIGILL",
+    6: "SIGABRT",
+    8: "SIGFPE",
+    9: "SIGKILL",
+    11: "SIGSEGV",
+    15: "SIGTERM",
+}
+"""The names of the signals these reports classify, keyed by the number every POSIX platform assigns them.
+
+Windows defines no SIGKILL and numbers SIGABRT 22, so its signal enumeration resolves neither POSIX number, which
+leaves the out-of-memory and native-crash classifications unreachable there. The numbers listed here are identical on
+every POSIX platform, so resolving them without the host enumeration is safe. SIGBUS is absent because Linux numbers
+it 7 while the BSD platforms number it 10, leaving the host enumeration as its only correct source."""
+
 _SHELL_SIGNAL_STATUS_BASE: int = 128
 """The offset a shell adds to a signal number when reporting the exit status of a process that a signal ended."""
 
@@ -51,7 +67,7 @@ def signal_name_for_exit_code(exit_code: int) -> str | None:
     try:
         return signal.Signals(-exit_code).name
     except ValueError:
-        return None
+        return _POSIX_SIGNAL_NAMES.get(-exit_code)
 
 
 def is_interrupt_signal(signal_name: str | None) -> bool:

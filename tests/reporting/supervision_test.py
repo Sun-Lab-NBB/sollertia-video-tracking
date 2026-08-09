@@ -14,6 +14,9 @@ from sollertia_video_tracking.reporting import (
     supervision as supervision_module,
 )
 
+# Windows defines no SIGKILL, so the number POSIX assigns it is spelled out rather than read off the signal module.
+_SIGKILL = 9
+
 
 class _StubProcess:
     """Stands in for a spawned worker, ending after a configured number of polls with a configured exit code."""
@@ -54,7 +57,7 @@ class _StubProcess:
 
     def kill(self):
         self.killed = True
-        self.exitcode = -signal.SIGKILL
+        self.exitcode = -_SIGKILL
 
 
 # WorkerExit
@@ -63,7 +66,7 @@ class _StubProcess:
 def test_worker_exit_classifies_its_own_outcome():
     """Verifies that the exit record reports a clean exit, a crash, and a deliberate stop distinctly."""
     clean = WorkerExit(name="a", pid=1, exit_code=0, signal_name=None)
-    crashed = WorkerExit(name="b", pid=2, exit_code=-signal.SIGKILL, signal_name="SIGKILL")
+    crashed = WorkerExit(name="b", pid=2, exit_code=-_SIGKILL, signal_name="SIGKILL")
     stopped = WorkerExit(name="c", pid=3, exit_code=-signal.SIGTERM, signal_name="SIGTERM")
 
     assert clean.crashed is False
@@ -81,7 +84,7 @@ def test_supervise_returns_every_worker_exit_status():
     """Verifies that waiting returns one classified record per worker rather than discarding the exit codes."""
     processes = [
         _StubProcess(exit_code=0),
-        _StubProcess(exit_code=-signal.SIGKILL, polls_until_exit=2),
+        _StubProcess(exit_code=-_SIGKILL, polls_until_exit=2),
         _StubProcess(exit_code=3),
     ]
     supervisor = ProcessSupervisor(processes=processes, names=["a", "b", "c"])

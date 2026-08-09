@@ -4,6 +4,7 @@ import re
 import sys
 from enum import StrEnum
 import shutil
+from urllib import request
 from importlib import metadata
 import subprocess
 from dataclasses import dataclass
@@ -15,19 +16,18 @@ from .detection import warn
 _WHEEL_INDEX_ROOT: str = "https://download.pytorch.org/whl"
 """The root URL of the PyTorch wheel index whose per-CUDA-version subdirectories serve the CUDA builds."""
 
-_CUDA_WHEEL_VARIANTS: tuple[tuple[int, int], ...] = ((11, 8), (12, 1), (12, 4), (12, 6), (12, 8), (12, 9), (13, 0))
-"""The CUDA versions PyTorch publishes a wheel variant for, in ascending order.
+_OLDEST_SUPPORTED_VARIANT: tuple[int, int] = (11, 8)
+"""The oldest CUDA wheel variant this library installs, which is the oldest one carrying torch 2.x builds.
 
-A driver runs every CUDA version at or below the one it reports, so the newest entry that does not exceed the reported
-version is the variant to install. A variant missing from this tuple is reachable only through an explicit CUDA version
-or wheel index, so this tuple gains an entry whenever PyTorch publishes a new variant.
+The wheel index also serves variants predating the supported torch series, so every resolution is floored at this
+version rather than at the oldest variant the index lists.
 """
 
-_TORCH_PACKAGES: tuple[str, ...] = ("torch", "torchvision", "torchaudio")
-"""The torch-family distributions replaced together, since torchvision and torchaudio pin an exact torch version."""
+_TORCH_PACKAGES: tuple[str, ...] = ("torch", "torchvision")
+"""The torch-family distributions replaced together, both of which DeepLabCut needs and which pin each other's version.
 
-_DEFAULT_TORCH_PACKAGES: tuple[str, ...] = ("torch", "torchvision")
-"""The distributions installed when the environment holds none of the torch family, both of which DeepLabCut needs."""
+DeepLabCut requires torch and torchvision alone, so torchaudio is left out of the replacement entirely.
+"""
 
 _DEFAULT_TORCH_REQUIREMENT: str = "torch>=2,<3"
 """The torch requirement installed when no exact version is requested, matching the range this library supports."""
@@ -49,6 +49,9 @@ _VERIFICATION_LINE_COUNT: int = 3
 _NVIDIA_SMI_TIMEOUT: float = 30.0
 """The seconds to wait for an nvidia-smi query before treating the driver as unreadable."""
 
+_WHEEL_INDEX_TIMEOUT: float = 15.0
+"""The seconds to wait for the wheel index listing before resolving against the fallback variants."""
+
 _VERIFICATION_TIMEOUT: float = 300.0
 """The seconds to wait for the post-install verification, which pays the full torch import cost."""
 
@@ -66,6 +69,9 @@ _DOTTED_CUDA_PATTERN: re.Pattern[str] = re.compile(r"^(\d+)\.(\d+)$")
 
 _TAGGED_CUDA_PATTERN: re.Pattern[str] = re.compile(r"^cu(\d{2,})(\d)$")
 """Matches a requested CUDA version written as a wheel-variant tag, whose trailing digit is the minor version."""
+
+_INDEX_VARIANT_PATTERN: re.Pattern[str] = re.compile(r'href="cu(\d+)(\d)/"')
+"""Matches one CUDA wheel-variant directory in the wheel index listing, whose trailing digit is the minor version."""
 
 
 class TorchInstaller(StrEnum):
@@ -189,7 +195,8 @@ def install_cuda_torch(
         ValueError: If the requested CUDA version is not a recognizable version, if the requested torch version is
             malformed, carries a non-integer segment before its first dot, or falls outside the supported major
             series, or if uv is requested while it is absent from the system path.
-        RuntimeError: If an executed uninstall or install command fails.
+        RuntimeError: If the wheel index cannot be read while resolving the variant, or if an executed uninstall or
+            install command fails.
     """
     # Validates the requested version before anything is inspected or resolved, so a version this library cannot run
     # is rejected even when the environment's current build would otherwise short-circuit the installation.
@@ -225,7 +232,7 @@ def install_cuda_torch(
             )
         variant = _resolve_wheel_variant(requested)
         if variant is None:
-            oldest = _format_cuda_version(_CUDA_WHEEL_VARIANTS[0])
+            oldest = _format_cuda_version(_OLDEST_SUPPORTED_VARIANT)
             reason = (
                 f"CUDA {_format_cuda_version(requested)} predates CUDA {oldest}, the oldest version PyTorch still "
                 f"publishes a wheel variant for. Upgrade the NVIDIA driver."
@@ -249,7 +256,7 @@ def install_cuda_torch(
             index=resolved_index,
         )
 
-    packages = tuple(name for name in _TORCH_PACKAGES if _is_installed(name)) or _DEFAULT_TORCH_PACKAGES
+    packages = tuple(name for name in _TORCH_PACKAGES if _is_installed(name)) or _TORCH_PACKAGES
     torch_requirement = f"torch=={torch_version}" if torch_version is not None else _DEFAULT_TORCH_REQUIREMENT
     requirements = (torch_requirement, *(name for name in packages if name != "torch"), _NUMPY_REQUIREMENT)
     uninstall_prefix, install_prefix = _resolve_installer_prefixes(installer)
@@ -449,17 +456,57 @@ def _parse_cuda_version(requested: str) -> tuple[int, int]:
 def _resolve_wheel_variant(cuda_version: tuple[int, int]) -> str | None:
     """Selects the newest published wheel variant the given CUDA version runs.
 
+    Notes:
+        The published variants are read from the wheel index at call time, so a variant PyTorch publishes after this
+        release resolves without a code change.
+
     Args:
         cuda_version: The CUDA version the driver runs, as a major and minor pair.
 
     Returns:
-        The wheel-variant tag, such as ``cu130``, or None when the version predates every published variant.
+        The wheel-variant tag, such as ``cu132``, or None when the version predates every published variant.
+
+    Raises:
+        RuntimeError: If the wheel index cannot be read or lists no supported variant.
     """
-    candidates = [variant for variant in _CUDA_WHEEL_VARIANTS if variant <= cuda_version]
+    candidates = [variant for variant in _read_published_variants() if variant <= cuda_version]
     if not candidates:
         return None
     major, minor = candidates[-1]
     return f"cu{major}{minor}"
+
+
+def _read_published_variants() -> tuple[tuple[int, int], ...]:
+    """Reads the CUDA wheel variants PyTorch currently publishes from the wheel index listing.
+
+    Returns:
+        The published variants at or above the oldest supported one, in ascending order.
+
+    Raises:
+        RuntimeError: If the wheel index cannot be read or lists no supported variant. The index serving the listing
+            also serves the wheels, so a resolution that outlived an unreadable index would fail at the download.
+    """
+    try:
+        # The URL is assembled from a library constant, so it addresses the PyTorch wheel index alone.
+        with request.urlopen(_WHEEL_INDEX_ROOT, timeout=_WHEEL_INDEX_TIMEOUT) as response:
+            listing = response.read().decode("utf-8", errors="replace")
+    except (OSError, ValueError) as error:
+        message = (
+            f"Unable to resolve the CUDA wheel variant. The PyTorch wheel index at '{_WHEEL_INDEX_ROOT}' must be "
+            f"readable to list the published variants, and it also serves the wheels the installation downloads, but "
+            f"reading it failed with: {error}. Name a reachable wheel index explicitly to install from a mirror."
+        )
+        raise RuntimeError(message) from error
+    variants = {(int(match.group(1)), int(match.group(2))) for match in _INDEX_VARIANT_PATTERN.finditer(listing)}
+    supported = tuple(sorted(variant for variant in variants if variant >= _OLDEST_SUPPORTED_VARIANT))
+    if not supported:
+        oldest = _format_cuda_version(_OLDEST_SUPPORTED_VARIANT)
+        message = (
+            f"Unable to resolve the CUDA wheel variant. The PyTorch wheel index at '{_WHEEL_INDEX_ROOT}' must list a "
+            f"CUDA variant at or above CUDA {oldest}, but its listing carries none."
+        )
+        raise RuntimeError(message)
+    return supported
 
 
 def _format_cuda_version(cuda_version: tuple[int, int] | None) -> str | None:

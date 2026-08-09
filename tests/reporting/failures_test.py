@@ -1,5 +1,6 @@
 """Contains tests for the shared failure types and process-exit classification every pipeline reports through."""
 
+import sys
 import signal
 import faulthandler
 
@@ -16,6 +17,12 @@ from sollertia_video_tracking.training.pipeline import TrainingFailedError, Trai
 from sollertia_video_tracking.reporting.failures import signal_name_for_exit_code
 
 _MEMORY_REMEDY = "Lower the batch size, then re-run."
+
+# Windows defines no SIGKILL, so the number POSIX assigns it is spelled out rather than read off the signal module.
+_SIGKILL = 9
+
+# The signal each host names outside the interrupt and native-crash sets, which Windows numbers differently.
+_UNCLASSIFIED_SIGNAL = signal.SIGBREAK if sys.platform == "win32" else signal.SIGHUP
 
 
 # Error types
@@ -34,7 +41,7 @@ def test_training_errors_carry_the_shared_bases():
 
 def test_signal_name_for_exit_code_maps_only_signal_deaths():
     """Verifies that a negated signal number resolves to its name while an ordinary exit code resolves to None."""
-    assert signal_name_for_exit_code(-signal.SIGKILL) == "SIGKILL"
+    assert signal_name_for_exit_code(-_SIGKILL) == "SIGKILL"
     assert signal_name_for_exit_code(-signal.SIGSEGV) == "SIGSEGV"
     assert signal_name_for_exit_code(0) is None
     assert signal_name_for_exit_code(3) is None
@@ -56,10 +63,10 @@ def test_is_interrupt_signal_covers_only_deliberate_stops():
 
 def test_describe_process_exit_reports_the_out_of_memory_killer_with_its_remedy():
     """Verifies that a SIGKILL death names the out-of-memory killer, the shell status, and the caller's remedy."""
-    described = describe_process_exit(-signal.SIGKILL, pid=4242, role="inference worker", memory_remedy=_MEMORY_REMEDY)
+    described = describe_process_exit(-_SIGKILL, pid=4242, role="inference worker", memory_remedy=_MEMORY_REMEDY)
     assert "inference worker (PID 4242)" in described
     assert "SIGKILL" in described
-    assert f"shell status {128 + signal.SIGKILL}" in described
+    assert f"shell status {128 + _SIGKILL}" in described
     assert "out-of-memory killer" in described
     assert _MEMORY_REMEDY in described
 
@@ -80,9 +87,11 @@ def test_describe_process_exit_reports_a_plain_status_and_an_unclassified_signal
     plain = describe_process_exit(3, pid=9, role="training worker", memory_remedy=_MEMORY_REMEDY)
     assert "exited with status 3" in plain
 
-    hung_up = describe_process_exit(-signal.SIGHUP, pid=9, role="training worker", memory_remedy=_MEMORY_REMEDY)
-    assert "SIGHUP" in hung_up
-    assert f"shell status {128 + signal.SIGHUP}" in hung_up
+    unclassified = describe_process_exit(
+        -_UNCLASSIFIED_SIGNAL, pid=9, role="training worker", memory_remedy=_MEMORY_REMEDY
+    )
+    assert _UNCLASSIFIED_SIGNAL.name in unclassified
+    assert f"shell status {128 + _UNCLASSIFIED_SIGNAL}" in unclassified
 
 
 def test_describe_process_exit_omits_an_unknown_process_identifier():
