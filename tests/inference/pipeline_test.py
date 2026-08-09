@@ -621,10 +621,7 @@ def test_resolve_output_none(tmp_path):
 
 # _run_inference_worker
 def test_run_inference_worker_drains_queue_and_pins_cores(monkeypatch):
-    """Verifies that _run_inference_worker pins its cores and drains every work item from the queue.
-
-    macOS exposes no CPU-affinity API, so its workers drain the queue but run unpinned.
-    """
+    """Verifies that _run_inference_worker pins its cores and drains every work item from the queue."""
     affinity_calls = []
 
     class _FakePsutilProcess:
@@ -632,6 +629,9 @@ def test_run_inference_worker_drains_queue_and_pins_cores(monkeypatch):
             affinity_calls.append(cores)
 
     monkeypatch.setattr(pipeline.psutil, "Process", _FakePsutilProcess)
+    # The platform is forced so the pinning is exercised on every host. Left to the host, a macOS run would take the
+    # unpinned branch and verify nothing.
+    monkeypatch.setattr(sys, "platform", "linux")
     applied = []
     monkeypatch.setattr(pipeline, "apply_runtime_optimizations", applied.append)
     monkeypatch.setattr(pipeline, "patch_dlc_runner_builders", lambda _profile: contextlib.nullcontext())
@@ -647,9 +647,36 @@ def test_run_inference_worker_drains_queue_and_pins_cores(monkeypatch):
 
     pipeline._run_inference_worker(slot=slot, launch=launch)
 
-    assert affinity_calls == ([] if sys.platform == "darwin" else [[0, 1]])
+    assert affinity_calls == [[0, 1]]
     assert len(applied) == 1
     assert analyzed == [(0, "/v0.mp4", 10, None, None), (1, "/v1.mp4", 10, None, None)]
+
+
+def test_run_inference_worker_leaves_macos_workers_unpinned(monkeypatch):
+    """Verifies that a macOS worker drains its queue unpinned, since the platform exposes no CPU-affinity API."""
+    affinity_calls = []
+
+    class _FakePsutilProcess:
+        def cpu_affinity(self, cores):
+            affinity_calls.append(cores)
+
+    monkeypatch.setattr(pipeline.psutil, "Process", _FakePsutilProcess)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(pipeline, "apply_runtime_optimizations", lambda _profile: None)
+    monkeypatch.setattr(pipeline, "patch_dlc_runner_builders", lambda _profile: contextlib.nullcontext())
+    analyzed = []
+    monkeypatch.setattr(pipeline, "_analyze_one_video", lambda item, **_kwargs: analyzed.append(item))
+
+    video_queue = _FakeQueue()
+    video_queue.put((0, "/v0.mp4", 10, None, None))
+    video_queue.put(None)
+    launch = _make_launch(video_queue=video_queue)
+    slot = pipeline._Slot(device="cpu", cores=(0, 1))
+
+    pipeline._run_inference_worker(slot=slot, launch=launch)
+
+    assert affinity_calls == []
+    assert analyzed == [(0, "/v0.mp4", 10, None, None)]
 
 
 def test_run_inference_worker_no_cores_skips_affinity(monkeypatch):
@@ -684,6 +711,8 @@ def test_run_inference_worker_tolerates_affinity_failure(monkeypatch):
             raise OSError(message)
 
     monkeypatch.setattr(pipeline.psutil, "Process", _FakePsutilProcess)
+    # The platform is forced so the raising stub is reached, since the macOS branch would never call it.
+    monkeypatch.setattr(sys, "platform", "linux")
     applied = []
     monkeypatch.setattr(pipeline, "apply_runtime_optimizations", applied.append)
     monkeypatch.setattr(pipeline, "patch_dlc_runner_builders", lambda _profile: contextlib.nullcontext())
@@ -1203,10 +1232,7 @@ def test_build_analysis_plan_prefers_an_explicit_batch_size(monkeypatch, tmp_pat
 
 # _run_chunk_worker
 def test_run_chunk_worker_builds_one_runner_and_drains_every_chunk(monkeypatch):
-    """Verifies that a chunk worker pins its cores, builds its runner once, and analyzes every chunk it pulls.
-
-    macOS exposes no CPU-affinity API, so its workers drain the queue but run unpinned.
-    """
+    """Verifies that a chunk worker pins its cores, builds its runner once, and analyzes every chunk it pulls."""
     affinity_calls = []
 
     class _FakePsutilProcess:
@@ -1214,6 +1240,9 @@ def test_run_chunk_worker_builds_one_runner_and_drains_every_chunk(monkeypatch):
             affinity_calls.append(cores)
 
     monkeypatch.setattr(pipeline.psutil, "Process", _FakePsutilProcess)
+    # The platform is forced so the pinning is exercised on every host. Left to the host, a macOS run would take the
+    # unpinned branch and verify nothing.
+    monkeypatch.setattr(sys, "platform", "linux")
     applied = []
     monkeypatch.setattr(pipeline, "apply_runtime_optimizations", applied.append)
     monkeypatch.setattr(pipeline, "patch_dlc_runner_builders", lambda _profile: contextlib.nullcontext())
@@ -1237,10 +1266,39 @@ def test_run_chunk_worker_builds_one_runner_and_drains_every_chunk(monkeypatch):
 
     pipeline._run_chunk_worker(slot=pipeline._Slot(device="cpu", cores=(2, 3)), launch=launch)
 
-    assert affinity_calls == ([] if sys.platform == "darwin" else [[2, 3]])
+    assert affinity_calls == [[2, 3]]
     assert len(applied) == 1
     # The runner is built once and reused, since rebuilding it per chunk would pay the model load on every range.
     assert analyzed == [("runner 1", 0), ("runner 1", 1)]
+
+
+def test_run_chunk_worker_leaves_macos_workers_unpinned(monkeypatch):
+    """Verifies that a macOS chunk worker drains its queue unpinned, since the platform exposes no CPU-affinity API."""
+    affinity_calls = []
+
+    class _FakePsutilProcess:
+        def cpu_affinity(self, cores):
+            affinity_calls.append(cores)
+
+    monkeypatch.setattr(pipeline.psutil, "Process", _FakePsutilProcess)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(pipeline, "apply_runtime_optimizations", lambda _profile: None)
+    monkeypatch.setattr(pipeline, "patch_dlc_runner_builders", lambda _profile: contextlib.nullcontext())
+    monkeypatch.setattr(pipeline, "_build_pose_runner", lambda **_kwargs: "runner")
+    analyzed = []
+    monkeypatch.setattr(
+        pipeline, "_analyze_one_chunk", lambda runner, item, **_kwargs: analyzed.append((runner, item.task_id))
+    )
+
+    video_queue = _FakeQueue()
+    video_queue.put(_chunk_item(task_id=0, video_index=0, chunk_index=0, video="v.mp4", frame_start=0, frame_end=5))
+    video_queue.put(None)
+    launch = _make_launch(video_queue=video_queue)
+
+    pipeline._run_chunk_worker(slot=pipeline._Slot(device="cpu", cores=(2, 3)), launch=launch)
+
+    assert affinity_calls == []
+    assert analyzed == [("runner", 0)]
 
 
 # _build_pose_runner

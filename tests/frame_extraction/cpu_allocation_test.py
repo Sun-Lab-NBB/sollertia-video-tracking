@@ -108,10 +108,7 @@ def test_oversubscription_raises_value_error() -> None:
 
 
 def test_pin_process_binds_to_its_assigned_core_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verifies that a worker pins its CPU affinity to the core block it was constructed with.
-
-    macOS exposes no CPU-affinity API, so its workers run unpinned.
-    """
+    """Verifies that a worker pins its CPU affinity to the core block it was constructed with."""
     recorded: list[list[int]] = []
 
     class _FakeProcess:
@@ -119,9 +116,27 @@ def test_pin_process_binds_to_its_assigned_core_set(monkeypatch: pytest.MonkeyPa
             recorded.append(cores)
 
     monkeypatch.setattr("sollertia_video_tracking.frame_extraction.cpu_allocation.psutil.Process", _FakeProcess)
+    # The platform is forced so the binding is exercised on every host. Left to the host, a macOS run would take the
+    # unpinned branch and verify nothing.
+    monkeypatch.setattr(sys, "platform", "linux")
     pin_process_to_cores({1, 2, 3})
 
-    assert recorded == ([] if sys.platform == "darwin" else [[1, 2, 3]])
+    assert recorded == [[1, 2, 3]]
+
+
+def test_pin_process_leaves_macos_workers_unpinned(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies that a macOS worker runs unpinned, since the platform exposes no CPU-affinity API."""
+    recorded: list[list[int]] = []
+
+    class _FakeProcess:
+        def cpu_affinity(self, cores: list[int]) -> None:
+            recorded.append(cores)
+
+    monkeypatch.setattr("sollertia_video_tracking.frame_extraction.cpu_allocation.psutil.Process", _FakeProcess)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    pin_process_to_cores({1, 2, 3})
+
+    assert recorded == []
 
 
 def test_pin_process_survives_an_unsupported_platform(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -133,6 +148,8 @@ def test_pin_process_survives_an_unsupported_platform(monkeypatch: pytest.Monkey
             raise NotImplementedError(message)
 
     monkeypatch.setattr("sollertia_video_tracking.frame_extraction.cpu_allocation.psutil.Process", _FakeProcess)
+    # The platform is forced so the raising stub is reached, since the macOS branch would never call it.
+    monkeypatch.setattr(sys, "platform", "linux")
     # Must not raise even though the affinity call is unsupported.
     pin_process_to_cores({0})
 
